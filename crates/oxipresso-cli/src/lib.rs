@@ -164,6 +164,13 @@ impl OxipressoApp {
         let paused = options.stream_mode;
         let mut vfs = VirtualFileSystem::new();
         vfs.set_disk_roots(disk_roots_for(&root));
+        // TeX Live provider: resolve distribution files (format sources,
+        // classes, fonts) through kpsewhich when available, mirroring the
+        // original engine's texlive backend. Editor buffers and disk roots
+        // still take precedence.
+        if let Some(resolver) = oxipresso_engine_xetex::texlive::KpsewhichResolver::auto() {
+            vfs.set_resolver(Box::new(resolver));
+        }
         Self {
             options,
             root,

@@ -6,14 +6,26 @@ use std::{
     path::Path,
 };
 
+pub mod texlive;
+
 use oxipresso_engine_api::{
     ArtifactKind, Diagnostic, DiagnosticSeverity, DocumentArtifact, EngineEvent, EngineInit,
     EngineIo, FileHandle, FileKind, OpenResult, PathId, RestartPolicy, Result, RootDocument,
     TypesettingEngine,
 };
 use oxipresso_engine_xetex_sys::{
-    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_run,
+    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_is_real, oxipresso_xetex_run,
 };
+
+/// How the engine should be driven for one `oxipresso_xetex_run` invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineRun {
+    /// Typeset the root document from the persisted format file.
+    Normal,
+    /// Build the format file in INI mode from the format source document
+    /// (e.g. `xelatex.ini`), mirroring the original engine bootstrap.
+    FormatBootstrap,
+}
 
 #[derive(Debug, Default)]
 pub struct XetexEngine {
@@ -27,16 +39,41 @@ impl XetexEngine {
         Self::default()
     }
 
-    fn run_once(&mut self, root: &RootDocument, io: &mut dyn EngineIo) -> Result<OxiXetexResult> {
+    /// Whether the linked C shim is the real TeXpresso/XeTeX engine
+    /// (opt-in `OXIPRESSO_USE_REAL_XETEX=1` build) or the portable stub.
+    pub fn real_mode() -> bool {
+        unsafe { oxipresso_xetex_is_real() == 1 }
+    }
+
+    fn format_path_text() -> String {
+        env::var("OXIPRESSO_XETEX_FORMAT").unwrap_or_else(|_| "texpresso.fmt".to_string())
+    }
+
+    fn format_source_name() -> String {
+        env::var("OXIPRESSO_XETEX_FORMAT_SOURCE").unwrap_or_else(|_| "xelatex.ini".to_string())
+    }
+
+    fn run_engine<'a>(
+        &mut self,
+        root: &RootDocument,
+        io: &'a mut dyn EngineIo,
+        run: EngineRun,
+    ) -> Result<(OxiXetexResult, CallbackState<'a>)> {
         let root_dir_text = root.root_dir.to_string_lossy();
         let root_dir = CString::new(root_dir_text.as_bytes())
             .map_err(|_| oxipresso_engine_api::EngineError::new("root dir contains NUL byte"))?;
         let root_name = CString::new(root.root_name.as_bytes())
             .map_err(|_| oxipresso_engine_api::EngineError::new("root name contains NUL byte"))?;
-        let format_path_text =
-            env::var("OXIPRESSO_XETEX_FORMAT").unwrap_or_else(|_| "texpresso.fmt".to_string());
+        let format_path_text = Self::format_path_text();
         let format_path = CString::new(format_path_text.as_bytes()).map_err(|_| {
             oxipresso_engine_api::EngineError::new("XeTeX format path contains NUL byte")
+        })?;
+        let primary_name_text = match run {
+            EngineRun::Normal => String::new(),
+            EngineRun::FormatBootstrap => Self::format_source_name(),
+        };
+        let primary_name = CString::new(primary_name_text.as_bytes()).map_err(|_| {
+            oxipresso_engine_api::EngineError::new("primary name contains NUL byte")
         })?;
         let config = OxiXetexConfig {
             root_dir: root_dir.as_ptr(),
@@ -45,8 +82,11 @@ impl XetexEngine {
             root_name_len: root.root_name.len(),
             format_path: format_path.as_ptr(),
             format_path_len: format_path_text.len(),
+            primary_name: primary_name.as_ptr(),
+            primary_name_len: primary_name_text.len(),
             build_date: 0,
             stream_mode: i32::from(root.stream_mode),
+            in_initex_mode: i32::from(run == EngineRun::FormatBootstrap),
         };
         let mut callback_state = CallbackState {
             io,
@@ -70,17 +110,79 @@ impl XetexEngine {
         };
         let mut result = OxiXetexResult::default();
         let status = unsafe { oxipresso_xetex_run(&config, &callbacks, &mut result) };
-        self.diagnostics = std::mem::take(&mut callback_state.diagnostics);
-        self.output = select_output_artifact(&root.root_name, &callback_state.output_bytes);
         if status != 0 {
             return Err(oxipresso_engine_api::EngineError::new(format!(
                 "XeTeX FFI backend failed with status {status}"
             )));
         }
-        if let Some(error) = callback_state.last_error {
+        if let Some(error) = callback_state.last_error.clone() {
+            self.diagnostics = std::mem::take(&mut callback_state.diagnostics);
             return Err(oxipresso_engine_api::EngineError::new(error));
         }
+        Ok((result, callback_state))
+    }
+
+    fn run_once(&mut self, root: &RootDocument, io: &mut dyn EngineIo) -> Result<OxiXetexResult> {
+        let (result, mut state) = self.run_engine(root, io, EngineRun::Normal)?;
+        self.diagnostics = std::mem::take(&mut state.diagnostics);
+        self.output = select_output_artifact(&root.root_name, &state.output_bytes);
         Ok(result)
+    }
+
+    /// Builds the TeX format file in INI mode when it is missing on disk,
+    /// mirroring the original engine `bootstrap_format` flow: run the engine
+    /// with the format source (default `xelatex.ini`) as the primary input and
+    /// persist the produced format dump. Bootstrap is only attempted by the
+    /// real engine; the stub has no INI mode.
+    fn bootstrap_format(
+        &mut self,
+        root: &RootDocument,
+        io: &mut dyn EngineIo,
+        format_path: &str,
+    ) -> Result<()> {
+        let (result, state) = self.run_engine(root, io, EngineRun::FormatBootstrap)?;
+        let format_bytes = state
+            .output_bytes
+            .iter()
+            .find(|(path, bytes)| {
+                let normalized = path.replace('\\', "/");
+                let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+                file_name.ends_with(".fmt") && !bytes.is_empty()
+            })
+            .map(|(_, bytes)| bytes.clone());
+        let spotless = result.status == 0;
+        match (format_bytes, spotless) {
+            (Some(bytes), true) => {
+                if let Some(parent) = Path::new(format_path).parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        oxipresso_engine_api::EngineError::new(format!(
+                            "failed to create format directory: {error}"
+                        ))
+                    })?;
+                }
+                std::fs::write(format_path, bytes).map_err(|error| {
+                    oxipresso_engine_api::EngineError::new(format!(
+                        "failed to persist format file: {error}"
+                    ))
+                })?;
+                Ok(())
+            }
+            (Some(_), false) => {
+                self.diagnostics = state.diagnostics;
+                Err(oxipresso_engine_api::EngineError::new(format!(
+                    "real XeTeX format bootstrap finished with engine history status {}",
+                    result.status
+                )))
+            }
+            (None, _) => {
+                self.diagnostics = state.diagnostics;
+                Err(oxipresso_engine_api::EngineError::new(
+                    "real XeTeX format bootstrap did not produce a format file",
+                ))
+            }
+        }
     }
 }
 
@@ -369,10 +471,19 @@ fn output_name_matches(path: &str, file_name: &str) -> bool {
 
 impl TypesettingEngine for XetexEngine {
     fn initialize(&mut self, root: &RootDocument, io: &mut dyn EngineIo) -> Result<EngineInit> {
+        let format_path = Self::format_path_text();
+        if Self::real_mode() && !Path::new(&format_path).is_file() {
+            self.bootstrap_format(root, io, &format_path)?;
+        }
         self.run_once(root, io)?;
         self.initialized = true;
         Ok(EngineInit {
-            engine_name: "xetex-ffi-stub".to_string(),
+            engine_name: if Self::real_mode() {
+                "xetex-real"
+            } else {
+                "xetex-ffi-stub"
+            }
+            .to_string(),
         })
     }
 
@@ -414,6 +525,11 @@ mod tests {
 
     #[test]
     fn ffi_stub_initializes() {
+        if XetexEngine::real_mode() {
+            // Stub-behavior assertions do not hold when the real engine shim
+            // is linked in; real-mode flows are covered by the opt-in tests.
+            return;
+        }
         let mut engine = XetexEngine::new();
         let mut vfs = VirtualFileSystem::new();
         let init = engine
@@ -438,6 +554,9 @@ mod tests {
 
     #[test]
     fn ffi_stub_uses_engine_io_callbacks() {
+        if XetexEngine::real_mode() {
+            return;
+        }
         let mut engine = XetexEngine::new();
         let mut vfs = VirtualFileSystem::new();
         vfs.open_editor("simple.tex", b"hello".to_vec());
@@ -466,6 +585,64 @@ mod tests {
         assert_eq!(artifact.kind, ArtifactKind::Xdv);
         assert_eq!(artifact.bytes, b"OXIPRESSO-STUB-XDV");
         assert_eq!(artifact.source_name.as_deref(), Some("simple.xdv"));
+    }
+
+    #[test]
+    fn real_xetex_bootstrap_builds_format_and_typesets_simple() {
+        if !XetexEngine::real_mode() {
+            return;
+        }
+        let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
+            return;
+        };
+        let Some(resolver) = texlive::KpsewhichResolver::auto() else {
+            return;
+        };
+        let format_path = env::temp_dir().join("oxipresso-bootstrap-texpresso.fmt");
+        let _ = fs::remove_file(&format_path);
+        // Edition-2024 unsafe: process-global env used to point the engine at
+        // this test's format file. Test binaries run tests in parallel, but no
+        // other test in this binary depends on the value.
+        unsafe {
+            env::set_var("OXIPRESSO_XETEX_FORMAT", &format_path);
+        }
+
+        let mut engine = XetexEngine::new();
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("simple.tex", fs::read(&fixture).unwrap());
+        vfs.set_resolver(Box::new(resolver));
+        let root = RootDocument {
+            root_dir: fixture.parent().unwrap().to_path_buf(),
+            root_name: "simple.tex".to_string(),
+            include_paths: Vec::new(),
+            stream_mode: false,
+        };
+
+        let init = engine
+            .initialize(&root, &mut vfs)
+            .expect("bootstrap + typeset should succeed");
+        assert_eq!(init.engine_name, "xetex-real");
+
+        let format_bytes = fs::read(&format_path)
+            .expect("bootstrap should persist a format file at OXIPRESSO_XETEX_FORMAT");
+        assert!(!format_bytes.is_empty());
+
+        let artifact = engine
+            .output_document()
+            .expect("real engine should produce an artifact for simple.tex");
+        assert!(!artifact.bytes.is_empty());
+        assert!(matches!(
+            artifact.kind,
+            ArtifactKind::Xdv | ArtifactKind::Pdf | ArtifactKind::Dvi
+        ));
+
+        // A second initialization (rebuild) must reuse the persisted format.
+        let mut rebuild_engine = XetexEngine::new();
+        let mut rebuild_vfs = VirtualFileSystem::new();
+        rebuild_vfs.open_editor("simple.tex", fs::read(&fixture).unwrap());
+        rebuild_vfs.set_resolver(Box::new(texlive::KpsewhichResolver::auto().unwrap()));
+        rebuild_engine.initialize(&root, &mut rebuild_vfs).unwrap();
+        assert!(rebuild_engine.output_document().is_some());
     }
 
     #[test]

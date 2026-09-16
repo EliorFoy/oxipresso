@@ -9,8 +9,11 @@ typedef struct {
   size_t root_name_len;
   const char *format_path;
   size_t format_path_len;
+  const char *primary_name;
+  size_t primary_name_len;
   uint64_t build_date;
   int stream_mode;
+  int in_initex_mode;
 } oxi_xetex_config;
 
 typedef struct {
@@ -30,6 +33,10 @@ typedef struct {
   int (*close)(void *userdata, uint32_t handle);
   void (*diagnostic)(void *userdata, int severity, const uint8_t *bytes, size_t len);
 } oxi_xetex_callbacks;
+
+int oxipresso_xetex_is_real(void) {
+  return 0;
+}
 
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,

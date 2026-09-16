@@ -10,8 +10,11 @@ typedef struct {
   size_t root_name_len;
   const char *format_path;
   size_t format_path_len;
+  const char *primary_name;
+  size_t primary_name_len;
   uint64_t build_date;
   int stream_mode;
+  int in_initex_mode;
 } oxi_xetex_config;
 
 typedef struct {
@@ -37,6 +40,7 @@ typedef struct {
   const oxi_xetex_callbacks *callbacks;
   char *root_name;
   char *format_path;
+  char *primary_name;
   char *last_input_path;
   jmp_buf abort_jump;
   int abort_active;
@@ -63,6 +67,42 @@ struct ttbc_diagnostic_t {
 extern int tt_engine_xetex_main(const char *dump_name,
                                 const char *input_file_name,
                                 uint64_t build_date);
+extern int tt_xetex_set_int_variable(const char *var_name, int value);
+
+/* Mirror of the original engine main formats.c: TeX file names commonly omit
+ * extensions, so failed input opens are retried with per-format extensions. */
+static const char *exts_enc[] = {".enc", NULL};
+static const char *exts_font_map[] = {".map", NULL};
+static const char *exts_tfm[] = {".tfm", NULL};
+static const char *exts_vf[] = {".vf", NULL};
+static const char *exts_true_type[] = {".ttf", NULL};
+static const char *exts_type1[] = {".pfb", NULL};
+static const char *exts_open_type[] = {".otf", NULL};
+static const char *exts_tex[] = {".tex", NULL};
+static const char *exts_none[] = {NULL};
+
+static const char **format_extensions(ttbc_file_format format) {
+  switch (format) {
+  case TTBC_FILE_FORMAT_ENC:
+    return exts_enc;
+  case TTBC_FILE_FORMAT_FONT_MAP:
+    return exts_font_map;
+  case TTBC_FILE_FORMAT_TFM:
+    return exts_tfm;
+  case TTBC_FILE_FORMAT_VF:
+    return exts_vf;
+  case TTBC_FILE_FORMAT_TRUE_TYPE:
+    return exts_true_type;
+  case TTBC_FILE_FORMAT_TYPE1:
+    return exts_type1;
+  case TTBC_FILE_FORMAT_OPEN_TYPE:
+    return exts_open_type;
+  case TTBC_FILE_FORMAT_TEX:
+    return exts_tex;
+  default:
+    return exts_none;
+  }
+}
 
 static oxi_session *active_session = NULL;
 static const char *last_error_message = "";
@@ -351,25 +391,65 @@ static rust_input_handle_t input_open_path(const char *path, ttbc_file_format fo
   }
 
   uint32_t handle = 0;
-  if (active_session->callbacks->open_read(active_session->callbacks->userdata,
-                                           requested_path,
-                                           strlen(requested_path),
-                                           (int)format,
-                                           &handle) != 0) {
+  const char *opened_path = requested_path;
+  char *extension_candidate = NULL;
+  int open_result = active_session->callbacks->open_read(active_session->callbacks->userdata,
+                                                         requested_path,
+                                                         strlen(requested_path),
+                                                         (int)format,
+                                                         &handle);
+
+  /* Extension guessing, mirroring the original engine main: retry a failed
+   * missing-file open once per format extension before giving up. Promised
+   * files (result == 2) stay promised and are not retried. */
+  if (open_result == 1) {
+    for (const char **exts = format_extensions(format); *exts; exts++) {
+      size_t base_len = strlen(requested_path);
+      const char *extension = *exts;
+      size_t extension_len = strlen(extension);
+      if (base_len >= extension_len &&
+          memcmp(requested_path + base_len - extension_len, extension, extension_len) == 0) {
+        continue;
+      }
+      char *candidate = (char *)malloc(base_len + extension_len + 1);
+      if (!candidate) {
+        break;
+      }
+      memcpy(candidate, requested_path, base_len);
+      memcpy(candidate + base_len, extension, extension_len + 1);
+      open_result = active_session->callbacks->open_read(active_session->callbacks->userdata,
+                                                         candidate,
+                                                         base_len + extension_len,
+                                                         (int)format,
+                                                         &handle);
+      if (open_result == 0) {
+        free(extension_candidate);
+        extension_candidate = candidate;
+        opened_path = candidate;
+        break;
+      }
+      free(candidate);
+    }
+  }
+
+  if (open_result != 0) {
+    free(extension_candidate);
     return NULL;
   }
 
   ttbc_input_handle_t *input = (ttbc_input_handle_t *)calloc(1, sizeof(ttbc_input_handle_t));
   if (!input) {
     active_session->callbacks->close(active_session->callbacks->userdata, handle);
+    free(extension_candidate);
     return NULL;
   }
   input->handle = handle;
   input->ungot = -1;
-  input->path = copy_slice(requested_path, strlen(requested_path));
+  input->path = copy_slice(opened_path, strlen(opened_path));
 
   free(active_session->last_input_path);
-  active_session->last_input_path = copy_slice(requested_path, strlen(requested_path));
+  active_session->last_input_path = copy_slice(opened_path, strlen(opened_path));
+  free(extension_candidate);
   return input;
 }
 
@@ -379,7 +459,15 @@ rust_input_handle_t ttstub_input_open(char const *path, ttbc_file_format format,
 }
 
 rust_input_handle_t ttstub_input_open_primary(void) {
-  if (!active_session || !active_session->root_name) {
+  if (!active_session) {
+    return NULL;
+  }
+  /* Format bootstrap mode opens the format source (e.g. `xelatex.ini`) as a
+   * regular TeX input, matching the original engine main bootstrap. */
+  if (active_session->primary_name && active_session->primary_name[0]) {
+    return input_open_path(active_session->primary_name, TTBC_FILE_FORMAT_TEX);
+  }
+  if (!active_session->root_name) {
     return NULL;
   }
   return input_open_path(active_session->root_name, TTBC_FILE_FORMAT_TECTONIC_PRIMARY);
@@ -577,6 +665,10 @@ int ttbc_shell_escape(const uint16_t *cmd, size_t len) {
   return ttstub_shell_escape((const unsigned short *)cmd, len);
 }
 
+int oxipresso_xetex_is_real(void) {
+  return 1;
+}
+
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,
                         oxi_xetex_result *result) {
@@ -593,9 +685,11 @@ int oxipresso_xetex_run(const oxi_xetex_config *config,
   session.callbacks = callbacks;
   session.root_name = copy_slice(config->root_name, config->root_name_len);
   session.format_path = copy_slice(config->format_path, config->format_path_len);
-  if (!session.root_name || !session.format_path) {
+  session.primary_name = copy_slice(config->primary_name, config->primary_name_len);
+  if (!session.root_name || !session.format_path || !session.primary_name) {
     free(session.root_name);
     free(session.format_path);
+    free(session.primary_name);
     return -3;
   }
 
@@ -603,7 +697,15 @@ int oxipresso_xetex_run(const oxi_xetex_config *config,
   session.abort_active = 1;
   int status = 3;
   if (setjmp(session.abort_jump) == 0) {
-    status = tt_engine_xetex_main(session.format_path, session.root_name, config->build_date);
+    tt_xetex_set_int_variable("in_initex_mode", config->in_initex_mode ? 1 : 0);
+    /* Format bootstrap should stop at the first error; live document runs
+     * keep going so diagnostics stream to the editor. */
+    tt_xetex_set_int_variable("halt_on_error_p", config->in_initex_mode ? 1 : 0);
+    status = tt_engine_xetex_main(session.format_path,
+                                  config->in_initex_mode && session.primary_name[0]
+                                      ? session.primary_name
+                                      : session.root_name,
+                                  config->build_date);
   } else {
     status = 3;
   }
@@ -614,6 +716,7 @@ int oxipresso_xetex_run(const oxi_xetex_config *config,
 
   free(session.root_name);
   free(session.format_path);
+  free(session.primary_name);
   free(session.last_input_path);
   active_session = NULL;
   return 0;

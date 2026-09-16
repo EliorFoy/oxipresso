@@ -8,8 +8,11 @@ pub struct OxiXetexConfig {
     pub root_name_len: usize,
     pub format_path: *const c_char,
     pub format_path_len: usize,
+    pub primary_name: *const c_char,
+    pub primary_name_len: usize,
     pub build_date: u64,
     pub stream_mode: c_int,
+    pub in_initex_mode: c_int,
 }
 
 #[repr(C)]
@@ -74,4 +77,5 @@ unsafe extern "C" {
         callbacks: *const OxiXetexCallbacks,
         result: *mut OxiXetexResult,
     ) -> c_int;
+    pub fn oxipresso_xetex_is_real() -> c_int;
 }

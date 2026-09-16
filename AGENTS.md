@@ -22,6 +22,8 @@ Engine policy:
 - An opt-in real shim source and build path now exist in `oxipresso-engine-xetex-sys`, and with vcpkg dependencies installed the real TeXpresso/XeTeX engine **compiles and links** into the Rust test binaries on Windows.
 - Windows vcpkg dependencies live in `F:\code\vcpkg` (freetype, harfbuzz[graphite2,icu], graphite2, fontconfig, icu, libpng, zlib plus brotli/bzip2/expat/dirent), installed for both `x64-windows` and `x64-windows-static-md` triplets; real mode pins `x64-windows-static-md` (static libs, dynamic CRT) so the engine links into the Rust binary without runtime DLLs.
 - An optional external `xelatex` backend now exists for real PDF smoke tests while the FFI backend is still being connected. Enable it with `OXIPRESSO_ENGINE=external`.
+- The real engine now runs end to end: `XetexEngine::initialize` bootstraps `texpresso.fmt` in INI mode from the format source (default `xelatex.ini`) when the format file is missing, persists it to `OXIPRESSO_XETEX_FORMAT`, and then typesets the root document, producing real XDV artifacts through `EngineIo`.
+- TeX distribution files are resolved through a new TeX Live provider: the VFS gained a `FileResolver` hook (defined in `oxipresso-engine-api`) and the CLI installs `KpsewhichResolver` (kpsewhich from TeX Live/TinyTeX) with editor buffers and disk roots still taking precedence.
 - CLI can persist the current engine artifact when `OXIPRESSO_ARTIFACT_OUT` is set. With the external backend, this writes a real PDF.
 - Produced engine artifacts are now also passed through an internal viewer metadata pipeline.
 - An optional `eframe/egui` + `wgpu` GUI shell now exists for opening and polling artifact files.
@@ -43,6 +45,7 @@ Implemented crates:
   - Defines `EngineIo`.
   - `EngineIo` now includes `size(handle)` so XeTeX-style input handles can query file sizes without escaping the VFS boundary.
   - Defines shared types: `RootDocument`, `EngineEvent`, `RestartPolicy`, `DocumentArtifact`, `SyncTexArtifact`, `Diagnostic`, `FileKind`, `FileHandle`, `OpenResult`, `PictureKey`.
+  - Adds the `FileResolver` trait for external file resolution fallbacks (e.g. TeX Live providers).
   - Adds default `TypesettingEngine::output_synctex()` for optional SyncTeX sidecar artifacts.
 
 - `oxipresso-editor-protocol`
@@ -61,6 +64,7 @@ Implemented crates:
   - Tracks files that were requested by engine reads, including failed lookup attempts.
   - Opening a file after a failed engine lookup now reports a change at offset 0 so non-blocking `lookup-file failed` workflows can trigger a rebuild when the editor provides the file.
   - Supports disk-root fallback search after editor/disk cached content. CLI seeds disk roots from the root directory plus `-I` include paths.
+  - Supports an external `FileResolver` hook consulted after editor buffers, disk roots, and absolute paths fail; resolved content is cached as disk data and participates in lookup/input-file events.
   - Editor buffer content takes precedence over disk-root content for the same normalized path.
   - Records `input-file` events once per successfully opened input path.
   - Exposes `snapshot_inputs()` through `EngineIo` so process-style engines can materialize the current editor-backed input set.
@@ -87,11 +91,15 @@ Implemented crates:
   - Current C stub writes a small `<root-stem>.xdv` artifact so Rust output mirroring is covered by default tests.
   - New real shim implements first-pass `ttstub_*` bridge functions for input cursoring, output callbacks, diagnostics, disabled shell escape, primary input, format input, and abort capture through `setjmp`/`longjmp`.
   - New real shim now opens format outputs with `TTBC_FILE_FORMAT_FORMAT` and reports full input size as seen on close when possible.
+  - The real shim mirrors the original engine main's input behavior: failed missing-file opens are retried with per-format extensions (`xelatex` -> `xelatex.tex`), the config carries `primary_name` and `in_initex_mode`, `ttstub_input_open_primary` opens the format source as a TEX input during bootstrap, and `tt_xetex_set_int_variable` configures `in_initex_mode` plus `halt_on_error_p` per run.
+  - Both shims expose `oxipresso_xetex_is_real()` so the Rust wrapper can detect stub vs. real at runtime.
 
 - `oxipresso-engine-xetex`
   - Adds safe Rust wrapper `XetexEngine`.
   - Implements `TypesettingEngine`.
-  - Currently calls the FFI stub and reports engine name `xetex-ffi-stub`.
+  - Reports engine name `xetex-ffi-stub` in stub mode and `xetex-real` in real mode; `XetexEngine::real_mode()` exposes the linked shim kind.
+  - Bootstraps the format in real mode: when `OXIPRESSO_XETEX_FORMAT` is missing, `initialize` runs the engine in INI mode with the format source (`OXIPRESSO_XETEX_FORMAT_SOURCE`, default `xelatex.ini`) as primary input, requires a spotless run plus nonempty format output, and persists the produced `texpresso.fmt` to disk before the normal typesetting run.
+  - Adds the `texlive` module with `KpsewhichResolver`, a `FileResolver` implementation that resolves TeX distribution files through `kpsewhich` (TeX Live/TinyTeX), with negative-lookup caching and no resolution for engine-owned formats or the editor primary document.
   - Bridges FFI callbacks into Rust `EngineIo`.
   - Passes `OXIPRESSO_XETEX_FORMAT` to the FFI config, defaulting to `texpresso.fmt`.
   - Captures FFI diagnostics into Rust `Diagnostic` values.
@@ -206,6 +214,7 @@ Implemented crates:
   - Handles `synctex-forward` by using the latest parsed SyncTeX document to update internal viewer page state and store hit coordinates.
   - `synctex-forward` integration is tested with editor path variants matching Windows-style absolute SyncTeX input paths.
   - Registers the root directory and `-I` include paths as VFS disk roots for all engine backends.
+  - Installs `KpsewhichResolver` on the VFS when kpsewhich is detectable (`OXIPRESSO_TEXLIVE=0` disables it), so the real engine can pull format sources, classes, and fonts from the TeX distribution.
   - Has a Rust migration of the original stream-mode flow: `register`, `open`, then `resume` reads the root from editor VFS content and emits successful lookup/input messages.
   - Has a Rust test for the original register/deferred lookup workflow: stream mode can register a missing include before resume, the engine observes a promised lookup, and opening the promised file triggers a rebuild that observes the include as successful input.
   - Has a Rust test for the original non-blocking lookup workflow: an engine lookup can fail for a missing file, the editor can later `open` that file, and the CLI performs a full rebuild that observes the file as a successful input.
@@ -334,11 +343,26 @@ Result (current machine state):
 - The full real engine (engine C, engine/layout C++, dpx C, real shim C) compiles cleanly with warnings disabled.
 - `cargo test -p oxipresso-engine-xetex --no-run` LINKS the whole real engine into the Rust test binary; the only extra link input needed was `advapi32.lib` for ICU's Windows time-zone detection, now emitted by `build.rs`.
 - Running the real-mode test binary confirms `oxipresso_xetex_run` reaches the real engine and returns control cleanly through the shim's `setjmp`/`longjmp` abort capture when no format file is available (no crash, no hang).
-- In real mode the two stub-behavior tests (`ffi_stub_initializes`, `ffi_stub_uses_engine_io_callbacks`) fail as expected because `oxipresso_xetex_run` is the real engine rather than the stub; the file-kind mapping test and the opt-in smoke test (which skips without an existing format file) pass.
+- In real mode the two stub-behavior tests (`ffi_stub_initializes`, `ffi_stub_uses_engine_io_callbacks`) now self-skip via `XetexEngine::real_mode()` instead of failing; the file-kind mapping test and the opt-in smoke test pass.
 - vcpkg environment notes for this machine: `VCPKG_ROOT=F:\code\vcpkg` must be set for real-mode builds; the vcpkg tree needed manual source downloads for `meson`, `harfbuzz`, and `icu` tarballs into `F:\code\vcpkg\downloads` because vcpkg's bundled curl fails TLS through the local proxy (SOCKS5 `127.0.0.1:10808`); direct `curl.exe` to `codeload.github.com` and `github.com` release assets works and cached tarballs were hash-verified.
 - This does not affect default stub builds, which remain dependency-free.
 
 Historical note: before the vcpkg setup, real mode failed early with a `freetype2` vcpkg discovery error; that blocker is now resolved.
+
+Additional real XeTeX format bootstrap + typesetting verified (the defining milestone):
+
+```powershell
+$env:OXIPRESSO_USE_REAL_XETEX='1'; $env:TEXPRESSO_SRC='F:\code\texpresso-src'; $env:VCPKG_ROOT='F:\code\vcpkg'
+cargo test -p oxipresso-engine-xetex -- --nocapture --test-threads=1
+cargo run -q -p oxipresso-cli --bin oxipresso -- -test-initialize <temp>\oxi-real-smoke.tex
+```
+
+Result:
+
+- `real_xetex_bootstrap_builds_format_and_typesets_simple` passes: with `KpsewhichResolver` installed, the first `initialize` bootstraps the format from `xelatex.ini` (spotless), persists `texpresso.fmt` to `OXIPRESSO_XETEX_FORMAT`, typesets `test/simple.tex`, and returns a nonempty real XDV `DocumentArtifact`; a second `initialize` reuses the persisted format and produces an artifact again.
+- All 5 tests in the crate pass in real mode; stub-behavior tests self-skip via `XetexEngine::real_mode()`.
+- CLI end-to-end: `OXIPRESSO_ARTIFACT_OUT` captured a real 1011-byte XDV (first bytes `F7 07` XDV magic) and `texpresso.fmt` was 22.3 MB; stdout showed the full lookup flow with extension guessing feeding kpsewhich (`lookup-file read failed "cmmi6"` -> `read successful "cmmi6.tfm"`), the XDV write, and the `.aux` read.
+- Known runtime noise: fontconfig prints `Cannot load default config file` (non-fatal; see Not Done Yet).
 
 Additional PDFium smoke verified on Windows:
 
@@ -371,11 +395,11 @@ Result:
 
 ## Not Done Yet
 
-- Real TeXpresso/XeTeX engine now compiles and links, but it has not yet typeset anything: no real `.fmt` format file exists for the shim to load, so `XetexEngine::initialize` in real mode still ends at the engine's "format not found" abort path.
-- The next real-engine milestone is producing or locating a loadable format (e.g. building `texpresso.fmt` the way TeXpresso does, or trying a compatible TinyTeX `xelatex.fmt`), then running the opt-in real smoke test on `test/simple.tex` to produce a first real XDV artifact through `EngineIo`.
-- In real mode the stub-behavior tests in `oxipresso-engine-xetex` fail by design (`oxipresso_xetex_run` is no longer the stub); they either need a stub/real selection guard or to be split into stub-only and real-only variants.
-- The FFI stub reads bytes through callback I/O, but it does not parse TeX or produce `.xdv`, `.pdf`, `.log`, or SyncTeX output.
-- CLI can perform real LaTeX compilation through `OXIPRESSO_ENGINE=external`, but the default FFI path still uses the stub.
+- The real engine typesets through the stub-shaped one-shot flow only: each rebuild fully restarts the engine (matches `FullRestartRequired`); the TeXpresso-defining incremental checkpoint/restart model is not implemented yet.
+- The real shim does not enable SyncTeX (`synctex_enabled` engine variable is untouched), does not implement `synctex_texpresso_extension`, and the shim reports `mtime 0` for inputs; log/stdout stream separation and `.log` artifact capture are still Rust-side work.
+- Fontconfig prints `Cannot load default config file` at runtime on Windows; TFM/Type1 paths via kpsewhich work without it, but system-font lookup (XeTeX font manager) needs a fontconfig config (`FONTCONFIG_PATH` or shipped `fonts.conf`) before native font features work.
+- `KpsewhichResolver` spawns `kpsewhich` per lookup; a kpathsea/ls-R cache or batched lookup would speed up cold format builds.
+- The FFI stub still does not parse TeX (by design); the default build keeps the stub.
 - CLI now emits basic `truncate`/`append`/`flush` messages from engine diagnostics, but does not yet split stdout/log streams like TeXpresso.
 - CLI now emits basic `input-file` messages from VFS opens, but it does not yet mirror every TeXpresso input-file/indexing nuance from the original engine.
 - CLI can persist SyncTeX sidecar bytes and `oxipresso-synctex` can parse input/output/page/node metadata plus first forward/reverse lookup helpers. CLI now acts on `synctex-forward` at the page/marker level, but precise GUI coordinate scrolling and user-triggered reverse SyncTeX are not implemented yet.
@@ -386,7 +410,7 @@ Result:
 - XDV/DVI page metadata can count pages, rule opcodes can render as rectangles, basic glyph opcodes can render as placeholder marks, and DVI font definitions can size those placeholders, but real glyph rasterization/font lookup/image/special rendering is not implemented yet.
 - The PDF page counter is intentionally lightweight and may not see page objects hidden in compressed object streams; it currently falls back to one page for a valid PDF in that case.
 - No native platform file watcher is implemented yet; current GUI watch mode is portable polling behind the `oxipresso-platform` watcher abstraction.
-- No TeX Live/Tectonic provider is implemented yet.
+- No Tectonic provider is implemented yet; the TeX Live path is covered by `KpsewhichResolver` (kpsewhich), but not the full original texlive dependency-tape validation.
 - No Linux CI/build verification has been run.
 - No macOS implementation or verification has been done.
 - Original TeXpresso fixture coverage now includes `simple.tex`, `include.tex`, `missing-input.tex`, and `includegraphics.tex` through the external backend when fixtures and `xelatex` are available; protocol snapshots and FFI-backed fixture tests are still pending. The core behaviors from `test_stream.sh`, `test-register.sh`, and the non-blocking missing-file path in `test-lookup-file.sh` now have Rust unit coverage, but full shell-equivalent async snapshots are not complete.
@@ -402,17 +426,16 @@ Result:
 
 ## Suggested Next Steps
 
-1. Promote the PDFium-backed PDF render path into the GUI smoke workflow and decide whether Windows builds should enable `pdfium` by default.
-2. Expand the XDV/DVI parser/renderer beyond placeholder glyphs and rules: real font loading, specials, images, and page boxes for TeXpresso-style live preview.
-3. Replace the current approximate GUI SyncTeX marker mapping with TeXpresso-compatible page media-box coordinate scrolling and connect user-triggered reverse SyncTeX behavior.
-4. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
-5. Produce or locate a real `.fmt` format file for the real engine (build `texpresso.fmt` the way TeXpresso does at first run, or test a compatible TinyTeX `xelatex.fmt`), since vcpkg dependency setup is complete and the real engine already compiles and links.
-6. Run the opt-in real `XetexEngine::initialize` on `test/simple.tex` with the format available and make it produce at least one real artifact or diagnostic through `EngineIo`.
-7. Guard or split the stub-behavior tests in `oxipresso-engine-xetex` so stub-only assertions do not fail in real mode (e.g. compile-time `cfg(oxipresso_real_xetex)` selection, which `build.rs` already emits).
-8. Expand original TeXpresso fixture integration tests:
-   - async register lookup and lookup-file restart scenarios.
-   - protocol snapshots.
-   - fixture runs through the FFI XeTeX backend once the real shim replaces the stub.
+1. Expand the XDV/DVI parser/renderer beyond placeholder glyphs and rules: real font loading (FreeType is already linked in real mode), specials, images, and page boxes for TeXpresso-style live preview.
+2. Enable SyncTeX in the real shim (`tt_xetex_set_int_variable("synctex_enabled", 1)` plus `synctex_use_gz`/`synctex_texpresso_extension`), capture the sidecar through `output_synctex`, and replace the approximate GUI marker mapping with media-box coordinate scrolling and reverse SyncTeX.
+3. Implement the TeXpresso-defining incremental checkpoint/restart model so editor changes stop requiring a full engine restart.
+4. Split stdout/log streams in the CLI like TeXpresso, and add protocol snapshots covering the real engine flow.
+5. Provide a fontconfig config on Windows (or route font lookup through kpsewhich/font maps) to fix the "Cannot load default config file" runtime error and enable native font features.
+6. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
+7. Expand original TeXpresso fixture integration tests:
+   - async register lookup and lookup-file restart scenarios through the real engine.
+   - fixture runs (`include.tex`, `includegraphics.tex`) through the FFI XeTeX backend.
+8. Verify Linux builds of the real mode via pkg-config, and keep macOS as the later placeholder.
 
 ## Current Git State Expectation
 

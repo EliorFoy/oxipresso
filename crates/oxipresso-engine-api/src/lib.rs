@@ -100,6 +100,14 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileHandle(pub u32);
 
+/// External fallback resolver for files an [`crate::EngineIo`] implementation
+/// cannot find itself (for example TeX distribution files resolved through a
+/// TeX Live installation). Implementations return file bytes when the path can
+/// be resolved.
+pub trait FileResolver {
+    fn resolve(&mut self, path: &str, kind: FileKind) -> Option<Vec<u8>>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
     Afm,

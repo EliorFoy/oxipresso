@@ -6,7 +6,7 @@ use std::{
 use base64::Engine as _;
 use oxipresso_editor_protocol::{Change, EditorCommand, LookupKind, LookupStatus};
 use oxipresso_engine_api::{
-    EngineError, EngineIo, FileHandle, FileKind, OpenResult, PictureKey, Result,
+    EngineError, EngineIo, FileHandle, FileKind, FileResolver, OpenResult, PictureKey, Result,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,7 @@ struct OpenFile {
     write: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct VirtualFileSystem {
     files: HashMap<String, FileEntry>,
     handles: HashMap<FileHandle, OpenFile>,
@@ -76,8 +76,22 @@ pub struct VirtualFileSystem {
     input_events: Vec<InputEvent>,
     input_indices: HashMap<String, usize>,
     disk_roots: Vec<PathBuf>,
+    resolver: Option<Box<dyn FileResolver>>,
     next_handle: u32,
     next_input_index: usize,
+}
+
+impl std::fmt::Debug for VirtualFileSystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VirtualFileSystem")
+            .field("files", &self.files.keys().collect::<Vec<_>>())
+            .field("disk_roots", &self.disk_roots)
+            .field("resolver", &self.resolver.as_ref().map(|_| "installed"))
+            .field("next_handle", &self.next_handle)
+            .field("next_input_index", &self.next_input_index)
+            .finish()
+    }
 }
 
 impl VirtualFileSystem {
@@ -89,6 +103,7 @@ impl VirtualFileSystem {
             input_events: Vec::new(),
             input_indices: HashMap::new(),
             disk_roots: Vec::new(),
+            resolver: None,
             next_handle: 1,
             next_input_index: 0,
         }
@@ -134,6 +149,10 @@ impl VirtualFileSystem {
         P: Into<PathBuf>,
     {
         self.disk_roots = roots.into_iter().map(Into::into).collect();
+    }
+
+    pub fn set_resolver(&mut self, resolver: Box<dyn FileResolver>) {
+        self.resolver = Some(resolver);
     }
 
     pub fn disk_roots(&self) -> &[PathBuf] {
@@ -296,6 +315,15 @@ impl VirtualFileSystem {
         });
     }
 
+    fn resolve_external(&mut self, key: &str, kind: FileKind) -> Result<Option<Vec<u8>>> {
+        if let Some(resolver) = self.resolver.as_mut()
+            && let Some(data) = resolver.resolve(key, kind)
+        {
+            return Ok(Some(data));
+        }
+        Ok(None)
+    }
+
     fn read_disk_candidate(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let normalized = PathBuf::from(key.replace('/', std::path::MAIN_SEPARATOR_STR));
         if normalized.is_absolute() {
@@ -316,7 +344,7 @@ impl VirtualFileSystem {
 }
 
 impl EngineIo for VirtualFileSystem {
-    fn open_read(&mut self, path: &str, _kind: FileKind) -> Result<OpenResult> {
+    fn open_read(&mut self, path: &str, kind: FileKind) -> Result<OpenResult> {
         let key = Self::normalize_path(path);
         self.ensure_file(&key).read_requested = true;
         if self
@@ -344,6 +372,19 @@ impl EngineIo for VirtualFileSystem {
             });
             Ok(OpenResult::Promised)
         } else if let Some(data) = self.read_disk_candidate(&key)? {
+            self.ensure_file(&key).disk_data = Some(data);
+            let handle = self.alloc_handle(key.clone(), false);
+            self.lookup_events.push(LookupEvent {
+                kind: LookupKind::Read,
+                status: LookupStatus::Successful,
+                path: key.clone(),
+            });
+            self.note_input_file(&key);
+            Ok(OpenResult::Opened {
+                handle,
+                canonical_path: key,
+            })
+        } else if let Some(data) = self.resolve_external(&key, kind)? {
             self.ensure_file(&key).disk_data = Some(data);
             let handle = self.alloc_handle(key.clone(), false);
             self.lookup_events.push(LookupEvent {
