@@ -1,175 +1,131 @@
 # Oxipresso
 
-Oxipresso is a Rust-first reimplementation scaffold for
-[TeXpresso](https://github.com/let-def/texpresso).
+Oxipresso is a Rust-first reimplementation of
+[TeXpresso](https://github.com/let-def/texpresso) — a live TeX previewer that
+typesets your document on every keystroke and displays the rendered pages in
+real time.
 
-The current milestone establishes the cross-platform Rust architecture:
+## Features
 
-- editor protocol parsing and serialization for S-expression and JSON modes;
-- editor-backed virtual file system with byte, line, and UTF-16 range changes;
-- engine traits that isolate the Rust driver from concrete TeX backends;
-- a first live rebuild loop that full-restarts the selected engine after editor
-  changes and refreshes the produced artifact/viewer state;
-- SyncTeX artifact capture and basic SyncTeX metadata parsing;
-- a temporary XeTeX FFI crate with a portable C ABI stub;
-- a first artifact-to-viewer pipeline for PDF metadata, PDFium-backed PDF raster
-  rendering, and placeholder fallback;
-- an optional `eframe/egui` + `wgpu` viewer shell for artifact preview and
-  polling-based artifact refresh;
-- a platform file-watcher abstraction with a portable polling implementation
-  used by the GUI artifact watcher today;
-- platform, render, viewer, and testkit crates ready for Windows-first work
-  while preserving Linux and macOS seams.
+- **Real XeTeX engine**: embeds the actual TeXpresso/XeTeX C engine via FFI,
+  with automatic format bootstrap from `xelatex.ini` and TeX Live package
+  resolution through `kpsewhich`.
+- **Real glyph rendering**: XDV pages are rendered with FreeType-rasterized
+  glyphs, including color specials, slant/extend transforms, and native OTF/Type1
+  font lookup from the TeX distribution.
+- **Live preview GUI**: `-gui` runs the engine, an egui window, and the editor
+  wire (stdin/stdout) in one process — the same architecture as the original.
+- **Bidirectional SyncTeX**: forward search (source → PDF page) and reverse
+  search (PDF click → source line) with sidecar capture and parsing.
+- **Editor protocol**: TeXpresso-compatible S-expression and JSON wire protocol
+  with `open`/`change`/`lookup-file`/`input-file`/`truncate`/`append`/`flush`
+  and streamed `out`/`log` info buffers.
+- **Incremental render caching**: pages whose XDV content is unchanged after an
+  edit are reused from cache instead of re-rendered.
+- **Cross-platform architecture**: Rust owns the protocol, VFS, engine
+  abstraction, platform layer, and rendering; the C engine is isolated behind
+  a stable FFI shim. Windows is the primary target; Linux and macOS seams are
+  preserved.
 
-The FFI crate intentionally does not yet embed the real TeXpresso/XeTeX
-sources by default. Its `oxipresso_xetex_run` shim is the stable point where the real
-engine can be connected without changing the Rust protocol, VFS, CLI, or viewer
-layers.
+## Quick start
 
-An opt-in real engine mode now compiles and links the actual TeXpresso/XeTeX
-engine (from a local `texpresso-src` checkout) behind the same shim on Windows:
+### Live preview (real engine)
 
 ```powershell
+# One-time: build the real engine (requires vcpkg + texpresso-src)
 $env:OXIPRESSO_USE_REAL_XETEX = "1"
-$env:TEXPRESSO_SRC = "F:\code\texpresso-src"   # original repository checkout
-$env:VCPKG_ROOT = "F:\code\vcpkg"              # freetype, harfbuzz[graphite2,icu], graphite2, fontconfig, icu, libpng, zlib
-cargo test -p oxipresso-engine-xetex --no-run  # real engine links into the Rust binary
+$env:TEXPRESSO_SRC = "F:\code\texpresso-src"
+$env:VCPKG_ROOT = "F:\code\vcpkg"
+
+# Live preview window
+cargo run -p oxipresso-cli --features gui,freetype --bin oxipresso -- -gui doc.tex
 ```
 
-Real mode pins the vcpkg `x64-windows-static-md` triplet so the engine is
-statically linked. The real engine still needs a TeX format file
-(`OXIPRESSO_XETEX_FORMAT`) to typeset, so default builds keep using the
-dependency-free portable stub.
+The window shows the typeset pages. Your editor sends protocol commands over
+stdin; every `change` triggers a rebuild and the window refreshes automatically.
+Reverse SyncTeX clicks emit source locations over stdout.
 
-There is also an optional external `xelatex` backend for smoke-testing real
-LaTeX compilation while the FFI backend is still being connected:
+### Headless (editor wire only)
 
 ```powershell
-$env:OXIPRESSO_ENGINE = "external"
-$env:OXIPRESSO_ARTIFACT_OUT = "out.pdf"
-cargo run -p oxipresso-cli -- -test-initialize path\to\main.tex
-Remove-Item Env:\OXIPRESSO_ENGINE
-Remove-Item Env:\OXIPRESSO_ARTIFACT_OUT
+cargo run -p oxipresso-cli --bin oxipresso -- -stream -test-initialize doc.tex
 ```
 
-When `OXIPRESSO_ARTIFACT_OUT` is set, the current engine artifact is written to
-that path. With the external backend this is currently a PDF. The CLI also
-feeds produced artifacts into the internal viewer state so the GUI layer can
-reuse the same render metadata path later.
-
-When `OXIPRESSO_SYNCTEX_OUT` is set, the CLI writes the current backend's
-SyncTeX artifact to that path. The external `xelatex` backend captures
-`.synctex.gz` or `.synctex` files, and `oxipresso-synctex` can decode gzip/plain
-SyncTeX enough to parse `Output:`, `Input:`, page sheet records, and common
-node coordinates. It can perform a first forward lookup from source path/line to
-a nearest SyncTeX hit. SyncTeX path matching normalizes backslashes, duplicate
-slashes, and `./`, and supports absolute/relative suffix matching in either
-direction for editor and engine path variants. The CLI uses that lookup to
-update its internal viewer page for `synctex-forward`, and the optional GUI can
-draw a lightweight marker
-for the hit on the current page and request scrolling to it. The parser also
-has a nearest-record reverse lookup by page and point. The marker currently
-uses an approximate TeX-point-to-page mapping; full TeXpresso-compatible
-source/PDF behavior is still pending.
-
-`oxipresso-render` validates PDF headers, counts visible `/Type /Page` objects
-for metadata, walks DVI/XDV opcodes far enough to count `bop` pages, and returns
-stable placeholder pages by default. It also has a first DVI/XDV display-list
-increment: `set_rule` and `put_rule` opcodes are parsed with common movement and
-stack commands, then painted as dark rectangles on the placeholder page. Basic
-glyph opcodes (`set_char`, `set1..4`, and `put1..4`) are also collected and
-painted as placeholder marks, so DVI/XDV pages can now show rough text
-positions before real font rendering exists. Font definitions and font
-selection are parsed enough to size those glyph placeholders from the current
-font's scaled size. With the optional `pdfium` feature, it can render real PDF
-pages through PDFium. Real glyph/font/image rendering for XDV/DVI is still
-pending.
-
-The optional GUI viewer can open an existing artifact:
+### PDF rendering (PDFium)
 
 ```powershell
-cargo run -p oxipresso-cli --features gui --bin oxipresso-viewer -- path\to\out.pdf
+cargo run -p oxipresso-cli --features gui,pdfium --bin oxipresso -- -gui doc.tex
 ```
 
-It can also watch an artifact path and refresh when another process rewrites the
-file. This currently uses the `oxipresso-platform` polling watcher so the GUI
-does not depend on Windows-only APIs; native Windows/Linux/macOS watcher
-backends can replace that implementation later without changing viewer code:
+## Architecture
 
-```powershell
-cargo run -p oxipresso-cli --features gui --bin oxipresso-viewer -- --watch out.pdf
+```
+Editor (Emacs/Vim/...)
+  ↕ stdin/stdout (S-expression or JSON)
+┌───────────────────────────────────┐
+│ oxipresso-cli                     │
+│  ├─ editor protocol parser        │
+│  ├─ VFS (editor buffers + disk)   │
+│  ├─ engine (XeTeX via FFI)        │
+│  ├─ SyncTeX parser                │
+│  └─ render backend                │
+│    ├─ XDV glyph (FreeType)        │
+│    ├─ PDF (PDFium)                │
+│    └─ placeholder                 │
+│  └─ egui live preview window      │
+└───────────────────────────────────┘
 ```
 
-One temporary live-preview workflow is to run the watcher above, then compile
-with the external backend using the same output path:
+The real XeTeX engine is compiled from a local `texpresso-src` checkout and
+linked statically into the Rust binary via vcpkg dependencies (freetype,
+harfbuzz, graphite2, fontconfig, icu, libpng, zlib).
 
-```powershell
-$env:OXIPRESSO_ENGINE = "external"
-$env:OXIPRESSO_ARTIFACT_OUT = "out.pdf"
-cargo run -p oxipresso-cli -- -test-initialize path\to\main.tex
-```
+## Workspace
 
-The GUI is a shell over the current render backend. Enable `pdfium` to preview
-real PDF pixels; without it, PDF pages use placeholder pixels.
-
-The VFS now searches editor buffers first, then configured disk roots derived
-from the root document and `-I` include paths. It records `input-file` events
-for successfully opened inputs and can snapshot editor/disk input files into
-the external `xelatex` backend's temporary build directory, so edited includes
-can participate in the temporary full-restart live workflow.
-
-Stream mode is covered by Rust tests for the first TeXpresso-compatible flows:
-`register`, then `open`, then `resume` initializes the engine from editor VFS
-content and emits the expected lookup/input messages. A registered missing
-include can also become a promised lookup on resume; when the editor later
-opens that file, the CLI rebuilds and the engine observes it as a successful
-input. More async lookup snapshot tests from the original shell suite are still
-pending.
-
-The VFS also remembers files requested through failed engine reads. If the
-editor later provides such a file with `open`, the CLI treats it as a change
-from offset 0 and performs a rebuild. This covers the first non-blocking
-`lookup-file failed` workflow from the original shell tests; full async protocol
-snapshots are still pending.
-
-TeX errors from the selected engine are treated as live diagnostics during
-initialization and rebuild: when the backend reports diagnostics, the CLI emits
-the corresponding protocol messages instead of terminating the session.
+| Crate | Purpose |
+|-------|---------|
+| `oxipresso-cli` | CLI entry point + live preview GUI |
+| `oxipresso-editor-protocol` | Editor wire protocol (sexp + JSON) |
+| `oxipresso-vfs` | Virtual file system (editor buffers + disk + resolver) |
+| `oxipresso-engine-api` | Engine/VFS traits, `FileResolver`, shared types |
+| `oxipresso-engine-xetex-sys` | C FFI shim (portable stub + real XeTeX engine) |
+| `oxipresso-engine-xetex` | Safe Rust wrapper (bootstrap, SyncTeX, output events, TeX Live resolver) |
+| `oxipresso-engine-external` | External `xelatex` process backend |
+| `oxipresso-platform` | Platform isolation + file watcher |
+| `oxipresso-render` | XDV/DVI parser + FreeType glyph renderer + PDF (PDFium) |
+| `oxipresso-synctex` | SyncTeX decoder + forward/reverse lookup |
+| `oxipresso-viewer` | Viewer state model + standalone egui viewer |
+| `oxipresso-testkit` | Shared fixtures and test helpers |
 
 ## Build
 
 ```powershell
+# Default (stub engine, no native deps)
 cargo test --workspace
-cargo test -p oxipresso-viewer --features gui
-cargo test -p oxipresso-cli --features gui --bin oxipresso-viewer
-cargo check -p oxipresso-cli --features gui --bin oxipresso-viewer
-cargo check -p oxipresso-cli --features "gui pdfium" --bin oxipresso-viewer
-cargo run -p oxipresso-cli -- -test-initialize path\to\main.tex
+
+# With real glyph rendering
+cargo test -p oxipresso-render --features freetype
+
+# With GUI
+cargo check -p oxipresso-cli --features gui
+
+# With everything
+cargo check -p oxipresso-cli --features "gui,freetype,pdfium"
 ```
 
-For a real PDFium raster smoke, point `OXIPRESSO_PDFIUM_SMOKE_PDF` at a PDF:
+## Real engine setup
 
-```powershell
-$env:OXIPRESSO_PDFIUM_SMOKE_PDF = "path\to\out.pdf"
-cargo test -p oxipresso-render --features pdfium pdfium_smoke_renders_real_pdf_when_requested
-Remove-Item Env:\OXIPRESSO_PDFIUM_SMOKE_PDF
-```
+1. Clone [texpresso](https://github.com/let-def/texpresso) to `F:\code\texpresso-src`.
+2. Install [vcpkg](https://vcpkg.io) and set `VCPKG_ROOT`.
+3. Install the required packages:
+   ```
+   vcpkg install freetype harfbuzz[graphite2,icu] graphite2 fontconfig icu --triplet x64-windows-static-md
+   ```
+4. Build with `OXIPRESSO_USE_REAL_XETEX=1`.
 
-Some smoke tests can use fixtures from a local TeXpresso checkout. Set
-`TEXPRESSO_SRC` to that checkout, or place it beside this repository as
-`texpresso-src`; tests skip those fixture cases when the source tree is absent.
+The first run bootstraps the TeX format file (`texpresso.fmt`) from
+`xelatex.ini`; subsequent runs load the cached format directly.
 
-## Workspace
+## License
 
-- `oxipresso-cli`: command-line entry point compatible with TeXpresso flags.
-- `oxipresso-editor-protocol`: editor command/message wire protocol.
-- `oxipresso-vfs`: virtual file system and `EngineIo` implementation.
-- `oxipresso-engine-api`: engine and VFS traits shared across backends.
-- `oxipresso-engine-xetex-sys`: native C ABI shim for the temporary XeTeX backend.
-- `oxipresso-engine-xetex`: safe Rust wrapper around the XeTeX FFI boundary.
-- `oxipresso-engine-external`: optional `xelatex` process backend for real PDF smoke tests.
-- `oxipresso-platform`: Windows/Linux/macOS platform isolation plus file watcher abstraction.
-- `oxipresso-render`: document artifact rendering abstractions plus PDF metadata support.
-- `oxipresso-synctex`: SyncTeX gzip/plain decoder and metadata parser.
-- `oxipresso-viewer`: viewer state model and optional `eframe/egui` viewer shell.
-- `oxipresso-testkit`: shared fixtures and test helpers.
+MIT
