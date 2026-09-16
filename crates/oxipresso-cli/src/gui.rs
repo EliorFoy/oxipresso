@@ -148,11 +148,47 @@ impl LivePreview {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.add(
+                    let response = ui.add(
                         egui::Image::new((texture.id(), display_size)).sense(egui::Sense::click()),
                     );
+                    if response.clicked()
+                        && let Some(pointer) = response.interact_pointer_pos()
+                        && let Some((width_pt, height_pt)) = self.page_dims_pt()
+                    {
+                        let relative = (pointer - response.rect.min) / response.rect.size();
+                        let x_pt = relative.x.clamp(0.0, 1.0) as f64 * width_pt;
+                        let y_pt = relative.y.clamp(0.0, 1.0) as f64 * height_pt;
+                        // Click-to-source: emit the reverse SyncTeX
+                        // notification over the editor wire.
+                        if let Some(message) =
+                            self.app
+                                .synctex_reverse_message(self.viewer.page + 1, x_pt, y_pt)
+                        {
+                            if let EditorMessage::Synctex { path, line, .. } = &message {
+                                self.status = format!("syncTeX: {path}:{line}");
+                            }
+                            self.emit(&[message]);
+                        } else {
+                            self.status =
+                                format!("No syncTeX hit on page {}", self.viewer.page + 1);
+                        }
+                    }
                 });
             });
+    }
+
+    /// Page size in points for the current page, parsed from the XDV stream.
+    fn page_dims_pt(&self) -> Option<(f64, f64)> {
+        let artifact = self.viewer.last_artifact.as_ref()?;
+        if !matches!(
+            artifact.kind,
+            oxipresso_engine_api::ArtifactKind::Xdv | oxipresso_engine_api::ArtifactKind::Dvi
+        ) {
+            return None;
+        }
+        let document = oxipresso_render::xdv::parse_xdv(&artifact.bytes, &mut |_| None).ok()?;
+        let page = document.pages.get(self.viewer.page)?;
+        Some((page.width_pt, page.height_pt))
     }
 
     fn ensure_texture(&mut self, ctx: &egui::Context) {

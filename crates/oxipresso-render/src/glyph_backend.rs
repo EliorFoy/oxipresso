@@ -341,12 +341,18 @@ impl RenderBackend for XdvGlyphRenderBackend {
                         }
                     }
                 }
-                xdv::XdvElement::Glyphs { font_id, glyphs } => {
+                xdv::XdvElement::Glyphs {
+                    font_id,
+                    color_rgba,
+                    glyphs,
+                } => {
                     let Some(font) = document.fonts.get(font_id) else {
                         continue;
                     };
                     let size_px = (font.size_pt * scale).round().max(1.0) as u32;
-                    let rgba = font.color_rgba.unwrap_or(0x000000ff) | 0xff;
+                    // Element color (special-driven) wins over the font's own
+                    // XDV color; both default to black.
+                    let rgba = color_rgba.or(font.color_rgba).unwrap_or(0x000000ff) | 0xff;
                     for glyph in glyphs {
                         let Some(bitmap) = self.rasterize(font, glyph.code, size_px) else {
                             continue;

@@ -55,9 +55,14 @@ impl XdvDocument {
         hash.write_u64(page.elements.len() as u64);
         for element in &page.elements {
             match element {
-                XdvElement::Glyphs { font_id, glyphs } => {
+                XdvElement::Glyphs {
+                    font_id,
+                    color_rgba,
+                    glyphs,
+                } => {
                     hash.write_u8(1);
                     hash.write_u64(*font_id as u64);
+                    hash.write_u64(color_rgba.unwrap_or(0) as u64);
                     hash.write_u64(glyphs.len() as u64);
                     for glyph in glyphs {
                         hash.write_u64(glyph.code as u64);
@@ -144,7 +149,13 @@ pub struct XdvFont {
 #[derive(Debug, Clone)]
 pub enum XdvElement {
     /// A run of glyphs from one font at absolute page positions in points.
-    Glyphs { font_id: u32, glyphs: Vec<XdvGlyph> },
+    Glyphs {
+        font_id: u32,
+        /// Color override captured from `color push` specials active when the
+        /// glyphs were emitted (`0xRRGGBBAA`).
+        color_rgba: Option<u32>,
+        glyphs: Vec<XdvGlyph>,
+    },
     /// A filled rectangle (only positive widths/heights are emitted).
     Rule {
         x_pt: f64,
@@ -230,15 +241,21 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
     let mut state = State::default();
     let mut current_font: Option<u32> = None;
     let mut page: Option<XdvPage> = None;
-    let mut pending_glyphs: Option<(u32, Vec<XdvGlyph>)> = None;
+    let mut pending_glyphs: Option<(u32, Option<u32>, Vec<XdvGlyph>)> = None;
+    let mut color_stack: Vec<u32> = Vec::new();
+    let mut current_color: Option<u32> = None;
 
     macro_rules! flush_glyphs {
         () => {
-            if let Some((font_id, glyphs)) = pending_glyphs.take()
+            if let Some((font_id, color, glyphs)) = pending_glyphs.take()
                 && !glyphs.is_empty()
                 && let Some(target) = page.as_mut()
             {
-                target.elements.push(XdvElement::Glyphs { font_id, glyphs });
+                target.elements.push(XdvElement::Glyphs {
+                    font_id,
+                    color_rgba: color,
+                    glyphs,
+                });
             }
         };
     }
@@ -372,13 +389,34 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                     target.width_pt = dims.0;
                     target.height_pt = dims.1;
                 }
+                match parse_color_special(&text) {
+                    Some(ColorSpecial::Push(rgba)) => {
+                        if current_color != Some(rgba) {
+                            // A color change splits the pending glyph run.
+                            flush_glyphs!();
+                        }
+                        if let Some(previous) = current_color {
+                            color_stack.push(previous);
+                        }
+                        current_color = Some(rgba);
+                    }
+                    Some(ColorSpecial::Pop) => {
+                        flush_glyphs!();
+                        current_color = color_stack.pop();
+                    }
+                    None => {}
+                }
             }
             SET_GLYPHS => {
                 let font_id = current_font
                     .ok_or_else(|| EngineError::new("XDV SET_GLYPHS before font selection"))?;
                 let glyphs = read_glyph_array(&mut reader, state.h, state.v, pt_per_unit)?;
                 if let Some(target) = page.as_mut() {
-                    target.elements.push(XdvElement::Glyphs { font_id, glyphs });
+                    target.elements.push(XdvElement::Glyphs {
+                        font_id,
+                        color_rgba: current_color,
+                        glyphs,
+                    });
                 }
                 state.h += reader.last_width;
             }
@@ -390,7 +428,11 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                 reader.skip(text_len * 2)?;
                 let glyphs = read_glyph_array(&mut reader, state.h, state.v, pt_per_unit)?;
                 if let Some(target) = page.as_mut() {
-                    target.elements.push(XdvElement::Glyphs { font_id, glyphs });
+                    target.elements.push(XdvElement::Glyphs {
+                        font_id,
+                        color_rgba: current_color,
+                        glyphs,
+                    });
                 }
                 state.h += reader.last_width;
             }
@@ -408,21 +450,42 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                 let font_id = current_font
                     .ok_or_else(|| EngineError::new("DVI set_char before font selection"))?;
                 let code = opcode as u32;
-                push_classic_glyph(&mut pending_glyphs, font_id, code, state, pt_per_unit);
+                push_classic_glyph(
+                    &mut pending_glyphs,
+                    font_id,
+                    current_color,
+                    code,
+                    state,
+                    pt_per_unit,
+                );
                 state.h += char_width_dvi(&mut fonts, font_id, code, tfm_lookup);
             }
             SET1..=SET4 => {
                 let font_id = current_font
                     .ok_or_else(|| EngineError::new("DVI set before font selection"))?;
                 let code = reader.sized_u32(opcode - SET1 + 1)?;
-                push_classic_glyph(&mut pending_glyphs, font_id, code, state, pt_per_unit);
+                push_classic_glyph(
+                    &mut pending_glyphs,
+                    font_id,
+                    current_color,
+                    code,
+                    state,
+                    pt_per_unit,
+                );
                 state.h += char_width_dvi(&mut fonts, font_id, code, tfm_lookup);
             }
             PUT1..=PUT4 => {
                 let font_id = current_font
                     .ok_or_else(|| EngineError::new("DVI put before font selection"))?;
                 let code = reader.sized_u32(opcode - PUT1 + 1)?;
-                push_classic_glyph(&mut pending_glyphs, font_id, code, state, pt_per_unit);
+                push_classic_glyph(
+                    &mut pending_glyphs,
+                    font_id,
+                    current_color,
+                    code,
+                    state,
+                    pt_per_unit,
+                );
             }
             other => {
                 return Err(EngineError::new(format!(
@@ -472,21 +535,72 @@ fn read_glyph_array(
 }
 
 fn push_classic_glyph(
-    pending: &mut Option<(u32, Vec<XdvGlyph>)>,
+    pending: &mut Option<(u32, Option<u32>, Vec<XdvGlyph>)>,
     font_id: u32,
+    color: Option<u32>,
     code: u32,
     state: State,
     pt_per_unit: f64,
 ) {
-    if !matches!(pending, Some((pending_font, _)) if *pending_font == font_id) {
-        *pending = Some((font_id, Vec::new()));
+    if !matches!(pending, Some((pending_font, _, _)) if *pending_font == font_id) {
+        *pending = Some((font_id, color, Vec::new()));
     }
-    if let Some((_, glyphs)) = pending.as_mut() {
+    if let Some((_, glyphs_color, glyphs)) = pending.as_mut() {
+        if *glyphs_color != color {
+            // Color changed without a flush (defensive); update the run.
+            *glyphs_color = color;
+        }
         glyphs.push(XdvGlyph {
             code,
             x_pt: state.h as f64 * pt_per_unit,
             y_pt: state.v as f64 * pt_per_unit,
         });
+    }
+}
+
+enum ColorSpecial {
+    Push(u32),
+    Pop,
+}
+
+/// Parses `color push <model> <values...>` / `color pop` specials from the
+/// LaTeX color package. Returns `None` for any other special. Colors are
+/// normalized to `0xRRGGBBAA`.
+fn parse_color_special(text: &str) -> Option<ColorSpecial> {
+    let rest = text.trim().strip_prefix("color ")?;
+    let mut tokens = rest.split_whitespace();
+    match tokens.next()? {
+        "push" => {
+            let model = tokens.next()?;
+            let values: Vec<f64> = tokens
+                .by_ref()
+                .filter_map(|token| token.parse::<f64>().ok())
+                .collect();
+            let channel = |value: f64| ((value.clamp(0.0, 1.0)) * 255.0).round() as u32;
+            let rgba = match model {
+                "rgb" | "hsb" if values.len() >= 3 => {
+                    (channel(values[0]) << 24)
+                        | (channel(values[1]) << 16)
+                        | (channel(values[2]) << 8)
+                        | 0xff
+                }
+                "gray" if values.len() >= 1 => {
+                    let level = channel(values[0]);
+                    (level << 24) | (level << 16) | (level << 8) | 0xff
+                }
+                "cmyk" if values.len() >= 4 => {
+                    let [c, m, y, k] = [values[0], values[1], values[2], values[3]];
+                    let red = 1.0 - (c + k).clamp(0.0, 1.0);
+                    let green = 1.0 - (m + k).clamp(0.0, 1.0);
+                    let blue = 1.0 - (y + k).clamp(0.0, 1.0);
+                    (channel(red) << 24) | (channel(green) << 16) | (channel(blue) << 8) | 0xff
+                }
+                _ => return None,
+            };
+            Some(ColorSpecial::Push(rgba))
+        }
+        "pop" => Some(ColorSpecial::Pop),
+        _ => None,
     }
 }
 
@@ -771,9 +885,14 @@ mod tests {
                     assert!((*w_pt - 1000.0 * document.pt_per_unit).abs() < 1e-9);
                     assert!((*h_pt - 1000.0 * document.pt_per_unit).abs() < 1e-9);
                 }
-                XdvElement::Glyphs { font_id, glyphs } => {
+                XdvElement::Glyphs {
+                    font_id,
+                    color_rgba,
+                    glyphs,
+                } => {
                     glyph_runs += 1;
                     assert_eq!(*font_id, 40);
+                    assert_eq!(*color_rgba, None);
                     assert_eq!(glyphs.len(), 1);
                     assert_eq!(glyphs[0].code, 65);
                 }
@@ -840,6 +959,77 @@ mod tests {
             unique,
             "real XDV pages should have unique digests"
         );
+    }
+
+    #[test]
+    fn parses_color_specials_into_colored_glyph_runs() {
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]);
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]); // BOP
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        stream.extend_from_slice(&[252u8]); // native font def, id 7
+        stream.extend_from_slice(&7u32.to_be_bytes());
+        stream.extend_from_slice(&(12u32 << 16).to_be_bytes());
+        stream.extend_from_slice(&0u16.to_be_bytes());
+        stream.push(5);
+        stream.extend_from_slice(b"times");
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        stream.extend_from_slice(&[236u8]); // FNT2 -> font 7
+        stream.extend_from_slice(&7u16.to_be_bytes());
+        // color push rgb 1 0 0 (red)
+        let red_special = b"color push rgb 1 0 0";
+        stream.extend_from_slice(&[239u8, red_special.len() as u8]);
+        stream.extend_from_slice(red_special);
+        stream.extend_from_slice(&[253u8]); // SET_GLYPHS: red 'A'
+        stream.extend_from_slice(&50i32.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&65u16.to_be_bytes());
+        // color pop -> back to black
+        let pop_special = b"color pop";
+        stream.extend_from_slice(&[239u8, pop_special.len() as u8]);
+        stream.extend_from_slice(pop_special);
+        stream.extend_from_slice(&[253u8]); // SET_GLYPHS: black 'B'
+        stream.extend_from_slice(&50i32.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&66u16.to_be_bytes());
+        stream.extend_from_slice(&[140u8]); // EOP
+
+        let document = parse_xdv(&stream, &mut no_tfm).unwrap();
+        let page = &document.pages[0];
+        let mut colors: Vec<Option<u32>> = Vec::new();
+        for element in &page.elements {
+            if let XdvElement::Glyphs {
+                color_rgba, glyphs, ..
+            } = element
+            {
+                assert_eq!(glyphs.len(), 1);
+                colors.push(*color_rgba);
+            }
+        }
+        assert_eq!(
+            colors,
+            vec![Some(0xFF0000FF), None],
+            "red run then default run"
+        );
+        // Digests must reflect the color difference.
+        assert_ne!(document.page_digest(0), {
+            let mut without_colors = document.clone();
+            for element in &mut without_colors.pages[0].elements {
+                if let XdvElement::Glyphs { color_rgba, .. } = element {
+                    *color_rgba = None;
+                }
+            }
+            without_colors.page_digest(0)
+        });
     }
 
     #[test]
