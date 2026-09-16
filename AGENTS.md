@@ -25,6 +25,7 @@ Engine policy:
 - The real engine now runs end to end: `XetexEngine::initialize` bootstraps `texpresso.fmt` in INI mode from the format source (default `xelatex.ini`) when the format file is missing, persists it to `OXIPRESSO_XETEX_FORMAT`, and then typesets the root document, producing real XDV artifacts through `EngineIo`.
 - The real shim enables SyncTeX for normal runs (`synctex_enabled=1`, plain text via `synctex_use_gz=0`): the engine's `<jobname>.synctex` write is captured through the output mirror, exposed through `XetexEngine::output_synctex()`, and feeds the existing CLI `synctex-forward`/`OXIPRESSO_SYNCTEX_OUT` plumbing.
 - The engine reports incremental output-stream writes through `TypesettingEngine::take_output_events()` (`OutputEvent { path, offset, data }` in `oxipresso-engine-api`), and the CLI maps them onto the editor info buffers exactly like the original protocol: stdout → `out`, the `.log` file → `log`, with `(truncate out/log 0)` at run start and `(flush)` at the end. Diagnostics summary messages are suppressed when stream events exist (the real engine already streams the same content through stdout/log).
+- Incremental render foundation: `XdvDocument::page_digest` hashes each page's geometry, referenced font definitions, glyphs (codes + absolute positions), and rules; `XdvGlyphRenderBackend` caches rendered pages by digest across rebuilds, so pages whose XDV content is unchanged after an edit are reused instead of re-rendered. This is the renderer-side half of the original's incremental model.
 - TeX distribution files are resolved through a new TeX Live provider: the VFS gained a `FileResolver` hook (defined in `oxipresso-engine-api`) and the CLI installs `KpsewhichResolver` (kpsewhich from TeX Live/TinyTeX) with editor buffers and disk roots still taking precedence.
 - CLI can persist the current engine artifact when `OXIPRESSO_ARTIFACT_OUT` is set. With the external backend, this writes a real PDF.
 - Produced engine artifacts are now also passed through an internal viewer metadata pipeline.
@@ -103,6 +104,8 @@ Implemented crates:
   - Reports engine name `xetex-ffi-stub` in stub mode and `xetex-real` in real mode; `XetexEngine::real_mode()` exposes the linked shim kind.
   - Bootstraps the format in real mode: when `OXIPRESSO_XETEX_FORMAT` is missing, `initialize` runs the engine in INI mode with the format source (`OXIPRESSO_XETEX_FORMAT_SOURCE`, default `xelatex.ini`) as primary input, requires a spotless run plus nonempty format output, and persists the produced `texpresso.fmt` to disk before the normal typesetting run.
   - Adds the `texlive` module with `KpsewhichResolver`, a `FileResolver` implementation that resolves TeX distribution files through `kpsewhich` (TeX Live/TinyTeX), with negative-lookup caching and no resolution for engine-owned formats or the editor primary document.
+  - Auto-configures fontconfig on Windows before engine runs: `FONTCONFIG_PATH` discovery (existing env → `OXIPRESSO_FONTCONFIG_PATH` → vcpkg `etc/fonts`), mirrored into the MSVC CRT block via `_wputenv_s` (plain `env::set_var` is invisible to C `getenv` callers), eliminating the "Cannot load default config file" runtime error.
+  - Serializes engine invocations through a process-wide lock: the C shim keeps non-reentrant global session state, so parallel callers (tests, future threads) cannot race it.
   - Bridges FFI callbacks into Rust `EngineIo`.
   - Passes `OXIPRESSO_XETEX_FORMAT` to the FFI config, defaulting to `texpresso.fmt`.
   - Captures FFI diagnostics into Rust `Diagnostic` values.
@@ -418,10 +421,9 @@ Result:
 
 ## Not Done Yet
 
-- The real engine typesets through the stub-shaped one-shot flow only: each rebuild fully restarts the engine (matches `FullRestartRequired`); the TeXpresso-defining incremental checkpoint/restart model is not implemented yet.
+- Incremental rebuild status: the renderer-side half is done (unchanged XDV pages reuse cached rendered pages via content digests). The engine-side half — resuming typesetting from an engine-state checkpoint instead of a full re-run — remains open. The original uses fork() at read "fences" (copy-on-write process snapshots; see `src/frontend/engine_tex.c` fences and `engine/main/fork.c`), which has no Windows equivalent; per the design constraints this must become one cross-platform engine-state serialization/restore model, a large self-contained project (the engine globals span pool/equiv/trie/font memory structures).
 - The real shim does not implement `synctex_texpresso_extension` yet, and the shim reports `mtime 0` for inputs. The plain `.synctex` sidecar is captured and parsed (see Verified).
 - `-lines` mode still applies only to diagnostics summary messages; streaming the `out`/`log` channels as `append-lines` (with per-channel line buffers like the original) is not implemented yet.
-- Fontconfig misconfiguration is auto-fixed on Windows: the engine wrapper sets `FONTCONFIG_PATH` (discovery: existing env → `OXIPRESSO_FONTCONFIG_PATH` → vcpkg tree) and mirrors it into the MSVC CRT block via `_wputenv_s` (plain `env::set_var` is invisible to C `getenv` callers). `OXIPRESSO_TEXLIVE=0`-style disabling is not needed; setting `FONTCONFIG_PATH` explicitly always wins.
 - `KpsewhichResolver` spawns `kpsewhich` per lookup; a kpathsea/ls-R cache or batched lookup would speed up cold format builds.
 - The FFI stub still does not parse TeX (by design); the default build keeps the stub.
 - CLI now emits basic `truncate`/`append`/`flush` messages from engine diagnostics, but does not yet mirror every TeXpresso input-file/indexing nuance from the original engine.
