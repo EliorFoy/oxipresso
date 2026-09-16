@@ -19,14 +19,42 @@ pub trait FontResolver {
 const NATIVE_FONT_EXTENSIONS: &[&str] = &["otf", "ttf"];
 const CLASSIC_FONT_EXTENSIONS: &[&str] = &["pfb", "ttf", "otf"];
 
+/// Locates image files referenced by `pdf:image` specials. Implementations
+/// typically resolve the path against the document directory (the special
+/// carries the path exactly as written in the TeX source).
+pub trait ImageLoader {
+    /// Returns the image file bytes for `path`, or `None`.
+    fn find_image_file(&mut self, path: &str) -> Option<Vec<u8>>;
+}
+
+/// Default no-op loader: images render as nothing.
+struct NullImageLoader;
+
+impl ImageLoader for NullImageLoader {
+    fn find_image_file(&mut self, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// A decoded RGBA image.
+#[derive(Debug, Clone)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA8, row-major.
+    pub pixels: Vec<u8>,
+}
+
 pub struct XdvGlyphRenderBackend {
     /// Page rasterization scale in pixels per point (96 dpi = 4/3).
     pub px_per_pt: f64,
     resolver: RefCell<Box<dyn FontResolver>>,
+    image_loader: RefCell<Box<dyn ImageLoader>>,
     library: RefCell<Option<ft::FT_Library>>,
     faces: RefCell<HashMap<(String, u32), ft::FT_Face>>,
     font_files: RefCell<HashMap<String, Option<Rc<Vec<u8>>>>>,
     glyph_cache: RefCell<HashMap<(String, u32, u32, u32, u64), Option<Rc<GrayBitmap>>>>,
+    image_cache: RefCell<HashMap<String, Option<Rc<DecodedImage>>>>,
     parsed: RefCell<Option<(u64, Rc<xdv::XdvDocument>)>>,
     /// Rendered pages keyed by XDV page content digest. Pages whose digest
     /// matches a previous rebuild are reused without re-rendering, which is
@@ -72,13 +100,22 @@ impl std::fmt::Debug for XdvGlyphRenderBackend {
 
 impl XdvGlyphRenderBackend {
     pub fn new(resolver: Box<dyn FontResolver>) -> Self {
+        Self::with_image_loader(resolver, Box::new(NullImageLoader))
+    }
+
+    pub fn with_image_loader(
+        resolver: Box<dyn FontResolver>,
+        image_loader: Box<dyn ImageLoader>,
+    ) -> Self {
         Self {
             px_per_pt: 96.0 / 72.0,
             resolver: RefCell::new(resolver),
+            image_loader: RefCell::new(image_loader),
             library: RefCell::new(None),
             faces: RefCell::new(HashMap::new()),
             font_files: RefCell::new(HashMap::new()),
             glyph_cache: RefCell::new(HashMap::new()),
+            image_cache: RefCell::new(HashMap::new()),
             parsed: RefCell::new(None),
             page_cache: RefCell::new(HashMap::new()),
             #[cfg(test)]
@@ -233,6 +270,21 @@ impl XdvGlyphRenderBackend {
         }
     }
 
+    /// Loads and decodes an image referenced by a `pdf:image` special, with
+    /// per-path caching. Currently supports PNG (the format `\XeTeXpicfile`
+    /// and `graphicx` most commonly feed XeTeX on this path).
+    fn decode_image(&self, path: &str) -> Option<Rc<DecodedImage>> {
+        if let Some(cached) = self.image_cache.borrow().get(path) {
+            return cached.clone();
+        }
+        let bytes = self.image_loader.borrow_mut().find_image_file(path)?;
+        let decoded = decode_png(&bytes);
+        self.image_cache
+            .borrow_mut()
+            .insert(path.to_string(), decoded.clone());
+        decoded
+    }
+
     fn parse_document(&self, artifact: &DocumentArtifact) -> Result<Rc<xdv::XdvDocument>> {
         let hash = fnv_hash(&artifact.bytes);
         if let Some((parsed_hash, document)) = self.parsed.borrow().as_ref()
@@ -255,6 +307,97 @@ fn fnv_hash(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
     hash
+}
+
+/// Decodes PNG bytes into RGBA. Returns `None` for undecodable input.
+fn decode_png(bytes: &[u8]) -> Option<Rc<DecodedImage>> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().ok()?;
+    let buffer_size = reader.output_buffer_size()?;
+    let mut buffer = vec![0u8; buffer_size];
+    let info = reader.next_frame(&mut buffer).ok()?;
+    let width = info.width;
+    let height = info.height;
+    let pixels = match info.color_type {
+        png::ColorType::Rgba => buffer[..info.buffer_size()].to_vec(),
+        png::ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in buffer[..info.buffer_size()].chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
+            }
+            rgba
+        }
+        png::ColorType::Grayscale => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for value in &buffer[..info.buffer_size()] {
+                rgba.extend_from_slice(&[*value, *value, *value, 0xff]);
+            }
+            rgba
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for pair in buffer[..info.buffer_size()].chunks_exact(2) {
+                rgba.extend_from_slice(&[pair[0], pair[0], pair[0], pair[1]]);
+            }
+            rgba
+        }
+        _ => return None,
+    };
+    Some(Rc::new(DecodedImage {
+        width,
+        height,
+        pixels,
+    }))
+}
+
+/// Composites a decoded RGBA image onto the page canvas, stretched to
+/// `dest_w × dest_h` pixels at `dest_x/dest_y` (nearest-neighbor sampling).
+fn blit_image(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    image: &DecodedImage,
+    dest_x: i64,
+    dest_y: i64,
+    dest_w: i64,
+    dest_h: i64,
+) {
+    if dest_w <= 0 || dest_h <= 0 || image.width == 0 || image.height == 0 {
+        return;
+    }
+    for row in 0..dest_h {
+        let page_y = dest_y + row;
+        if page_y < 0 || page_y >= canvas_height as i64 {
+            continue;
+        }
+        let source_y = (row * image.height as i64 / dest_h) as u32;
+        for column in 0..dest_w {
+            let page_x = dest_x + column;
+            if page_x < 0 || page_x >= canvas_width as i64 {
+                continue;
+            }
+            let source_x = (column * image.width as i64 / dest_w) as u32;
+            let source = (source_y as usize * image.width as usize + source_x as usize) * 4;
+            let alpha = image.pixels[source + 3] as u32;
+            let dest = (page_y as usize * canvas_width as usize + page_x as usize) * 4;
+            if alpha >= 255 {
+                canvas[dest] = image.pixels[source];
+                canvas[dest + 1] = image.pixels[source + 1];
+                canvas[dest + 2] = image.pixels[source + 2];
+                canvas[dest + 3] = 255;
+            } else if alpha > 0 {
+                // Source-over blend against the opaque white page.
+                let inverse = 255 - alpha;
+                for channel in 0..3 {
+                    let source_value = image.pixels[source + channel] as u32;
+                    let dest_value = canvas[dest + channel] as u32;
+                    canvas[dest + channel] =
+                        ((source_value * alpha + dest_value * inverse) / 255) as u8;
+                }
+                canvas[dest + 3] = 255;
+            }
+        }
+    }
 }
 
 /// Scales a gray bitmap horizontally by `factor` (XDV extend).
@@ -488,6 +631,39 @@ impl RenderBackend for XdvGlyphRenderBackend {
                         );
                     }
                 }
+                xdv::XdvElement::Image {
+                    x_pt,
+                    y_pt,
+                    w_pt,
+                    h_pt,
+                    scale: image_scale,
+                    path,
+                } => {
+                    let Some(image) = self.decode_image(path) else {
+                        continue;
+                    };
+                    // The bbox form carries the display size directly; the
+                    // matrix form sizes from the decoded native pixels
+                    // (1px = 1bp) times the special's scale factor.
+                    let (display_w_pt, display_h_pt) = match image_scale {
+                        Some(factor) => (image.width as f64 * factor, image.height as f64 * factor),
+                        None => (*w_pt, *h_pt),
+                    };
+                    let dest_w = (display_w_pt * scale).round().max(1.0) as i64;
+                    let dest_h = (display_h_pt * scale).round().max(1.0) as i64;
+                    let dest_x = (origin_px + x_pt * scale).floor() as i64;
+                    let dest_y = (origin_px + y_pt * scale).floor() as i64;
+                    blit_image(
+                        &mut canvas,
+                        width,
+                        height,
+                        &image,
+                        dest_x,
+                        dest_y,
+                        dest_w,
+                        dest_h,
+                    );
+                }
             }
         }
 
@@ -610,5 +786,124 @@ mod tests {
             "changed page must re-render"
         );
         assert_eq!(fresh.index, 1);
+    }
+
+    struct NullFonts;
+    impl FontResolver for NullFonts {
+        fn find_font_file(&mut self, _name: &str, _extensions: &[&str]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    struct StubImages {
+        bytes: Vec<u8>,
+    }
+    impl ImageLoader for StubImages {
+        fn find_image_file(&mut self, _path: &str) -> Option<Vec<u8>> {
+            Some(self.bytes.clone())
+        }
+    }
+
+    /// Encodes a `width × height` PNG of a solid color through the png crate.
+    fn solid_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            let pixels = vec![rgba; (width * height) as usize]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            writer.write_image_data(&pixels).unwrap();
+        }
+        bytes
+    }
+
+    /// Builds a one-page XDV with a pagesize special and one bbox-form
+    /// `pdf:image` special placed at (10pt, 10pt).
+    fn image_xdv(image_path: &str) -> Vec<u8> {
+        let pagesize = b"pdf:pagesize width 614.295pt height 794.96999pt";
+        let special = format!("pdf:image bbox 0 0 4 4 clip 0 width 40pt ({} )", image_path);
+        let special = special.replace(" )", ")");
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]); // PRE, XDV id 7
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]); // BOP
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        stream.extend_from_slice(&[239u8, pagesize.len() as u8]);
+        stream.extend_from_slice(pagesize);
+        stream.extend_from_slice(&[239u8, special.len() as u8]);
+        stream.extend_from_slice(special.as_bytes());
+        stream.extend_from_slice(&[140u8]); // EOP
+        stream.extend_from_slice(&[248u8]); // POST
+        stream.extend_from_slice(&[0u8; 24]);
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&[249u8]); // POST_POST
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        stream.push(7);
+        stream.extend_from_slice(&[223u8; 8]);
+        stream
+    }
+
+    #[test]
+    fn pdf_image_specials_composite_onto_rendered_page() {
+        let png = solid_png(2, 2, [255, 0, 0, 255]);
+        let backend = XdvGlyphRenderBackend::with_image_loader(
+            Box::new(NullFonts),
+            Box::new(StubImages { bytes: png }),
+        );
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: image_xdv("logo.png"),
+            source_name: Some("images.xdv".to_string()),
+        };
+        let page = backend.render_page(&artifact, 0).unwrap();
+        // The image is 40×40pt at (10,10) → 53×53 px at 96dpi; the page is
+        // white everywhere else. Verify image pixels are red and pixels
+        // outside the image area stay white.
+        let red_at = |px: usize, py: usize| -> [u8; 4] {
+            let offset = (py * page.width as usize + px) * 4;
+            [
+                page.pixels_rgba[offset],
+                page.pixels_rgba[offset + 1],
+                page.pixels_rgba[offset + 2],
+                page.pixels_rgba[offset + 3],
+            ]
+        };
+        // px_per_pt = 4/3: 10pt → 13.33 → origin 96px + 13 = 109.
+        let inside = red_at(120, 120);
+        assert_eq!(inside, [255, 0, 0, 255], "image area must be red");
+        let outside = red_at(5, 5);
+        assert_eq!(outside, [255, 255, 255, 255], "corner stays white");
+        // Second render must come from the page cache.
+        assert!(backend.render_page(&artifact, 0).is_ok());
+        assert_eq!(backend.render_misses.get(), 1);
+    }
+
+    #[test]
+    fn pdf_image_specials_render_placeholder_when_loader_missing() {
+        let backend = XdvGlyphRenderBackend::with_image_loader(
+            Box::new(NullFonts),
+            Box::new(NullImageLoader),
+        );
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: image_xdv("missing.png"),
+            source_name: Some("missing-images.xdv".to_string()),
+        };
+        // Missing images render without failing the whole page.
+        let page = backend.render_page(&artifact, 0).unwrap();
+        assert!(
+            page.pixels_rgba
+                .chunks_exact(4)
+                .all(|pixel| pixel == [255, 255, 255, 255])
+        );
     }
 }

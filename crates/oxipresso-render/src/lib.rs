@@ -10,7 +10,7 @@ pub mod glyph_backend;
 pub mod xdv;
 
 #[cfg(feature = "freetype")]
-pub use glyph_backend::{FontResolver, XdvGlyphRenderBackend};
+pub use glyph_backend::{DecodedImage, FontResolver, ImageLoader, XdvGlyphRenderBackend};
 
 #[cfg(feature = "pdfium")]
 use pdfium_render::prelude::*;

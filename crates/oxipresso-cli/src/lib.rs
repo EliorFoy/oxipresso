@@ -11,7 +11,9 @@ use oxipresso_engine_external::ExternalEngine;
 use oxipresso_engine_xetex::XetexEngine;
 use oxipresso_render::AutoRenderBackend;
 #[cfg(feature = "freetype")]
-use oxipresso_render::{FontResolver as GlyphFontResolver, XdvGlyphRenderBackend};
+use oxipresso_render::{
+    FontResolver as GlyphFontResolver, ImageLoader as GlyphImageLoader, XdvGlyphRenderBackend,
+};
 use oxipresso_synctex::SyncTexDocument;
 use oxipresso_vfs::{ChangeOutcome, VirtualFileSystem};
 use oxipresso_viewer::{ViewerState, ViewerSyncPosition};
@@ -217,6 +219,34 @@ impl GlyphFontResolver for KpseFontResolver {
     }
 }
 
+/// Loads image files referenced by `pdf:image` specials. Paths are resolved
+/// against the root document's directory first (the specials usually carry
+/// paths relative to the TeX source), then against the include paths.
+#[cfg(feature = "freetype")]
+struct DocumentImageLoader {
+    roots: Vec<PathBuf>,
+}
+
+#[cfg(feature = "freetype")]
+impl GlyphImageLoader for DocumentImageLoader {
+    fn find_image_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        let relative = std::path::Path::new(path);
+        for root in &self.roots {
+            let candidate = root.join(relative);
+            if let Ok(bytes) = std::fs::read(&candidate) {
+                return Some(bytes);
+            }
+            // Also try the bare path (absolute or cwd-relative).
+            if root == &self.roots[0]
+                && let Ok(bytes) = std::fs::read(relative)
+            {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+}
+
 /// Maps engine output-stream events onto the editor info buffers, mirroring
 /// the original protocol: stdout becomes `out`, the `.log` file becomes
 /// `log`; both buffers are truncated at the start of a run and flushed at
@@ -328,9 +358,15 @@ impl OxipressoApp {
         let renderer = {
             let renderer = AutoRenderBackend::default();
             #[cfg(feature = "freetype")]
-            let renderer = renderer.with_xdv_glyph_backend(XdvGlyphRenderBackend::new(Box::new(
-                KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy()),
-            )));
+            let renderer =
+                renderer.with_xdv_glyph_backend(XdvGlyphRenderBackend::with_image_loader(
+                    Box::new(
+                        KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy()),
+                    ),
+                    Box::new(DocumentImageLoader {
+                        roots: disk_roots_for(&root),
+                    }),
+                ));
             renderer
         };
         Self {

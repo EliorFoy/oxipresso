@@ -85,6 +85,22 @@ impl XdvDocument {
                     hash.write_u64(w_pt.to_bits());
                     hash.write_u64(h_pt.to_bits());
                 }
+                XdvElement::Image {
+                    x_pt,
+                    y_pt,
+                    w_pt,
+                    h_pt,
+                    scale,
+                    path,
+                } => {
+                    hash.write_u8(3);
+                    hash.write_u64(x_pt.to_bits());
+                    hash.write_u64(y_pt.to_bits());
+                    hash.write_u64(w_pt.to_bits());
+                    hash.write_u64(h_pt.to_bits());
+                    hash.write_u64(scale.map(|s| s.to_bits()).unwrap_or(0));
+                    hash.write(path.as_bytes());
+                }
             }
         }
         Some(hash.finish())
@@ -171,6 +187,20 @@ pub enum XdvElement {
         y_pt: f64,
         w_pt: f64,
         h_pt: f64,
+    },
+    /// An image placed by a `pdf:image` special (`\includegraphics` /
+    /// `\XeTeXpicfile`). `x_pt`/`y_pt` is the image's top-left corner on the
+    /// page. The bbox form carries the display size directly in `w_pt`/`h_pt`;
+    /// the matrix form carries `scale` instead and the renderer computes the
+    /// display size from the decoded image's native pixel size (1px = 1bp).
+    Image {
+        x_pt: f64,
+        y_pt: f64,
+        w_pt: f64,
+        h_pt: f64,
+        scale: Option<f64>,
+        /// Image file path exactly as written in the special.
+        path: String,
     },
 }
 
@@ -397,6 +427,20 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                 {
                     target.width_pt = dims.0;
                     target.height_pt = dims.1;
+                }
+                if let Some(image) = parse_pdf_image_special(&text) {
+                    let (w_pt, h_pt, scale) = resolve_image_size(&image);
+                    flush_glyphs!();
+                    if let Some(target) = page.as_mut() {
+                        target.elements.push(XdvElement::Image {
+                            x_pt: state.h as f64 * pt_per_unit,
+                            y_pt: state.v as f64 * pt_per_unit,
+                            w_pt,
+                            h_pt,
+                            scale,
+                            path: image.path,
+                        });
+                    }
                 }
                 match parse_color_special(&text) {
                     Some(ColorSpecial::Push(rgba)) => {
@@ -680,6 +724,114 @@ fn parse_native_font_def(reader: &mut Reader<'_>) -> Result<XdvFont> {
     })
 }
 
+/// A parsed `pdf:image` special: either the `bbox` form (`\includegraphics`)
+/// or the `matrix` form (`\XeTeXpicfile`).
+#[derive(Debug, Clone)]
+struct PdfImageSpecial {
+    path: String,
+    /// bbox-form fields: natural size in bp plus optional explicit display
+    /// width/height in points.
+    bbox: Option<[f64; 4]>,
+    display_width_pt: Option<f64>,
+    display_height_pt: Option<f64>,
+    /// matrix-form scale factors (a and d of the PDF matrix).
+    scale: Option<f64>,
+}
+
+/// Parses `pdf:image bbox X1 Y1 X2 Y2 [clip N] [width Wpt|height Hpt] (<file>)`
+/// and `pdf:image matrix A B C D E F [page N] (<file>)` specials. Returns
+/// `None` for any other special.
+fn parse_pdf_image_special(text: &str) -> Option<PdfImageSpecial> {
+    let rest = text.trim().strip_prefix("pdf:image ")?;
+    let path = rest.rfind('(').and_then(|open| {
+        rest[open + 1..]
+            .strip_suffix(')')
+            .map(|inner| inner.trim().to_string())
+    })?;
+    let head = rest
+        .rfind('(')
+        .map(|open| rest[..open].trim())
+        .unwrap_or(rest);
+    let mut tokens = head.split_whitespace().peekable();
+    match tokens.next()? {
+        "bbox" => {
+            let values: Vec<f64> = (0..4)
+                .filter_map(|_| tokens.next().and_then(|t| t.parse::<f64>().ok()))
+                .collect();
+            if values.len() < 4 {
+                return None;
+            }
+            let mut special = PdfImageSpecial {
+                path,
+                bbox: Some([values[0], values[1], values[2], values[3]]),
+                display_width_pt: None,
+                display_height_pt: None,
+                scale: None,
+            };
+            while let Some(token) = tokens.next() {
+                match token {
+                    "width" => {
+                        let value = tokens.next()?;
+                        special.display_width_pt = Some(parse_pt_value(value)?);
+                    }
+                    "height" => {
+                        let value = tokens.next()?;
+                        special.display_height_pt = Some(parse_pt_value(value)?);
+                    }
+                    _ => {}
+                }
+            }
+            Some(special)
+        }
+        "matrix" => {
+            let values: Vec<f64> = (0..6)
+                .filter_map(|_| tokens.next().and_then(|t| t.parse::<f64>().ok()))
+                .collect();
+            if values.len() < 6 {
+                return None;
+            }
+            Some(PdfImageSpecial {
+                path,
+                bbox: None,
+                display_width_pt: None,
+                display_height_pt: None,
+                scale: Some(values[0]),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Parses `123.45pt` / `123.45bp` / bare `123.45` into f64 points.
+fn parse_pt_value(token: &str) -> Option<f64> {
+    let token = token.trim();
+    let number = token
+        .strip_suffix("pt")
+        .or_else(|| token.strip_suffix("bp"))
+        .unwrap_or(token);
+    number.parse::<f64>().ok()
+}
+
+/// Resolves the display size in points for a parsed `pdf:image` special.
+/// The bbox form scales the natural bbox by the explicit width/height when
+/// present. The matrix form returns only the scale — the renderer computes
+/// the display size from the decoded image's native pixel size.
+fn resolve_image_size(image: &PdfImageSpecial) -> (f64, f64, Option<f64>) {
+    if let Some([x1, y1, x2, y2]) = image.bbox {
+        let natural_w = (x2 - x1).abs().max(1e-6);
+        let natural_h = (y2 - y1).abs().max(1e-6);
+        let w_pt = image.display_width_pt.unwrap_or(natural_w);
+        let h_pt = image
+            .display_height_pt
+            .unwrap_or_else(|| natural_h * (w_pt / natural_w));
+        (w_pt, h_pt, None)
+    } else if let Some(scale) = image.scale {
+        (0.0, 0.0, Some(scale))
+    } else {
+        (100.0, 100.0, None)
+    }
+}
+
 fn char_width_dvi(
     fonts: &mut HashMap<u32, XdvFont>,
     font_id: u32,
@@ -914,6 +1066,9 @@ mod tests {
                     assert_eq!(glyphs.len(), 1);
                     assert_eq!(glyphs[0].code, 65);
                 }
+                XdvElement::Image { .. } => {
+                    panic!("synthetic XDV should not contain images");
+                }
             }
         }
         assert_eq!(rules, 1);
@@ -1048,6 +1203,81 @@ mod tests {
             }
             without_colors.page_digest(0)
         });
+    }
+
+    #[test]
+    fn parses_pdf_image_specials_from_real_engine_layout() {
+        // Modeled byte-for-byte on the real engine's includegraphics output:
+        // an \includegraphics bbox special and an \XeTeXpicfile matrix special.
+        let bbox_text =
+            b"pdf:image bbox 0 0 511.99873 511.99873 clip 0 width 256.95935pt (../doc/logo.png)";
+        let matrix_text =
+            b"pdf:image matrix 0.27682 0.0 0.0 0.27682 0.0 0.0 page 0 (../doc/logo.png)";
+
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]);
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]); // BOP
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+
+        stream.extend_from_slice(&[239u8, bbox_text.len() as u8]);
+        stream.extend_from_slice(bbox_text);
+
+        stream.extend_from_slice(&[DOWN4]); // move down, then the matrix image
+        stream.extend_from_slice(&1_000_000i32.to_be_bytes());
+        stream.extend_from_slice(&[239u8, matrix_text.len() as u8]);
+        stream.extend_from_slice(matrix_text);
+
+        stream.extend_from_slice(&[140u8]); // EOP
+
+        let document = parse_xdv(&stream, &mut no_tfm).unwrap();
+        let page = &document.pages[0];
+        let mut images = page
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                XdvElement::Image {
+                    x_pt,
+                    y_pt,
+                    w_pt,
+                    h_pt,
+                    scale,
+                    path,
+                } => Some((*x_pt, *y_pt, *w_pt, *h_pt, *scale, path.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 2, "both pdf:image specials parse");
+
+        let (x, y, w, h, scale, path) = images.remove(0);
+        assert!((w - 256.95935).abs() < 1e-3, "bbox width, got {w}");
+        assert!((h - 256.95935).abs() < 1e-3, "square bbox keeps aspect");
+        assert_eq!(scale, None);
+        assert_eq!(path, "../doc/logo.png");
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 0.0);
+
+        let (x, y, w, h, scale, path) = images.remove(0);
+        assert_eq!(scale, Some(0.27682));
+        assert_eq!(w, 0.0, "matrix form defers sizing to the renderer");
+        assert_eq!(h, 0.0);
+        assert_eq!(path, "../doc/logo.png");
+        // DOWN4 by 1_000_000 sp = 1_000_000/65536 pt.
+        assert!(
+            (y - 15.258_789).abs() < 1e-4,
+            "image placed at pen y, got {y}"
+        );
+        // Digest must include images: removing them changes the digest.
+        let digest_with = document.page_digest(0).unwrap();
+        let mut without = document.clone();
+        without.pages[0]
+            .elements
+            .retain(|element| !matches!(element, XdvElement::Image { .. }));
+        assert_ne!(digest_with, without.page_digest(0).unwrap());
     }
 
     #[test]

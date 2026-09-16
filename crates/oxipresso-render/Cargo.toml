@@ -9,13 +9,16 @@ default = []
 pdfium = ["dep:pdfium-auto", "dep:pdfium-render"]
 pdfium-bundled = ["pdfium", "pdfium-auto/bundled"]
 # Real glyph rasterization for XDV/DVI artifacts through the FreeType C
-# library (discovered through vcpkg on Windows / pkg-config on Linux).
-freetype = ["dep:vcpkg", "dep:pkg-config"]
+# library (discovered through vcpkg on Windows / pkg-config on Linux). Also
+# enables PDF/TSV image decoding for `pdf:image` specials via the pure-Rust
+# `png` crate.
+freetype = ["dep:vcpkg", "dep:pkg-config", "dep:png"]
 
 [dependencies]
 oxipresso-engine-api = { path = "../oxipresso-engine-api" }
 pdfium-auto = { version = "0.3.0", optional = true }
 pdfium-render = { version = "0.8.37", optional = true }
+png = { version = "0.18.1", optional = true }
 
 [build-dependencies]
 pkg-config = { version = "0.3", optional = true }

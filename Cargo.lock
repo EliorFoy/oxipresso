@@ -2015,6 +2015,7 @@ dependencies = [
  "pdfium-auto",
  "pdfium-render",
  "pkg-config",
+ "png",
  "vcpkg",
 ]
 
