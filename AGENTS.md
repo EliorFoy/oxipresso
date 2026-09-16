@@ -29,6 +29,7 @@ Engine policy:
 - An optional `eframe/egui` + `wgpu` GUI shell now exists for opening and polling artifact files.
 - GUI artifact watching now goes through an `oxipresso-platform` file-watcher abstraction. The current backend is portable polling, and native Windows/Linux/macOS watchers can replace it later without changing viewer code.
 - PDF rendering can use real PDFium rasterization when the optional `pdfium` feature is enabled; otherwise it falls back to placeholder pages.
+- XDV/DVI artifacts can now be rendered with **real glyphs**: the optional `freetype` feature adds a full XDV parser (`oxipresso-render::xdv`), a layout-independent FreeType binding (`ft`), and `XdvGlyphRenderBackend`, which resolves font files through a `FontResolver`, rasterizes glyphs with FreeType, and composites them onto RGBA pages.
 - The external backend captures SyncTeX sidecar output. `oxipresso-synctex` decodes gzip/plain SyncTeX, parses `Output:` / `Input:` metadata plus common page/node records, and can perform first nearest-line forward and nearest-point reverse lookups. CLI `synctex-forward` now updates the internal viewer page and stores hit coordinates; the optional GUI can draw a lightweight marker and request scrolling to it, but full coordinate behavior is still pending.
 
 ## Completed Work
@@ -154,6 +155,12 @@ Implemented crates:
   - `PdfiumRenderBackend` loads PDF artifacts from bytes and renders real RGBA pages.
   - `AutoRenderBackend` prefers `PdfiumRenderBackend` for PDFs when the `pdfium` feature is enabled and falls back to `PdfMetadataRenderBackend` on failure.
   - PDFium binding is cached per backend instance, avoiding repeated binding attempts inside a long-running viewer.
+  - Adds an optional `freetype` feature (vcpkg freetype on Windows, pkg-config `freetype2` on Linux; default builds stay dependency-free).
+  - Adds `xdv` module: a complete XDV/DVI stream parser following the TeXpresso engine's exact output layout — classic DVI opcodes, XDV native font defs (opcode 252: font_id[4], 16.16 size, flags, name, face index, optional color/extend/slant/embolden), `SET_GLYPHS` (253) and `SET_TEXT_AND_GLYPHS` (254) glyph arrays with fixed-point offsets, `pdf:pagesize` specials for page dimensions, plus a minimal TFM width parser for classic set_char advances.
+  - Adds `ft` module: minimal hand-written FreeType FFI whose glyph-slot access is layout-independent — the slot is located by scanning the face for a back-referencing pointer (`slot->face == face`) with a heap-cluster filter, and the rendered `FT_Bitmap` is located by signature (rows/width/pitch/buffer/gray pixel mode), surviving FreeType 2.14 struct reshuffles.
+  - Adds `XdvGlyphRenderBackend`: resolves font files through a `FontResolver` (native fonts try `.otf`/`.ttf`, classic try `.pfb`/`.ttf`/`.otf`; face index from the font def; Type1 char codes fall back to direct glyph indices), rasterizes glyphs with FreeType at 96 dpi, caches glyphs per (font, face, code, size), and composites glyphs (with FreeType bearing) plus rules onto RGBA pages.
+  - `AutoRenderBackend::with_xdv_glyph_backend` attaches the glyph renderer for XDV/DVI artifacts; the CLI installs it behind the `freetype` feature with a kpsewhich-based resolver.
+  - Has tests for synthetic XDV parsing (pages, page dims, fonts, glyph runs, rules), synthetic TFM widths, a system-font FreeType rasterization smoke (Windows `times.ttf`), and an env-gated real-XDV render smoke (`OXIPRESSO_XDV_SMOKE`).
 
 - `oxipresso-synctex`
   - Decodes plain and gzip-compressed SyncTeX bytes.
@@ -356,13 +363,27 @@ $env:OXIPRESSO_USE_REAL_XETEX='1'; $env:TEXPRESSO_SRC='F:\code\texpresso-src'; $
 cargo test -p oxipresso-engine-xetex -- --nocapture --test-threads=1
 cargo run -q -p oxipresso-cli --bin oxipresso -- -test-initialize <temp>\oxi-real-smoke.tex
 ```
-
 Result:
 
 - `real_xetex_bootstrap_builds_format_and_typesets_simple` passes: with `KpsewhichResolver` installed, the first `initialize` bootstraps the format from `xelatex.ini` (spotless), persists `texpresso.fmt` to `OXIPRESSO_XETEX_FORMAT`, typesets `test/simple.tex`, and returns a nonempty real XDV `DocumentArtifact`; a second `initialize` reuses the persisted format and produces an artifact again.
 - All 5 tests in the crate pass in real mode; stub-behavior tests self-skip via `XetexEngine::real_mode()`.
 - CLI end-to-end: `OXIPRESSO_ARTIFACT_OUT` captured a real 1011-byte XDV (first bytes `F7 07` XDV magic) and `texpresso.fmt` was 22.3 MB; stdout showed the full lookup flow with extension guessing feeding kpsewhich (`lookup-file read failed "cmmi6"` -> `read successful "cmmi6.tfm"`), the XDV write, and the `.aux` read.
 - Known runtime noise: fontconfig prints `Cannot load default config file` (non-fatal; see Not Done Yet).
+
+Additional XDV real-glyph rendering verified (freetype feature):
+
+```powershell
+$env:VCPKG_ROOT='F:\code\vcpkg'; $env:OXIPRESSO_XDV_SMOKE='F:\code\oxipresso\target\simple-real.xdv'
+cargo test -p oxipresso-render --features freetype
+cargo check -p oxipresso-cli --features freetype
+```
+
+Result:
+
+- 17/17 render tests pass with the `freetype` feature (15 without it, keeping default builds dependency-free).
+- `freetype_rasterizes_glyph_from_system_font` rasterizes a real glyph from `C:\Windows\Fonts\times.ttf` (12x11 bitmap, top bearing 11) through a synthetic XDV.
+- `xdv_glyph_render_smoke_renders_real_xdv` renders page 1 of the real engine's `simple-real.xdv` end to end — native LM OTF fonts + classic Type1 math fonts resolved through kpsewhich — and asserts substantial dark-pixel coverage.
+- FreeType is 2.14.3 on this machine, whose `FT_FaceRec`/`FT_GlyphSlotRec` layouts differ from the hand-written assumptions; the bindings therefore locate the glyph slot by back-reference scan and the bitmap by field-signature scan, both validated at runtime. `FT_LOAD_NO_BITMAP|FT_LOAD_NO_HINTING` crashed this build; `FT_LOAD_DEFAULT` is used instead.
 
 Additional PDFium smoke verified on Windows:
 
@@ -407,7 +428,7 @@ Result:
 - The current live-preview bridge is polling-based artifact reload, not a direct editor-protocol or engine-event connection.
 - `oxipresso-viewer` is not yet a true TeXpresso live preview process connected to editor protocol, SyncTeX, or engine events.
 - `oxipresso-render` can render real PDF pages only when the optional `pdfium` feature is enabled; default builds still use placeholder fallback.
-- XDV/DVI page metadata can count pages, rule opcodes can render as rectangles, basic glyph opcodes can render as placeholder marks, and DVI font definitions can size those placeholders, but real glyph rasterization/font lookup/image/special rendering is not implemented yet.
+- XDV/DVI real glyph rendering works behind the `freetype` feature (native OTF + classic Type1 via kpsewhich), but specials, images (`pic_file`), XDV font color/extend/slant/embolden transforms, and sub-pixel positioning are still TODO; the glyph backend is not yet wired into the egui viewer's zoom/crop path beyond full-page rendering.
 - The PDF page counter is intentionally lightweight and may not see page objects hidden in compressed object streams; it currently falls back to one page for a valid PDF in that case.
 - No native platform file watcher is implemented yet; current GUI watch mode is portable polling behind the `oxipresso-platform` watcher abstraction.
 - No Tectonic provider is implemented yet; the TeX Live path is covered by `KpsewhichResolver` (kpsewhich), but not the full original texlive dependency-tape validation.
@@ -426,11 +447,11 @@ Result:
 
 ## Suggested Next Steps
 
-1. Expand the XDV/DVI parser/renderer beyond placeholder glyphs and rules: real font loading (FreeType is already linked in real mode), specials, images, and page boxes for TeXpresso-style live preview.
-2. Enable SyncTeX in the real shim (`tt_xetex_set_int_variable("synctex_enabled", 1)` plus `synctex_use_gz`/`synctex_texpresso_extension`), capture the sidecar through `output_synctex`, and replace the approximate GUI marker mapping with media-box coordinate scrolling and reverse SyncTeX.
-3. Implement the TeXpresso-defining incremental checkpoint/restart model so editor changes stop requiring a full engine restart.
-4. Split stdout/log streams in the CLI like TeXpresso, and add protocol snapshots covering the real engine flow.
-5. Provide a fontconfig config on Windows (or route font lookup through kpsewhich/font maps) to fix the "Cannot load default config file" runtime error and enable native font features.
+1. Enable SyncTeX in the real shim (`tt_xetex_set_int_variable("synctex_enabled", 1)` plus `synctex_use_gz`/`synctex_texpresso_extension`), capture the sidecar through `output_synctex`, and replace the approximate GUI marker mapping with media-box coordinate scrolling and reverse SyncTeX.
+2. Implement the TeXpresso-defining incremental checkpoint/restart model so editor changes stop requiring a full engine restart.
+3. Split stdout/log streams in the CLI like TeXpresso, and add protocol snapshots covering the real engine flow.
+4. Provide a fontconfig config on Windows (or route font lookup through kpsewhich/font maps) to fix the "Cannot load default config file" runtime error and enable native font features.
+5. Polish XDV glyph rendering: XDV specials, `pic_file` images, color/extend/slant/embolden transforms, and decide whether Windows builds should enable `freetype` by default.
 6. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
 7. Expand original TeXpresso fixture integration tests:
    - async register lookup and lookup-file restart scenarios through the real engine.

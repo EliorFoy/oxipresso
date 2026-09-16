@@ -3,6 +3,15 @@ use std::collections::HashMap;
 #[cfg(feature = "pdfium")]
 use std::{cell::RefCell, fmt};
 
+#[cfg(feature = "freetype")]
+pub mod ft;
+#[cfg(feature = "freetype")]
+pub mod glyph_backend;
+pub mod xdv;
+
+#[cfg(feature = "freetype")]
+pub use glyph_backend::{FontResolver, XdvGlyphRenderBackend};
+
 #[cfg(feature = "pdfium")]
 use pdfium_render::prelude::*;
 
@@ -32,6 +41,8 @@ pub struct AutoRenderBackend {
     metadata: PdfMetadataRenderBackend,
     #[cfg(feature = "pdfium")]
     pdfium: PdfiumRenderBackend,
+    #[cfg(feature = "freetype")]
+    xdv_glyphs: Option<XdvGlyphRenderBackend>,
 }
 
 impl Default for AutoRenderBackend {
@@ -40,7 +51,19 @@ impl Default for AutoRenderBackend {
             metadata: PdfMetadataRenderBackend,
             #[cfg(feature = "pdfium")]
             pdfium: PdfiumRenderBackend::default(),
+            #[cfg(feature = "freetype")]
+            xdv_glyphs: None,
         }
+    }
+}
+
+impl AutoRenderBackend {
+    /// Attaches a real-glyph XDV/DVI renderer backed by FreeType and a font
+    /// resolver; only available with the `freetype` feature.
+    #[cfg(feature = "freetype")]
+    pub fn with_xdv_glyph_backend(mut self, backend: XdvGlyphRenderBackend) -> Self {
+        self.xdv_glyphs = Some(backend);
+        self
     }
 }
 
@@ -58,6 +81,13 @@ impl RenderBackend for AutoRenderBackend {
                 return Ok(count);
             }
         }
+        #[cfg(feature = "freetype")]
+        if matches!(artifact.kind, ArtifactKind::Xdv | ArtifactKind::Dvi)
+            && let Some(backend) = self.xdv_glyphs.as_ref()
+            && let Ok(count) = backend.page_count(artifact)
+        {
+            return Ok(count);
+        }
         self.metadata.page_count(artifact)
     }
 
@@ -67,6 +97,13 @@ impl RenderBackend for AutoRenderBackend {
             if let Ok(rendered) = self.pdfium.render_page(artifact, page) {
                 return Ok(rendered);
             }
+        }
+        #[cfg(feature = "freetype")]
+        if matches!(artifact.kind, ArtifactKind::Xdv | ArtifactKind::Dvi)
+            && let Some(backend) = self.xdv_glyphs.as_ref()
+            && let Ok(rendered) = backend.render_page(artifact, page)
+        {
+            return Ok(rendered);
         }
         self.metadata.render_page(artifact, page)
     }
@@ -889,6 +926,7 @@ fn is_pdf_delimiter_or_whitespace(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn pdf(bytes: &[u8]) -> DocumentArtifact {
         DocumentArtifact {
@@ -1112,6 +1150,64 @@ endobj
         assert!(glyph.width > DVI_GLYPH_WIDTH);
     }
 
+    #[cfg(feature = "freetype")]
+    #[test]
+    fn xdv_glyph_render_smoke_renders_real_xdv() {
+        // Set OXIPRESSO_XDV_SMOKE to a real XDV (e.g. produced by the real
+        // engine through OXIPRESSO_ARTIFACT_OUT) to exercise the full
+        // parse -> font lookup -> rasterize -> composite pipeline.
+        let Ok(path) = std::env::var("OXIPRESSO_XDV_SMOKE") else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return;
+        };
+        struct KpseFontResolver;
+        impl FontResolver for KpseFontResolver {
+            fn find_font_file(&mut self, name: &str, extensions: &[&str]) -> Option<Vec<u8>> {
+                for extension in extensions {
+                    let output = std::process::Command::new("kpsewhich")
+                        .arg(format!("{name}.{extension}"))
+                        .output()
+                        .ok()?;
+                    if !output.status.success() {
+                        continue;
+                    }
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let resolved = stdout.lines().map(str::trim).find(|line| !line.is_empty());
+                    if let Some(found) = resolved
+                        && let Ok(bytes) = std::fs::read(found)
+                    {
+                        return Some(bytes);
+                    }
+                }
+                None
+            }
+        }
+
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes,
+            source_name: Some(path.clone()),
+        };
+        let backend = XdvGlyphRenderBackend::new(Box::new(KpseFontResolver));
+        assert!(backend.page_count(&artifact).unwrap() >= 1);
+        let page = backend.render_page(&artifact, 0).unwrap();
+        assert_eq!(
+            page.pixels_rgba.len(),
+            (page.width * page.height * 4) as usize
+        );
+        let dark_pixels = page
+            .pixels_rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] < 128)
+            .count();
+        assert!(
+            dark_pixels > 200,
+            "real XDV page should contain rendered text, got {dark_pixels} dark pixels"
+        );
+    }
+
     #[cfg(feature = "pdfium")]
     #[test]
     fn pdfium_smoke_renders_real_pdf_when_requested() {
@@ -1133,6 +1229,104 @@ endobj
         assert_eq!(
             page.pixels_rgba.len(),
             (page.width * page.height * 4) as usize
+        );
+    }
+
+    #[cfg(feature = "freetype")]
+    #[test]
+    fn freetype_rasterizes_glyph_from_system_font() {
+        // Uses a font shipped with Windows so no TeX distribution is needed.
+        const FONT: &str = "times";
+        const FONT_PATH: &str = r"C:\Windows\Fonts\times.ttf";
+        if !std::path::Path::new(FONT_PATH).is_file() {
+            return;
+        }
+        struct SystemFont;
+        impl FontResolver for SystemFont {
+            fn find_font_file(&mut self, name: &str, extensions: &[&str]) -> Option<Vec<u8>> {
+                if !name.eq_ignore_ascii_case(FONT) {
+                    return None;
+                }
+                extensions
+                    .iter()
+                    .map(|extension| format!("{name}.{extension}"))
+                    .filter_map(|candidate| {
+                        let path = PathBuf::from(r"C:\Windows\Fonts").join(&candidate);
+                        std::fs::read(path).ok()
+                    })
+                    .next()
+            }
+        }
+
+        // Build a synthetic XDV selecting a native font named `times` and
+        // setting glyph 'A' (FreeType maps it via the font's cmap).
+        use crate::xdv::parse_xdv;
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]);
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]); // BOP
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        stream.extend_from_slice(&[252u8]); // DEFINE_NATIVE_FONT
+        stream.extend_from_slice(&40u32.to_be_bytes()); // font id 40
+        stream.extend_from_slice(&(12u32 << 16).to_be_bytes()); // 12pt 16.16
+        stream.extend_from_slice(&0u16.to_be_bytes());
+        stream.push(FONT.len() as u8);
+        stream.extend_from_slice(FONT.as_bytes());
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        stream.extend_from_slice(&[236u8]); // FNT2: select font 40 (two bytes)
+        stream.extend_from_slice(&40u16.to_be_bytes());
+        stream.extend_from_slice(&[253u8]); // SET_GLYPHS
+        stream.extend_from_slice(&100i32.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&65u16.to_be_bytes()); // glyph 'A'
+        stream.extend_from_slice(&[140u8]); // EOP
+
+        let document = parse_xdv(&stream, &mut |_| None).unwrap();
+        #[cfg(feature = "freetype")]
+        eprintln!(
+            "[debug] parsed pages={} fonts={} elements={}",
+            document.pages.len(),
+            document.fonts.len(),
+            document
+                .pages
+                .first()
+                .map(|page| page.elements.len())
+                .unwrap_or(0)
+        );
+        for element in document
+            .pages
+            .first()
+            .map(|page| page.elements.clone())
+            .unwrap_or_default()
+        {
+            eprintln!("[debug] element: {element:?}");
+        }
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: stream,
+            source_name: Some("synthetic.xdv".to_string()),
+        };
+        let backend = XdvGlyphRenderBackend::new(Box::new(SystemFont));
+        assert_eq!(backend.page_count(&artifact).unwrap(), 1);
+        let page = backend.render_page(&artifact, 0).unwrap();
+        assert_eq!(
+            page.pixels_rgba.len(),
+            (page.width * page.height * 4) as usize
+        );
+        let dark_pixels = page
+            .pixels_rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] < 128)
+            .count();
+        assert!(
+            dark_pixels > 20,
+            "rendered glyph should produce visible dark pixels, got {dark_pixels}"
         );
     }
 }

@@ -18,6 +18,7 @@ default = []
 gui = ["oxipresso-viewer/gui"]
 pdfium = ["oxipresso-render/pdfium", "oxipresso-viewer/pdfium"]
 pdfium-bundled = ["pdfium", "oxipresso-render/pdfium-bundled", "oxipresso-viewer/pdfium-bundled"]
+freetype = ["oxipresso-render/freetype"]
 
 [dependencies]
 oxipresso-editor-protocol = { path = "../oxipresso-editor-protocol" }

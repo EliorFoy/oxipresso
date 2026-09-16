@@ -2012,6 +2012,8 @@ dependencies = [
  "oxipresso-engine-api",
  "pdfium-auto",
  "pdfium-render",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]

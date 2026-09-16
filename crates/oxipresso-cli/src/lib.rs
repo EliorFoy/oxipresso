@@ -10,6 +10,8 @@ use oxipresso_engine_api::{RestartPolicy, RootDocument, TypesettingEngine};
 use oxipresso_engine_external::ExternalEngine;
 use oxipresso_engine_xetex::XetexEngine;
 use oxipresso_render::AutoRenderBackend;
+#[cfg(feature = "freetype")]
+use oxipresso_render::{FontResolver as GlyphFontResolver, XdvGlyphRenderBackend};
 use oxipresso_synctex::SyncTexDocument;
 use oxipresso_vfs::{ChangeOutcome, VirtualFileSystem};
 use oxipresso_viewer::{ViewerState, ViewerSyncPosition};
@@ -148,6 +150,61 @@ fn root_document(options: &CliOptions) -> Result<RootDocument, String> {
     })
 }
 
+#[cfg(feature = "freetype")]
+struct KpseFontResolver {
+    kpsewhich: Option<PathBuf>,
+}
+
+#[cfg(feature = "freetype")]
+impl KpseFontResolver {
+    fn detect() -> Option<Self> {
+        Some(Self {
+            kpsewhich: which_kpsewhich(),
+        })
+    }
+
+    fn dummy() -> Self {
+        Self { kpsewhich: None }
+    }
+}
+
+#[cfg(feature = "freetype")]
+fn which_kpsewhich() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("OXIPRESSO_KPSEWHICH") {
+        let path = PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    let output = std::process::Command::new("kpsewhich")
+        .arg("--version")
+        .output()
+        .ok()?;
+    output.status.success().then(|| PathBuf::from("kpsewhich"))
+}
+
+#[cfg(feature = "freetype")]
+impl GlyphFontResolver for KpseFontResolver {
+    fn find_font_file(&mut self, name: &str, extensions: &[&str]) -> Option<Vec<u8>> {
+        let kpsewhich = self.kpsewhich.as_ref()?;
+        for extension in extensions {
+            let output = std::process::Command::new(kpsewhich)
+                .arg(format!("{name}.{extension}"))
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                continue;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let resolved = stdout.lines().map(str::trim).find(|line| !line.is_empty());
+            if let Some(path) = resolved
+                && let Ok(bytes) = std::fs::read(path)
+            {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+}
+
 pub struct OxipressoApp {
     options: CliOptions,
     root: RootDocument,
@@ -171,13 +228,21 @@ impl OxipressoApp {
         if let Some(resolver) = oxipresso_engine_xetex::texlive::KpsewhichResolver::auto() {
             vfs.set_resolver(Box::new(resolver));
         }
+        let renderer = {
+            let renderer = AutoRenderBackend::default();
+            #[cfg(feature = "freetype")]
+            let renderer = renderer.with_xdv_glyph_backend(XdvGlyphRenderBackend::new(Box::new(
+                KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy()),
+            )));
+            renderer
+        };
         Self {
             options,
             root,
             vfs,
             engine: choose_engine(),
             viewer: ViewerState::default(),
-            renderer: AutoRenderBackend::default(),
+            renderer,
             synctex: None,
             paused,
         }
