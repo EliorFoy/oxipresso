@@ -28,7 +28,15 @@ pub struct XdvGlyphRenderBackend {
     font_files: RefCell<HashMap<String, Option<Rc<Vec<u8>>>>>,
     glyph_cache: RefCell<HashMap<(String, u32, u32, u32), Option<Rc<GrayBitmap>>>>,
     parsed: RefCell<Option<(u64, Rc<xdv::XdvDocument>)>>,
+    /// Rendered pages keyed by XDV page content digest. Pages whose digest
+    /// matches a previous rebuild are reused without re-rendering, which is
+    /// the renderer-side half of the incremental rebuild model.
+    page_cache: RefCell<HashMap<u64, RenderedPage>>,
+    #[cfg(test)]
+    render_misses: std::cell::Cell<usize>,
 }
+
+const PAGE_CACHE_CAPACITY: usize = 64;
 
 struct GrayBitmap {
     left: i64,
@@ -72,6 +80,9 @@ impl XdvGlyphRenderBackend {
             font_files: RefCell::new(HashMap::new()),
             glyph_cache: RefCell::new(HashMap::new()),
             parsed: RefCell::new(None),
+            page_cache: RefCell::new(HashMap::new()),
+            #[cfg(test)]
+            render_misses: std::cell::Cell::new(0),
         }
     }
 
@@ -280,10 +291,20 @@ impl RenderBackend for XdvGlyphRenderBackend {
             ));
         }
         let document = self.parse_document(artifact)?;
+        let Some(page_digest) = document.page_digest(page) else {
+            return Err(EngineError::new("page index out of range"));
+        };
+        if let Some(cached) = self.page_cache.borrow().get(&page_digest) {
+            let mut cached = cached.clone();
+            cached.index = page;
+            return Ok(cached);
+        }
         let page_data = document
             .pages
             .get(page)
             .ok_or_else(|| EngineError::new("page index out of range"))?;
+        #[cfg(test)]
+        self.render_misses.set(self.render_misses.get() + 1);
         let scale = self.px_per_pt;
         let width = (page_data.width_pt * scale).round().max(1.0) as u32;
         let height = (page_data.height_pt * scale).round().max(1.0) as u32;
@@ -348,11 +369,124 @@ impl RenderBackend for XdvGlyphRenderBackend {
             }
         }
 
-        Ok(RenderedPage {
+        let rendered = RenderedPage {
             index: page,
             width,
             height,
             pixels_rgba: canvas,
-        })
+        };
+        {
+            let mut cache = self.page_cache.borrow_mut();
+            if cache.len() >= PAGE_CACHE_CAPACITY {
+                if let Some(oldest) = cache.keys().next().copied() {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(page_digest, rendered.clone());
+        }
+        Ok(rendered)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xdv;
+
+    struct SystemFont;
+    impl FontResolver for SystemFont {
+        fn find_font_file(&mut self, name: &str, extensions: &[&str]) -> Option<Vec<u8>> {
+            if !name.eq_ignore_ascii_case("times") {
+                return None;
+            }
+            extensions
+                .iter()
+                .map(|extension| format!("{name}.{extension}"))
+                .filter_map(|candidate| {
+                    let path = std::path::PathBuf::from(r"C:\Windows\Fonts").join(candidate);
+                    std::fs::read(path).ok()
+                })
+                .next()
+        }
+    }
+
+    /// Builds a two-page XDV where `page1_code` controls the second page's
+    /// only glyph, so page 0 stays byte-identical while page 1 differs.
+    fn two_page_xdv(page1_code: u16) -> Vec<u8> {
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]); // PRE, XDV id 7
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        for (page_index, code) in [65u16, page1_code].into_iter().enumerate() {
+            stream.extend_from_slice(&[139u8]); // BOP
+            stream.extend_from_slice(&(page_index as i32).to_be_bytes());
+            stream.extend_from_slice(&[0u8; 36]);
+            stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+            stream.extend_from_slice(&[252u8]); // DEFINE_NATIVE_FONT
+            stream.extend_from_slice(&40u32.to_be_bytes());
+            stream.extend_from_slice(&(12u32 << 16).to_be_bytes());
+            stream.extend_from_slice(&0u16.to_be_bytes());
+            stream.push(b"times".len() as u8);
+            stream.extend_from_slice(b"times");
+            stream.extend_from_slice(&0u32.to_be_bytes());
+            stream.extend_from_slice(&[236u8]); // FNT2
+            stream.extend_from_slice(&40u16.to_be_bytes());
+            stream.extend_from_slice(&[253u8]); // SET_GLYPHS
+            stream.extend_from_slice(&100i32.to_be_bytes());
+            stream.extend_from_slice(&1u16.to_be_bytes());
+            stream.extend_from_slice(&0i32.to_be_bytes());
+            stream.extend_from_slice(&0i32.to_be_bytes());
+            stream.extend_from_slice(&code.to_be_bytes());
+            stream.extend_from_slice(&[140u8]); // EOP
+        }
+        stream.extend_from_slice(&[248u8]); // POST
+        stream.extend_from_slice(&[0u8; 24]);
+        stream.extend_from_slice(&2u16.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&[249u8]); // POST_POST
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        stream.push(7);
+        stream.extend_from_slice(&[223u8; 8]);
+        stream
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn page_cache_reuses_unchanged_pages_across_artifacts() {
+        if !std::path::Path::new(r"C:\Windows\Fonts\times.ttf").is_file() {
+            return;
+        }
+        let backend = XdvGlyphRenderBackend::new(Box::new(SystemFont));
+        let first = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: two_page_xdv(66),
+            source_name: Some("first.xdv".to_string()),
+        };
+        assert!(backend.render_page(&first, 0).is_ok());
+        assert!(backend.render_page(&first, 1).is_ok());
+        assert_eq!(backend.render_misses.get(), 2);
+
+        // Rebuild: page 0 is unchanged, page 1 changed.
+        let second = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: two_page_xdv(67),
+            source_name: Some("second.xdv".to_string()),
+        };
+        let reused = backend.render_page(&second, 0).unwrap();
+        assert_eq!(
+            backend.render_misses.get(),
+            2,
+            "unchanged page must be reused"
+        );
+        assert_eq!(reused.index, 0);
+        let fresh = backend.render_page(&second, 1).unwrap();
+        assert_eq!(
+            backend.render_misses.get(),
+            3,
+            "changed page must re-render"
+        );
+        assert_eq!(fresh.index, 1);
     }
 }

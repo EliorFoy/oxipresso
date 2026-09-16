@@ -23,6 +23,98 @@ pub struct XdvDocument {
     pub mag: u32,
 }
 
+impl XdvDocument {
+    /// Stable content digest of one page: hashes the page geometry, the font
+    /// definitions it references (name, size, color), and every element
+    /// (glyph codes and absolute positions, rule rectangles). Two pages with
+    /// equal digests render identically, which lets the renderer skip
+    /// unchanged pages after a rebuild.
+    pub fn page_digest(&self, index: usize) -> Option<u64> {
+        let page = self.pages.get(index)?;
+        let mut hash = FnvHasher::new();
+        hash.write_u64(page.width_pt.to_bits());
+        hash.write_u64(page.height_pt.to_bits());
+        hash.write_u64(page.page_number as u64);
+        let mut referenced: Vec<u32> = Vec::new();
+        for element in &page.elements {
+            if let XdvElement::Glyphs { font_id, .. } = element {
+                referenced.push(*font_id);
+            }
+        }
+        referenced.sort_unstable();
+        referenced.dedup();
+        for font_id in referenced {
+            if let Some(font) = self.fonts.get(&font_id) {
+                hash.write_u64(font_id as u64);
+                hash.write(font.name.as_bytes());
+                hash.write_u8(0xff);
+                hash.write_u64(font.size_pt.to_bits());
+                hash.write_u64(font.color_rgba.unwrap_or(0) as u64);
+            }
+        }
+        hash.write_u64(page.elements.len() as u64);
+        for element in &page.elements {
+            match element {
+                XdvElement::Glyphs { font_id, glyphs } => {
+                    hash.write_u8(1);
+                    hash.write_u64(*font_id as u64);
+                    hash.write_u64(glyphs.len() as u64);
+                    for glyph in glyphs {
+                        hash.write_u64(glyph.code as u64);
+                        hash.write_u64(glyph.x_pt.to_bits());
+                        hash.write_u64(glyph.y_pt.to_bits());
+                    }
+                }
+                XdvElement::Rule {
+                    x_pt,
+                    y_pt,
+                    w_pt,
+                    h_pt,
+                } => {
+                    hash.write_u8(2);
+                    hash.write_u64(x_pt.to_bits());
+                    hash.write_u64(y_pt.to_bits());
+                    hash.write_u64(w_pt.to_bits());
+                    hash.write_u64(h_pt.to_bits());
+                }
+            }
+        }
+        Some(hash.finish())
+    }
+}
+
+/// FNV-1a 64-bit hasher shared by page digests and artifact caches.
+pub(crate) struct FnvHasher {
+    hash: u64,
+}
+
+impl FnvHasher {
+    pub(crate) fn new() -> Self {
+        Self {
+            hash: 0xcbf2_9ce4_8422_2325,
+        }
+    }
+
+    pub(crate) fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.hash ^= u64::from(*byte);
+            self.hash = self.hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+
+    pub(crate) fn write_u8(&mut self, value: u8) {
+        self.write(&[value]);
+    }
+
+    pub(crate) fn write_u64(&mut self, value: u64) {
+        self.write(&value.to_le_bytes());
+    }
+
+    pub(crate) fn finish(self) -> u64 {
+        self.hash
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct XdvPage {
     /// Page width in points (from the `pdf:pagesize` special).
@@ -735,6 +827,49 @@ mod tests {
                 .any(|font| font.native && !font.name.is_empty()),
             "real XDV should contain native font definitions"
         );
+        // Page digests must be computable and unique enough for the
+        // incremental renderer on real documents.
+        let mut digests: Vec<u64> = (0..document.pages.len())
+            .map(|index| document.page_digest(index).expect("page digest"))
+            .collect();
+        let unique = digests.len();
+        digests.sort_unstable();
+        digests.dedup();
+        assert_eq!(
+            digests.len(),
+            unique,
+            "real XDV pages should have unique digests"
+        );
+    }
+
+    #[test]
+    fn page_digest_is_stable_and_content_sensitive() {
+        let document = parse_xdv(&synthetic_xdv(), &mut no_tfm).unwrap();
+        let digest = document.page_digest(0).expect("page digest");
+        assert_eq!(digest, document.page_digest(0).expect("page digest"));
+
+        // Parsing the same bytes again must produce the same digest.
+        let reparsed = parse_xdv(&synthetic_xdv(), &mut no_tfm).unwrap();
+        assert_eq!(digest, reparsed.page_digest(0).expect("page digest"));
+
+        // Moving a glyph changes the digest.
+        let mut shifted = document.clone();
+        for element in &mut shifted.pages[0].elements {
+            if let XdvElement::Glyphs { glyphs, .. } = element {
+                glyphs[0].x_pt += 1.0;
+            }
+        }
+        assert_ne!(digest, shifted.page_digest(0).expect("page digest"));
+
+        // Adding an element changes the digest.
+        let mut with_rule = document.clone();
+        with_rule.pages[0].elements.push(XdvElement::Rule {
+            x_pt: 0.0,
+            y_pt: 0.0,
+            w_pt: 1.0,
+            h_pt: 1.0,
+        });
+        assert_ne!(digest, with_rule.page_digest(0).expect("page digest"));
     }
 }
 
