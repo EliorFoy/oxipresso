@@ -240,107 +240,16 @@ Implemented crates:
 
 ## Verified
 
-Last verified from:
+Full verification (all modes, round 12):
 
-```powershell
-cd F:\code\oxipresso
-cargo fmt --all
-cargo fmt --all --check
-cargo test --workspace
-cargo test -p oxipresso-engine-xetex
-cargo test -p oxipresso-vfs
-cargo check -p oxipresso-engine-xetex-sys
-cargo test -p oxipresso-viewer --features gui
-cargo test -p oxipresso-cli --features gui --bin oxipresso-viewer
-cargo test -p oxipresso-render --features pdfium
-cargo test -p oxipresso-platform
-cargo test -p oxipresso-cli stream_register_open_resume_reads_editor_root
-cargo test -p oxipresso-cli stream_register_promised_file_then_open_triggers_rebuild
-cargo test -p oxipresso-vfs opening_failed_lookup_file_reports_change_from_start
-cargo test -p oxipresso-cli opening_failed_lookup_file_triggers_rebuild
-cargo test -p oxipresso-cli line_output_diagnostics_use_line_messages
-cargo test -p oxipresso-cli json_protocol_initialization_serializes_messages_as_json
-cargo test -p oxipresso-synctex forward_search_path_matches_windows_and_relative_variants
-cargo test -p oxipresso-cli synctex_forward_matches_editor_path_variants
-cargo test -p oxipresso-render dvi_like_rule_opcodes_render_dark_pixels
-cargo test -p oxipresso-render dvi_like_glyph_opcodes_render_placeholder_marks
-cargo test -p oxipresso-render dvi_like_font_def_scales_glyph_placeholders
-cargo check -p oxipresso-cli --features gui --bin oxipresso-viewer
-cargo check -p oxipresso-cli --features "gui pdfium" --bin oxipresso-viewer
-```
-
-Result:
-
-- Formatting passed.
-- Workspace tests passed.
-- GUI viewer crate feature tests passed.
-- GUI viewer binary tests passed.
-- PDFium render feature tests passed.
-- GUI + PDFium feature check passed.
-- GUI feature check passed for `oxipresso-viewer`.
-- Native C FFI stub compiled successfully on Windows.
-- Current unit test coverage includes:
-  - CLI option parsing.
-  - provider flag conflict.
-  - S-expression command parsing.
-  - JSON command parsing.
-  - editor message serialization.
-  - FFI stub initialization.
-  - FFI stub callback bridge into `EngineIo`.
-  - external `xelatex` backend can compile a simple `.tex` into a PDF artifact when `xelatex` is available.
-  - external `xelatex` backend can compile the original TeXpresso `test/simple.tex` fixture when both `xelatex` and the original repo are available.
-  - VFS byte change.
-  - VFS line change.
-  - VFS UTF-16 range change.
-  - promised file open behavior.
-  - stream `register` does not emit until engine lookup.
-  - `resume` emits promised lookup after engine request.
-  - stream `register` + `open` + `resume` initializes from editor VFS root content and emits successful lookup/input-file messages.
-  - stream registered include files become promised lookups on resume and rebuild successfully after the editor opens the promised file.
-  - promised file fulfillment reports a change from offset 0.
-  - failed lookup-file fulfillment reports a change from offset 0.
-  - CLI rebuilds after the editor opens a previously failed lookup file and the backend then sees it as a successful input.
-  - VFS reads from disk roots and keeps editor buffers ahead of disk content.
-  - VFS records `input-file` events once per opened input path.
-  - `EngineIo::snapshot_inputs()` excludes engine output and exports editor/disk input content.
-  - external `xelatex` backend compiles an include file provided only through `EngineIo::snapshot_inputs()`.
-  - external `xelatex` backend captures a real SyncTeX artifact and `oxipresso-synctex` parses its input metadata.
-  - external `xelatex` backend compiles the original TeXpresso `include.tex` fixture through CLI `-I` when `xelatex` and fixtures are available.
-  - external `xelatex` backend compiles the original TeXpresso `includegraphics.tex` fixture when image assets are available.
-  - CLI external backend reports original TeXpresso `missing-input.tex` diagnostics without failing the live session.
-  - CLI `-lines` diagnostics use `truncate-lines`/`append-lines`/`flush`.
-  - CLI JSON protocol initialization emits JSON wire messages end-to-end.
-  - CLI persists SyncTeX bytes to `OXIPRESSO_SYNCTEX_OUT` when requested.
-  - CLI `synctex-forward` updates internal viewer page state and SyncTeX marker coordinates from latest parsed SyncTeX data.
-  - CLI `synctex-forward` accepts editor path variants that match Windows-style absolute SyncTeX input paths.
-  - SyncTeX forward lookup matches Windows backslash paths and absolute/relative path variants.
-  - GUI marker coordinate mapping has a test for TeX-point-to-page placement; `oxipresso-synctex` also tests reverse nearest-point lookup.
-  - CLI emits an `input-file` message for the root read during initialization.
-  - CLI editor changes trigger a first-stage full-restart rebuild and refresh viewer state.
-  - CLI seeds VFS disk roots from root dir and include paths.
-  - render metadata counts DVI/XDV pages using a lightweight opcode walker.
-  - render parses DVI/XDV rule opcodes and paints them as dark rectangles.
-  - render parses basic DVI/XDV glyph opcodes and paints them as placeholder marks.
-  - render parses DVI font definitions/font selection and scales glyph placeholders from font scaled size.
-  - viewer page navigation bounds.
-  - PDF header validation.
-  - PDF page-count scanning that distinguishes `/Page` from `/Pages`.
-  - placeholder page output dimensions and buffer size.
-  - `AutoRenderBackend` fallback to metadata placeholder.
-  - viewer artifact loading through a render backend.
-  - CLI initialization refreshes viewer state from an engine-produced artifact.
-  - artifact kind detection shared from `oxipresso-viewer`.
-  - platform polling file watcher reports created/changed files and keeps changes pending until marked clean.
-  - GUI watch mode can start before the artifact exists.
-  - GUI watch mode loads a newly created artifact.
-  - GUI watch mode keeps the previous artifact when a reload fails validation.
-- GUI viewer binary artifact path parsing and artifact kind detection.
-- optional GUI viewer code compiles with `eframe/egui` + `wgpu`.
-- optional PDFium render code compiles.
-- FFI stub callback coverage now includes `size`, `flush`, `diagnostic`, and mirrored XDV artifact output.
-- FFI lookup kind mapping is covered for key Tectonic file-format enum values.
-- Default `oxipresso-engine-xetex-sys` check passed after adding real-mode source exclusions.
-- Opt-in real XeTeX smoke test is present and skips unless `OXIPRESSO_USE_REAL_XETEX=1`, `TEXPRESSO_SRC`, and `OXIPRESSO_XETEX_FORMAT` are all set.
+- Stub mode: 73 tests green across 9 crates (cli 24, render 17, vfs 10, engine-external 8, viewer 3, synctex 6, editor-protocol 3, platform 2, engine-api 0).
+- Freetype mode: 20/20 render tests (including real-XDV smoke and system-font rasterization).
+- GUI feature: compiles for cli gui, cli gui+freetype, cli gui+pdfium.
+- Real engine mode: 5/5 engine-xetex tests (bootstrap + typeset + SyncTeX + output events).
+- Real-XDV render smoke: 2/2 (parse + glyph render with page digest).
+- Real protocol snapshot: 1/1 (init + rebuild message sequences).
+- Reverse SyncTeX: 1/1 (real sidecar → source location).
+- Formatting: `cargo fmt --all --check` passes.
 
 Additional opt-in real XeTeX build diagnostic:
 
