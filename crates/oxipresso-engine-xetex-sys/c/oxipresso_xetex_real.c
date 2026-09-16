@@ -15,6 +15,7 @@ typedef struct {
   uint64_t build_date;
   int stream_mode;
   int in_initex_mode;
+  int synctex_enabled;
 } oxi_xetex_config;
 
 typedef struct {
@@ -701,6 +702,10 @@ int oxipresso_xetex_run(const oxi_xetex_config *config,
     /* Format bootstrap should stop at the first error; live document runs
      * keep going so diagnostics stream to the editor. */
     tt_xetex_set_int_variable("halt_on_error_p", config->in_initex_mode ? 1 : 0);
+    /* Plain-text SyncTeX sidecar (oxipresso-synctex decodes both plain and
+     * gzip, but the plain stream needs no extra flag plumbing). */
+    tt_xetex_set_int_variable("synctex_enabled", config->synctex_enabled ? 1 : 0);
+    tt_xetex_set_int_variable("synctex_use_gz", 0);
     status = tt_engine_xetex_main(session.format_path,
                                   config->in_initex_mode && session.primary_name[0]
                                       ? session.primary_name

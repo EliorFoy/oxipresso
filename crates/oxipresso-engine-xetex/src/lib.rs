@@ -11,7 +11,7 @@ pub mod texlive;
 use oxipresso_engine_api::{
     ArtifactKind, Diagnostic, DiagnosticSeverity, DocumentArtifact, EngineEvent, EngineInit,
     EngineIo, FileHandle, FileKind, OpenResult, PathId, RestartPolicy, Result, RootDocument,
-    TypesettingEngine,
+    SyncTexArtifact, TypesettingEngine,
 };
 use oxipresso_engine_xetex_sys::{
     OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_is_real, oxipresso_xetex_run,
@@ -31,6 +31,7 @@ enum EngineRun {
 pub struct XetexEngine {
     diagnostics: Vec<Diagnostic>,
     output: Option<DocumentArtifact>,
+    output_synctex: Option<SyncTexArtifact>,
     initialized: bool,
 }
 
@@ -87,6 +88,7 @@ impl XetexEngine {
             build_date: 0,
             stream_mode: i32::from(root.stream_mode),
             in_initex_mode: i32::from(run == EngineRun::FormatBootstrap),
+            synctex_enabled: i32::from(run == EngineRun::Normal),
         };
         let mut callback_state = CallbackState {
             io,
@@ -126,7 +128,24 @@ impl XetexEngine {
         let (result, mut state) = self.run_engine(root, io, EngineRun::Normal)?;
         self.diagnostics = std::mem::take(&mut state.diagnostics);
         self.output = select_output_artifact(&root.root_name, &state.output_bytes);
+        self.output_synctex = Self::select_synctex_artifact(&state.output_bytes);
         Ok(result)
+    }
+
+    /// Extracts the plain-text SyncTeX sidecar written by the engine
+    /// (`<jobname>.synctex`, captured through the output mirror).
+    fn select_synctex_artifact(output_bytes: &HashMap<String, Vec<u8>>) -> Option<SyncTexArtifact> {
+        let (source_name, bytes) = output_bytes.iter().find(|(path, bytes)| {
+            let normalized = path.replace('\\', "/");
+            let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+            (file_name.ends_with(".synctex") || file_name.ends_with(".synctex.gz"))
+                && !bytes.is_empty()
+        })?;
+        Some(SyncTexArtifact {
+            bytes: bytes.clone(),
+            compressed: source_name.ends_with(".gz"),
+            source_name: Some(source_name.clone()),
+        })
     }
 
     /// Builds the TeX format file in INI mode when it is missing on disk,
@@ -512,6 +531,10 @@ impl TypesettingEngine for XetexEngine {
         self.output.clone()
     }
 
+    fn output_synctex(&self) -> Option<SyncTexArtifact> {
+        self.output_synctex.clone()
+    }
+
     fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
@@ -643,6 +666,22 @@ mod tests {
         rebuild_vfs.set_resolver(Box::new(texlive::KpsewhichResolver::auto().unwrap()));
         rebuild_engine.initialize(&root, &mut rebuild_vfs).unwrap();
         assert!(rebuild_engine.output_document().is_some());
+
+        // SyncTeX sidecar: the real engine writes a plain-text .synctex that
+        // the Rust mirror captures and the synctex parser can read.
+        let synctex = rebuild_engine.output_synctex().expect("syncTeX sidecar");
+        assert!(!synctex.compressed);
+        assert!(synctex.bytes.starts_with(b"SyncTeX Version:"));
+        let document = oxipresso_synctex::parse_artifact(&synctex).unwrap();
+        assert!(
+            !document.inputs.is_empty(),
+            "syncTeX should record at least the primary input"
+        );
+        // Forward search: a line inside the document body maps to a page hit.
+        assert!(
+            document.forward_search_path("simple.tex", 4).is_some(),
+            "syncTeX forward search should find a hit for simple.tex line 4"
+        );
     }
 
     #[test]

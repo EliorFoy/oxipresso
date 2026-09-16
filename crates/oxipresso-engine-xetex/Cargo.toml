@@ -9,5 +9,6 @@ oxipresso-engine-api = { path = "../oxipresso-engine-api" }
 oxipresso-engine-xetex-sys = { path = "../oxipresso-engine-xetex-sys" }
 
 [dev-dependencies]
+oxipresso-synctex = { path = "../oxipresso-synctex" }
 oxipresso-testkit = { path = "../oxipresso-testkit" }
 oxipresso-vfs = { path = "../oxipresso-vfs" }

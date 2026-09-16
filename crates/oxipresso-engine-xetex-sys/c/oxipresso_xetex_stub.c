@@ -14,6 +14,7 @@ typedef struct {
   uint64_t build_date;
   int stream_mode;
   int in_initex_mode;
+  int synctex_enabled;
 } oxi_xetex_config;
 
 typedef struct {

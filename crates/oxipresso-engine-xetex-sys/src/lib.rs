@@ -13,6 +13,7 @@ pub struct OxiXetexConfig {
     pub build_date: u64,
     pub stream_mode: c_int,
     pub in_initex_mode: c_int,
+    pub synctex_enabled: c_int,
 }
 
 #[repr(C)]
