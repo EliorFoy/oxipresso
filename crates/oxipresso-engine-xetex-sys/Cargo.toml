@@ -1,0 +1,11 @@
+[package]
+name = "oxipresso-engine-xetex-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "oxipresso_xetex"
+
+[build-dependencies]
+cc.workspace = true
+pkg-config = "0.3"
+vcpkg = "0.2"

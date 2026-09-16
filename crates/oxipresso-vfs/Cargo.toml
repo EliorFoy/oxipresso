@@ -1,0 +1,10 @@
+[package]
+name = "oxipresso-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+oxipresso-editor-protocol = { path = "../oxipresso-editor-protocol" }
+oxipresso-engine-api = { path = "../oxipresso-engine-api" }

@@ -1,0 +1,13 @@
+[package]
+name = "oxipresso-engine-xetex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxipresso-engine-api = { path = "../oxipresso-engine-api" }
+oxipresso-engine-xetex-sys = { path = "../oxipresso-engine-xetex-sys" }
+
+[dev-dependencies]
+oxipresso-testkit = { path = "../oxipresso-testkit" }
+oxipresso-vfs = { path = "../oxipresso-vfs" }

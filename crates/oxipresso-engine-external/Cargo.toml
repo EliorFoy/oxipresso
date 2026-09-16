@@ -1,0 +1,12 @@
+[package]
+name = "oxipresso-engine-external"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxipresso-engine-api = { path = "../oxipresso-engine-api" }
+
+[dev-dependencies]
+oxipresso-synctex = { path = "../oxipresso-synctex" }
+oxipresso-testkit = { path = "../oxipresso-testkit" }
