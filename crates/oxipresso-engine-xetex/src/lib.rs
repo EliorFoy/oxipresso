@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::CString,
     os::raw::{c_char, c_int, c_void},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub mod texlive;
@@ -16,6 +16,29 @@ use oxipresso_engine_api::{
 use oxipresso_engine_xetex_sys::{
     OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_is_real, oxipresso_xetex_run,
 };
+
+/// The C shim keeps global engine state (`active_session`) and is strictly
+/// single-instance, so every engine invocation is serialized process-wide.
+static ENGINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// MSVC's CRT caches the environment block at startup, so C code calling
+/// `getenv` never sees Rust's `env::set_var` (which uses
+/// `SetEnvironmentVariableW`). Mirror the update into the CRT via `_putenv_s`
+/// so the engine's fontconfig picks the variable up.
+#[cfg(windows)]
+fn set_windows_crt_env(name: &str, value: &std::ffi::OsStr) {
+    use std::os::windows::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn _wputenv_s(name: *const u16, value: *const u16) -> c_int;
+    }
+    let mut name_wide: Vec<u16> = name.encode_utf16().collect();
+    name_wide.push(0);
+    let mut value_wide: Vec<u16> = value.encode_wide().collect();
+    value_wide.push(0);
+    unsafe {
+        _wputenv_s(name_wide.as_ptr(), value_wide.as_ptr());
+    }
+}
 
 /// How the engine should be driven for one `oxipresso_xetex_run` invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +77,51 @@ impl XetexEngine {
         env::var("OXIPRESSO_XETEX_FORMAT_SOURCE").unwrap_or_else(|_| "xelatex.ini".to_string())
     }
 
+    /// Points fontconfig at a usable `fonts.conf` before the engine's font
+    /// manager initializes; without it fontconfig prints "Cannot load default
+    /// config file" and native system-font lookup degrades. Discovery order:
+    /// existing `FONTCONFIG_PATH`, then `OXIPRESSO_FONTCONFIG_PATH`, then the
+    /// vcpkg tree (when `VCPKG_ROOT` is set, matching the real-mode dependency
+    /// triplet).
+    fn prepare_fontconfig_env() {
+        if env::var_os("FONTCONFIG_PATH").is_some() {
+            return;
+        }
+        let candidate = env::var_os("OXIPRESSO_FONTCONFIG_PATH").map(PathBuf::from);
+        let candidate = candidate.or_else(|| {
+            let vcpkg_root = env::var_os("VCPKG_ROOT")?;
+            let candidate = PathBuf::from(vcpkg_root)
+                .join("installed")
+                .join("x64-windows-static-md")
+                .join("etc")
+                .join("fonts");
+            candidate.is_dir().then_some(candidate)
+        });
+        if let Some(path) = candidate {
+            // Edition-2024 unsafe: process-global environment adjustment that
+            // must happen before the engine's fontconfig init.
+            unsafe {
+                env::set_var("FONTCONFIG_PATH", &path);
+                #[cfg(windows)]
+                set_windows_crt_env("FONTCONFIG_PATH", path.as_os_str());
+            }
+        }
+    }
+
     fn run_engine<'a>(
         &mut self,
         root: &RootDocument,
         io: &'a mut dyn EngineIo,
         run: EngineRun,
     ) -> Result<(OxiXetexResult, CallbackState<'a>)> {
+        // Serialize engine runs: the C shim's global session state is not
+        // reentrant (parallel tests would otherwise race on it).
+        let _engine_guard = ENGINE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if Self::real_mode() {
+            Self::prepare_fontconfig_env();
+        }
         let root_dir_text = root.root_dir.to_string_lossy();
         let root_dir = CString::new(root_dir_text.as_bytes())
             .map_err(|_| oxipresso_engine_api::EngineError::new("root dir contains NUL byte"))?;
