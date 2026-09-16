@@ -1949,6 +1949,7 @@ dependencies = [
 name = "oxipresso-cli"
 version = "0.1.0"
 dependencies = [
+ "eframe",
  "oxipresso-editor-protocol",
  "oxipresso-engine-api",
  "oxipresso-engine-external",

@@ -31,6 +31,9 @@ pub struct CliOptions {
     pub provider: PackageProvider,
     pub initialize_only: bool,
     pub stream_mode: bool,
+    /// Run the engine and an egui live-preview window in this process, with
+    /// the editor wire still on stdin/stdout (the TeXpresso architecture).
+    pub gui: bool,
     pub root_file: PathBuf,
 }
 
@@ -45,6 +48,7 @@ where
     let mut provider = PackageProvider::Auto;
     let mut initialize_only = false;
     let mut stream_mode = false;
+    let mut gui = false;
     let mut root_file = None;
     let mut iter = args.into_iter().map(Into::into);
     while let Some(arg) = iter.next() {
@@ -71,6 +75,7 @@ where
             }
             "-test-initialize" => initialize_only = true,
             "-stream" => stream_mode = true,
+            "-gui" => gui = true,
             _ if arg.starts_with('-') => return Err(format!("unknown option {arg}")),
             _ => {
                 if root_file.replace(PathBuf::from(&arg)).is_some() {
@@ -86,9 +91,16 @@ where
         provider,
         initialize_only,
         stream_mode,
+        gui,
         root_file: root_file.ok_or_else(|| "missing root TeX document".to_string())?,
     })
 }
+
+#[cfg(feature = "gui")]
+pub mod gui;
+
+#[cfg(feature = "gui")]
+pub use gui::run_live_preview;
 
 pub fn run_with_io<R, W>(options: CliOptions, input: R, mut output: W) -> Result<(), String>
 where
@@ -692,6 +704,7 @@ mod tests {
             "-json",
             "-lines",
             "-stream",
+            "-gui",
             "-test-initialize",
             "main.tex",
         ])
@@ -700,6 +713,7 @@ mod tests {
         assert!(opts.line_output);
         assert!(opts.stream_mode);
         assert!(opts.initialize_only);
+        assert!(opts.gui);
         assert_eq!(opts.include_paths, vec![PathBuf::from("build")]);
     }
 
@@ -717,6 +731,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: true,
+            gui: false,
             root_file: PathBuf::from("main.tex"),
         };
         let mut output = Vec::new();
@@ -739,6 +754,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: true,
+            gui: false,
             root_file: PathBuf::from("main.tex"),
         };
         let mut output = Vec::new();
@@ -763,6 +779,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: true,
             stream_mode: true,
+            gui: false,
             root_file: PathBuf::from("main.tex"),
         };
         let mut output = Vec::new();
@@ -791,6 +808,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: true,
+            gui: false,
             root_file: PathBuf::from("main.tex"),
         };
         let root = root_document(&options).unwrap();
@@ -866,6 +884,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: true,
             stream_mode: false,
+            gui: false,
             root_file,
         };
         let mut output = Vec::new();
@@ -892,6 +911,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: true,
             stream_mode: false,
+            gui: false,
             root_file,
         };
         let mut output = Vec::new();
@@ -923,6 +943,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file: root_file.clone(),
         };
         let root = root_document(&options).unwrap();
@@ -954,6 +975,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file,
         };
         let root = root_document(&options).unwrap();
@@ -1086,6 +1108,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file,
         };
         let root = root_document(&options).unwrap();
@@ -1174,6 +1197,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file,
         };
         let root = root_document(&options).unwrap();
@@ -1227,6 +1251,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file,
         };
         let root = root_document(&options).unwrap();
@@ -1393,6 +1418,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file: root_file.clone(),
         };
         let root = root_document(&options).unwrap();
@@ -1432,6 +1458,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file: root_file.clone(),
         };
         let root = root_document(&options).unwrap();
@@ -1480,6 +1507,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file: root_file.clone(),
         };
         let root = root_document(&options).unwrap();
@@ -1523,6 +1551,7 @@ mod tests {
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file,
         };
         let root = root_document(&options).unwrap();
@@ -1832,6 +1861,7 @@ endobj
             provider: PackageProvider::Auto,
             initialize_only: false,
             stream_mode: false,
+            gui: false,
             root_file: root_file.clone(),
         };
         let root = root_document(&options).unwrap();
