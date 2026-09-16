@@ -57,6 +57,10 @@ pub struct XetexEngine {
     output_synctex: Option<SyncTexArtifact>,
     output_events: Vec<OutputEvent>,
     initialized: bool,
+    /// Normalized paths of all files the engine opened for reading during the
+    /// last run. Used by `apply_change_hint` to skip rebuilds for changes to
+    /// files the engine never touched.
+    read_files: std::collections::HashSet<String>,
 }
 
 impl XetexEngine {
@@ -161,6 +165,7 @@ impl XetexEngine {
             output_bytes: HashMap::new(),
             output_events: Vec::new(),
             diagnostics: Vec::new(),
+            read_files: std::collections::HashSet::new(),
         };
         let callbacks = OxiXetexCallbacks {
             userdata: (&mut callback_state as *mut CallbackState<'_>).cast::<c_void>(),
@@ -194,6 +199,7 @@ impl XetexEngine {
         self.output = select_output_artifact(&root.root_name, &state.output_bytes);
         self.output_synctex = Self::select_synctex_artifact(&state.output_bytes);
         self.output_events = std::mem::take(&mut state.output_events);
+        self.read_files = std::mem::take(&mut state.read_files);
         Ok(result)
     }
 
@@ -278,6 +284,8 @@ struct CallbackState<'a> {
     output_bytes: HashMap<String, Vec<u8>>,
     output_events: Vec<OutputEvent>,
     diagnostics: Vec<Diagnostic>,
+    /// Paths of all files opened for reading (normalized).
+    read_files: std::collections::HashSet<String>,
 }
 
 impl CallbackState<'_> {
@@ -308,6 +316,7 @@ unsafe extern "C" fn callback_open_read(
             if handle.is_null() {
                 return state.set_error("FFI open_read handle output is null");
             }
+            state.read_files.insert(path.to_string());
             unsafe {
                 *handle = file_handle.0;
             }
@@ -588,9 +597,15 @@ impl TypesettingEngine for XetexEngine {
 
     fn apply_change_hint(
         &mut self,
-        _changed_file: &PathId,
+        changed_file: &PathId,
         _byte_offset: usize,
     ) -> Result<RestartPolicy> {
+        // If the engine never opened the changed file during the last run,
+        // the current output doesn't depend on it and the rebuild can be
+        // skipped (the engine will pick up the change on the next rebuild).
+        if !self.read_files.contains(&changed_file.0) {
+            return Ok(RestartPolicy::NoRestartNeeded);
+        }
         Ok(RestartPolicy::FullRestartRequired)
     }
 
