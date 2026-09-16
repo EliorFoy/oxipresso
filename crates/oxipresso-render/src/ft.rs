@@ -21,6 +21,21 @@ pub const FT_LOAD_NO_HINTING: c_int = 0x2;
 pub const FT_RENDER_MODE_NORMAL: c_uint = 0;
 pub const FT_PIXEL_MODE_GRAY: u8 = 2;
 
+/// 16.16 fixed-point transformation matrix. FreeType applies
+/// `x' = xx*x + xy*y`, `y' = yx*x + yy*y` to the glyph outline before
+/// rasterization; used for XDV slant/extend font transforms.
+/// NOTE: FT_Set_Transform is NOT used because MSVC's FT_Pos (long) is 4
+/// bytes, invalidating the struct offsets we rely on. Slant/extend are
+/// applied as bitmap post-processing instead.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FT_Matrix {
+    pub xx: i64,
+    pub xy: i64,
+    pub yx: i64,
+    pub yy: i64,
+}
+
 /// Offsets into `FT_GlyphSlotRec` that have been stable across FreeType 2.x:
 /// `face` at 8. The `FT_Bitmap` is located by signature scan instead, because
 /// its offset shifted when FreeType restructured `FT_GlyphSlotRec`.
@@ -56,6 +71,8 @@ unsafe extern "C" {
     pub fn FT_Set_Pixel_Sizes(face: FT_Face, width: c_uint, height: c_uint) -> c_int;
     pub fn FT_Get_Char_Index(face: FT_Face, charcode: c_uint) -> c_uint;
     pub fn FT_Load_Glyph(face: FT_Face, glyph_index: c_uint, load_flags: c_int) -> c_int;
+    pub fn FT_Set_Transform(face: FT_Face, matrix: *const FT_Matrix, delta: *const c_void)
+    -> c_int;
     pub fn FT_Render_Glyph(slot: FT_GlyphSlot, render_mode: c_uint) -> c_int;
 }
 
@@ -105,6 +122,8 @@ pub fn find_glyph_slot(face: FT_Face) -> Option<FT_GlyphSlot> {
             let slot = candidate as *mut c_void;
             let back_reference = read_pointer(slot, SLOT_FACE_OFFSET);
             if back_reference == face {
+                #[cfg(test)]
+                eprintln!("[dbg] slot candidate at face+{offset}");
                 return Some(slot);
             }
         }
@@ -114,18 +133,27 @@ pub fn find_glyph_slot(face: FT_Face) -> Option<FT_GlyphSlot> {
 
 /// Copies out the rendered gray bitmap plus its bearing relative to the pen
 /// position. The `FT_Bitmap` offset inside `FT_GlyphSlotRec` varies across
-/// FreeType versions, so the struct is located by signature: positive
-/// rows/width, `|pitch| >= width`, a non-null buffer, and the gray pixel-mode
-/// byte — all validated together so a false match is extremely unlikely.
+/// FreeType versions (2.14 added `glyph_index` + `generic` fields), so the
+/// struct is located by signature: positive rows/width, `|pitch| >= width`,
+/// a non-null buffer, and the gray pixel-mode byte — all validated together.
+/// The scan steps by 4 because the bitmap may sit at a 4-aligned but not
+/// 8-aligned offset.
 pub fn read_rendered_bitmap(slot: FT_GlyphSlot) -> Option<RenderedGrayBitmap> {
     unsafe {
-        for base_offset in (0usize..256).step_by(8) {
+        for base_offset in (0usize..1024).step_by(4) {
             let base = slot.cast::<u8>().add(base_offset);
             let rows = (base.add(BITMAP_ROWS_OFFSET) as *const c_uint).read();
             let width = (base.add(BITMAP_WIDTH_OFFSET) as *const c_uint).read();
             let pitch = (base.add(BITMAP_PITCH_OFFSET) as *const c_int).read();
             let buffer = (base.add(BITMAP_BUFFER_OFFSET) as *const *mut u8).read();
             let pixel_mode = base.add(BITMAP_PIXEL_MODE_OFFSET).read();
+            #[cfg(test)]
+            if rows > 0 && rows < 8192 {
+                eprintln!(
+                    "[dbg] scan@{base_offset}: rows={rows} width={width} pitch={pitch} mode={pixel_mode} buffer_null={}",
+                    buffer.is_null()
+                );
+            }
             if rows == 0 || width == 0 || rows > 8192 || width > 8192 {
                 continue;
             }

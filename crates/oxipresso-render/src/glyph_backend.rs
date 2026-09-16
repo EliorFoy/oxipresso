@@ -26,7 +26,7 @@ pub struct XdvGlyphRenderBackend {
     library: RefCell<Option<ft::FT_Library>>,
     faces: RefCell<HashMap<(String, u32), ft::FT_Face>>,
     font_files: RefCell<HashMap<String, Option<Rc<Vec<u8>>>>>,
-    glyph_cache: RefCell<HashMap<(String, u32, u32, u32), Option<Rc<GrayBitmap>>>>,
+    glyph_cache: RefCell<HashMap<(String, u32, u32, u32, u64), Option<Rc<GrayBitmap>>>>,
     parsed: RefCell<Option<(u64, Rc<xdv::XdvDocument>)>>,
     /// Rendered pages keyed by XDV page content digest. Pages whose digest
     /// matches a previous rebuild are reused without re-rendering, which is
@@ -165,7 +165,16 @@ impl XdvGlyphRenderBackend {
     }
 
     fn rasterize(&self, font: &xdv::XdvFont, code: u32, size_px: u32) -> Option<Rc<GrayBitmap>> {
-        let cache_key = (font.name.clone(), font.face_index, code, size_px);
+        // The transform fingerprint keeps slanted/extended variants out of the
+        // upright cache slots.
+        let transform_key = font.slant.to_bits() ^ font.extend.to_bits().rotate_left(32);
+        let cache_key = (
+            font.name.clone(),
+            font.face_index,
+            code,
+            size_px,
+            transform_key,
+        );
         if let Some(cached) = self.glyph_cache.borrow().get(&cache_key) {
             return cached.clone();
         }
@@ -198,18 +207,26 @@ impl XdvGlyphRenderBackend {
             if ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT) != 0 {
                 return None;
             }
-            let slot = ft::find_glyph_slot(face)?;
+            let Some(slot) = ft::find_glyph_slot(face) else {
+                return None;
+            };
             if ft::FT_Render_Glyph(slot, ft::FT_RENDER_MODE_NORMAL) != 0 {
                 return None;
             }
             let rendered = ft::read_rendered_bitmap(slot)?;
-            Some(GrayBitmap {
+            let bitmap = GrayBitmap {
                 left: rendered.left,
                 top: rendered.top,
                 width: rendered.width,
                 height: rendered.height,
                 pixels: rendered.pixels,
-            })
+            };
+            // Apply XDV extend/slant as bitmap post-processing. This avoids
+            // FT_Set_Transform, whose MSVC-specific FT_Pos size (4 bytes, not
+            // 8) invalidates every struct offset we rely on.
+            let bitmap = apply_extend(bitmap, font.extend);
+            let bitmap = apply_slant(bitmap, font.slant);
+            Some(bitmap)
         }
     }
 
@@ -235,6 +252,66 @@ fn fnv_hash(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
     hash
+}
+
+/// Scales a gray bitmap horizontally by `factor` (XDV extend).
+fn apply_extend(bitmap: GrayBitmap, factor: f64) -> GrayBitmap {
+    if (factor - 1.0).abs() < 0.01 || bitmap.width == 0 || bitmap.height == 0 {
+        return bitmap;
+    }
+    let new_width = ((bitmap.width as f64) * factor).round().max(1.0) as u32;
+    let mut pixels = vec![0u8; (new_width * bitmap.height) as usize];
+    for row in 0..bitmap.height {
+        for col in 0..new_width {
+            let source_x = ((col as f64 + 0.5) / factor) as u32;
+            let source_x = source_x.min(bitmap.width - 1);
+            pixels[(row * new_width + col) as usize] =
+                bitmap.pixels[(row * bitmap.width + source_x) as usize];
+        }
+    }
+    GrayBitmap {
+        left: ((bitmap.left as f64) * factor).round() as i64,
+        top: bitmap.top,
+        width: new_width,
+        height: bitmap.height,
+        pixels,
+    }
+}
+
+/// Shears a gray bitmap horizontally by `slant` (XDV slant: x' = x + slant*y
+/// where y grows upward from the baseline, matching italic typography).
+fn apply_slant(bitmap: GrayBitmap, slant: f64) -> GrayBitmap {
+    if slant.abs() < 0.01 || bitmap.width == 0 || bitmap.height == 0 {
+        return bitmap;
+    }
+    let shift_per_row = slant; // positive slant shifts top rows to the right
+    let max_shift = (shift_per_row * (bitmap.height as f64 - 1.0)).ceil() as i64;
+    let extra = max_shift.max(0);
+    let new_width = bitmap.width + extra as u32;
+    let mut pixels = vec![0u8; (new_width * bitmap.height) as usize];
+    for row_from_top in 0..bitmap.height {
+        let baseline_distance = (bitmap.height - 1 - row_from_top) as f64;
+        let shift = (shift_per_row * baseline_distance).round() as i64;
+        let dest_x = shift + extra; // extra shifts everything right for positive slant
+        for col in 0..bitmap.width {
+            let source = bitmap.pixels[(row_from_top * bitmap.width + col) as usize];
+            if source == 0 {
+                continue;
+            }
+            let dest = dest_x + col as i64;
+            if dest >= 0 && (dest as u32) < new_width {
+                let index = row_from_top as usize * new_width as usize + dest as usize;
+                pixels[index] = source;
+            }
+        }
+    }
+    GrayBitmap {
+        left: bitmap.left - extra,
+        top: bitmap.top,
+        width: new_width,
+        height: bitmap.height,
+        pixels,
+    }
 }
 
 fn blit_gray(

@@ -50,6 +50,8 @@ impl XdvDocument {
                 hash.write_u8(0xff);
                 hash.write_u64(font.size_pt.to_bits());
                 hash.write_u64(font.color_rgba.unwrap_or(0) as u64);
+                hash.write_u64(font.extend.to_bits());
+                hash.write_u64(font.slant.to_bits());
             }
         }
         hash.write_u64(page.elements.len() as u64);
@@ -142,6 +144,10 @@ pub struct XdvFont {
     pub design_size_pt: f64,
     pub face_index: u32,
     pub color_rgba: Option<u32>,
+    /// Horizontal extend factor (1.0 = none), from XDV_FLAG_EXTEND.
+    pub extend: f64,
+    /// Slant factor (0.0 = upright), from XDV_FLAG_SLANT.
+    pub slant: f64,
     /// Classic fonts only: TFM widths (fix_word) per char code slot.
     pub tfm_widths: Option<Vec<i64>>,
 }
@@ -621,6 +627,8 @@ fn parse_classic_font_def(reader: &mut Reader<'_>, id_size: u8) -> Result<XdvFon
         design_size_pt: design_size as f64 / (1 << 20) as f64,
         face_index: 0,
         color_rgba: None,
+        extend: 1.0,
+        slant: 0.0,
         tfm_widths: None,
     })
 }
@@ -636,13 +644,17 @@ fn parse_native_font_def(reader: &mut Reader<'_>) -> Result<XdvFont> {
     if flags & XDV_FLAG_COLORED != 0 {
         color_rgba = Some(reader.u32()?);
     }
+    let mut extend = 1.0;
+    let mut slant = 0.0;
     if flags & XDV_FLAG_EXTEND != 0 {
-        reader.skip(4)?;
+        extend = reader.i32()? as f64 / 65536.0;
     }
     if flags & XDV_FLAG_SLANT != 0 {
-        reader.skip(4)?;
+        slant = reader.i32()? as f64 / 65536.0;
     }
     if flags & XDV_FLAG_EMBOLDEN != 0 {
+        // Parsed past; FreeType emboldening is not applied yet (documented
+        // gap).
         reader.skip(4)?;
     }
     if flags & XDV_FLAG_VARIATIONS != 0 {
@@ -658,6 +670,8 @@ fn parse_native_font_def(reader: &mut Reader<'_>) -> Result<XdvFont> {
         design_size_pt: 0.0,
         face_index,
         color_rgba,
+        extend,
+        slant,
         tfm_widths: None,
     })
 }
