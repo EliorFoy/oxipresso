@@ -34,6 +34,7 @@ Engine policy:
 - PDF rendering can use real PDFium rasterization when the optional `pdfium` feature is enabled; otherwise it falls back to placeholder pages.
 - XDV/DVI artifacts can now be rendered with **real glyphs**: the optional `freetype` feature adds a full XDV parser (`oxipresso-render::xdv`), a layout-independent FreeType binding (`ft`), and `XdvGlyphRenderBackend`, which resolves font files through a `FontResolver`, rasterizes glyphs with FreeType, and composites them onto RGBA pages.
 - The external backend captures SyncTeX sidecar output. `oxipresso-synctex` decodes gzip/plain SyncTeX, parses `Output:` / `Input:` metadata plus common page/node records, and can perform first nearest-line forward and nearest-point reverse lookups. CLI `synctex-forward` now updates the internal viewer page and stores hit coordinates; the optional GUI can draw a lightweight marker and request scrolling to it, but full coordinate behavior is still pending.
+- Bidirectional SyncTeX is wired end to end: `OxipressoApp::synctex_reverse_message(page, x_pt, y_pt)` maps a viewer click (points) onto the SyncTeX sp coordinate space through reverse search and produces the engine-to-editor `synctex` notification; the viewer GUI auto-loads the `.synctex` sidecar next to the artifact and resolves clicks to source locations (marker + status line), using page dimensions parsed from the XDV.
 
 ## Completed Work
 
@@ -433,7 +434,7 @@ Result:
 - `KpsewhichResolver` spawns `kpsewhich` per lookup; a kpathsea/ls-R cache or batched lookup would speed up cold format builds.
 - The FFI stub still does not parse TeX (by design); the default build keeps the stub.
 - CLI now emits basic `truncate`/`append`/`flush` messages from engine diagnostics, but does not yet mirror every TeXpresso input-file/indexing nuance from the original engine.
-- CLI can persist SyncTeX sidecar bytes and `oxipresso-synctex` can parse input/output/page/node metadata plus first forward/reverse lookup helpers. CLI now acts on `synctex-forward` at the page/marker level, but precise GUI coordinate scrolling and user-triggered reverse SyncTeX are not implemented yet.
+- CLI can persist SyncTeX sidecar bytes and `oxipresso-synctex` can parse input/output/page/node metadata plus first forward/reverse lookup helpers. CLI now acts on `synctex-forward` at the page/marker level, and reverse SyncTeX resolves viewer clicks to source locations; what remains is precise media-box scrolling in the egui view and sending the reverse notification over the editor wire (it currently surfaces as viewer status + marker).
 - CLI can write the produced PDF artifact to disk through `OXIPRESSO_ARTIFACT_OUT` and now updates internal `ViewerState`; a separate `oxipresso-viewer --watch <artifact>` process can watch that artifact path through the platform watcher abstraction.
 - The current live-preview bridge is polling-based artifact reload, not a direct editor-protocol or engine-event connection.
 - `oxipresso-viewer` is not yet a true TeXpresso live preview process connected to editor protocol, SyncTeX, or engine events.
