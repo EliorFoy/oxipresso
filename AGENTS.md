@@ -214,7 +214,7 @@ Implemented crates:
   - Supports `OXIPRESSO_ARTIFACT_OUT=<path>` to write the current engine artifact to disk.
   - Supports `OXIPRESSO_SYNCTEX_OUT=<path>` to write the current engine SyncTeX artifact to disk.
   - Converts engine diagnostics into TeXpresso-style `truncate`/`append`/`flush` editor messages.
-  - In `-lines` mode, converts diagnostics into `truncate-lines`/`append-lines`/`flush` editor messages.
+  - In `-lines` mode, converts diagnostics into `truncate-lines`/`append-lines`/`flush` editor messages; streamed `out`/`log` channels also honor `-lines` (complete lines only, trailing partial lines withheld) via `stream_messages_from_events`.
   - Engine initialization/rebuild errors with diagnostics are now reported to the editor without failing the CLI session.
   - In non-stream mode, primes the root document into VFS under the root file name before engine initialization.
   - Maintains an internal `ViewerState`.
@@ -375,6 +375,13 @@ Result:
 - CLI end-to-end: `OXIPRESSO_ARTIFACT_OUT` captured a real 1011-byte XDV (first bytes `F7 07` XDV magic) and `texpresso.fmt` was 22.3 MB; stdout showed the full lookup flow with extension guessing feeding kpsewhich (`lookup-file read failed "cmmi6"` -> `read successful "cmmi6.tfm"`), the XDV write, and the `.aux` read.
 - Known runtime noise: fontconfig prints `Cannot load default config file` (non-fatal; see Not Done Yet).
 
+Additional protocol snapshots verified (real engine, gated CLI test `real_engine_protocol_snapshot`):
+
+- Initialization sequence: `(truncate out 0)` + `(truncate log 0)` first, then the engine's stdout/log appends — including the XeTeX banner and TeX's per-character file-open echo (`(`, `m`, `a`, `i`...) — then `(flush)`, `input-file`, and a successful `lookup-file` for the root.
+- The SyncTeX document is parsed and attached after initialization.
+- Change-rebuild sequence: both channels re-truncate, the file open is re-echoed (`(main.tex`), and a flush closes the run.
+- Wire formats verified: `(truncate out 0)` in S-expression and `["truncate","log",0]` in JSON.
+
 Additional XDV real-glyph rendering verified (freetype feature):
 
 ```powershell
@@ -423,7 +430,6 @@ Result:
 
 - Incremental rebuild status: the renderer-side half is done (unchanged XDV pages reuse cached rendered pages via content digests). The engine-side half — resuming typesetting from an engine-state checkpoint instead of a full re-run — remains open. The original uses fork() at read "fences" (copy-on-write process snapshots; see `src/frontend/engine_tex.c` fences and `engine/main/fork.c`), which has no Windows equivalent; per the design constraints this must become one cross-platform engine-state serialization/restore model, a large self-contained project (the engine globals span pool/equiv/trie/font memory structures).
 - The real shim does not implement `synctex_texpresso_extension` yet, and the shim reports `mtime 0` for inputs. The plain `.synctex` sidecar is captured and parsed (see Verified).
-- `-lines` mode still applies only to diagnostics summary messages; streaming the `out`/`log` channels as `append-lines` (with per-channel line buffers like the original) is not implemented yet.
 - `KpsewhichResolver` spawns `kpsewhich` per lookup; a kpathsea/ls-R cache or batched lookup would speed up cold format builds.
 - The FFI stub still does not parse TeX (by design); the default build keeps the stub.
 - CLI now emits basic `truncate`/`append`/`flush` messages from engine diagnostics, but does not yet mirror every TeXpresso input-file/indexing nuance from the original engine.
@@ -438,7 +444,7 @@ Result:
 - No Tectonic provider is implemented yet; the TeX Live path is covered by `KpsewhichResolver` (kpsewhich), but not the full original texlive dependency-tape validation.
 - No Linux CI/build verification has been run.
 - No macOS implementation or verification has been done.
-- Original TeXpresso fixture coverage now includes `simple.tex`, `include.tex`, `missing-input.tex`, and `includegraphics.tex` through the external backend when fixtures and `xelatex` are available; protocol snapshots and FFI-backed fixture tests are still pending. The core behaviors from `test_stream.sh`, `test-register.sh`, and the non-blocking missing-file path in `test-lookup-file.sh` now have Rust unit coverage, but full shell-equivalent async snapshots are not complete.
+- Original TeXpresso fixture coverage now includes `simple.tex`, `include.tex`, `missing-input.tex`, and `includegraphics.tex` through the external backend when fixtures and `xelatex` are available. The core behaviors from `test_stream.sh`, `test-register.sh`, and the non-blocking missing-file path in `test-lookup-file.sh` now have Rust unit coverage, and the real-engine init/rebuild protocol flow has a gated snapshot test (`real_engine_protocol_snapshot`).
 
 ## Important Design Constraints
 
@@ -452,13 +458,12 @@ Result:
 ## Suggested Next Steps
 
 1. Implement the TeXpresso-defining incremental checkpoint/restart model so editor changes stop requiring a full engine restart.
-2. Add protocol snapshots covering the real engine flow (initialization + rebuild message sequences), and `-lines` support for streamed out/log channels.
-3. Polish XDV glyph rendering: XDV specials, `pic_file` images, color/extend/slant/embolden transforms, and decide whether Windows builds should enable `freetype` by default.
-4. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
-5. Expand original TeXpresso fixture integration tests:
+2. Polish XDV glyph rendering: XDV specials, `pic_file` images, color/extend/slant/embolden transforms, and decide whether Windows builds should enable `freetype` by default.
+3. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
+4. Expand original TeXpresso fixture integration tests:
    - async register lookup and lookup-file restart scenarios through the real engine.
    - fixture runs (`include.tex`, `includegraphics.tex`) through the FFI XeTeX backend.
-6. Verify Linux builds of the real mode via pkg-config, and keep macOS as the later placeholder.
+5. Verify Linux builds of the real mode via pkg-config, and keep macOS as the later placeholder.
 
 ## Current Git State Expectation
 
