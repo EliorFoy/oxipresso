@@ -119,7 +119,7 @@ Implemented crates:
   - Has a test verifying that the FFI stub output mirror produces a stub XDV `DocumentArtifact`.
   - Has a test for mapping key Tectonic file-format enum values to Rust `FileKind`.
   - Has an opt-in real XeTeX smoke test that runs only when `OXIPRESSO_USE_REAL_XETEX=1`, `TEXPRESSO_SRC`, and `OXIPRESSO_XETEX_FORMAT` are all set.
-  - `apply_change_hint` currently returns `FullRestartRequired`.
+  - `apply_change_hint` returns `NoRestartNeeded` when the changed file was never opened by the engine during the last run (tracked via `read_files` set populated from `open_read` callbacks), avoiding unnecessary rebuilds for unrelated file edits. Returns `FullRestartRequired` when the engine actually read the changed file.
 
 - `oxipresso-engine-external`
   - Adds an optional external `xelatex` process backend.
