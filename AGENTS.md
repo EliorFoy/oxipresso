@@ -24,6 +24,7 @@ Engine policy:
 - An optional external `xelatex` backend now exists for real PDF smoke tests while the FFI backend is still being connected. Enable it with `OXIPRESSO_ENGINE=external`.
 - The real engine now runs end to end: `XetexEngine::initialize` bootstraps `texpresso.fmt` in INI mode from the format source (default `xelatex.ini`) when the format file is missing, persists it to `OXIPRESSO_XETEX_FORMAT`, and then typesets the root document, producing real XDV artifacts through `EngineIo`.
 - The real shim enables SyncTeX for normal runs (`synctex_enabled=1`, plain text via `synctex_use_gz=0`): the engine's `<jobname>.synctex` write is captured through the output mirror, exposed through `XetexEngine::output_synctex()`, and feeds the existing CLI `synctex-forward`/`OXIPRESSO_SYNCTEX_OUT` plumbing.
+- The engine reports incremental output-stream writes through `TypesettingEngine::take_output_events()` (`OutputEvent { path, offset, data }` in `oxipresso-engine-api`), and the CLI maps them onto the editor info buffers exactly like the original protocol: stdout → `out`, the `.log` file → `log`, with `(truncate out/log 0)` at run start and `(flush)` at the end. Diagnostics summary messages are suppressed when stream events exist (the real engine already streams the same content through stdout/log).
 - TeX distribution files are resolved through a new TeX Live provider: the VFS gained a `FileResolver` hook (defined in `oxipresso-engine-api`) and the CLI installs `KpsewhichResolver` (kpsewhich from TeX Live/TinyTeX) with editor buffers and disk roots still taking precedence.
 - CLI can persist the current engine artifact when `OXIPRESSO_ARTIFACT_OUT` is set. With the external backend, this writes a real PDF.
 - Produced engine artifacts are now also passed through an internal viewer metadata pipeline.
@@ -418,12 +419,12 @@ Result:
 ## Not Done Yet
 
 - The real engine typesets through the stub-shaped one-shot flow only: each rebuild fully restarts the engine (matches `FullRestartRequired`); the TeXpresso-defining incremental checkpoint/restart model is not implemented yet.
-- The real shim does not implement `synctex_texpresso_extension` yet, and the shim reports `mtime 0` for inputs; log/stdout stream separation and `.log` artifact capture are still Rust-side work. The plain `.synctex` sidecar itself is captured and parsed (see Verified).
-- Fontconfig prints `Cannot load default config file` at runtime on Windows; TFM/Type1 paths via kpsewhich work without it, but system-font lookup (XeTeX font manager) needs a fontconfig config (`FONTCONFIG_PATH` or shipped `fonts.conf`) before native font features work.
+- The real shim does not implement `synctex_texpresso_extension` yet, and the shim reports `mtime 0` for inputs. The plain `.synctex` sidecar is captured and parsed (see Verified).
+- `-lines` mode still applies only to diagnostics summary messages; streaming the `out`/`log` channels as `append-lines` (with per-channel line buffers like the original) is not implemented yet.
+- Fontconfig misconfiguration is auto-fixed on Windows: the engine wrapper sets `FONTCONFIG_PATH` (discovery: existing env → `OXIPRESSO_FONTCONFIG_PATH` → vcpkg tree) and mirrors it into the MSVC CRT block via `_wputenv_s` (plain `env::set_var` is invisible to C `getenv` callers). `OXIPRESSO_TEXLIVE=0`-style disabling is not needed; setting `FONTCONFIG_PATH` explicitly always wins.
 - `KpsewhichResolver` spawns `kpsewhich` per lookup; a kpathsea/ls-R cache or batched lookup would speed up cold format builds.
 - The FFI stub still does not parse TeX (by design); the default build keeps the stub.
-- CLI now emits basic `truncate`/`append`/`flush` messages from engine diagnostics, but does not yet split stdout/log streams like TeXpresso.
-- CLI now emits basic `input-file` messages from VFS opens, but it does not yet mirror every TeXpresso input-file/indexing nuance from the original engine.
+- CLI now emits basic `truncate`/`append`/`flush` messages from engine diagnostics, but does not yet mirror every TeXpresso input-file/indexing nuance from the original engine.
 - CLI can persist SyncTeX sidecar bytes and `oxipresso-synctex` can parse input/output/page/node metadata plus first forward/reverse lookup helpers. CLI now acts on `synctex-forward` at the page/marker level, but precise GUI coordinate scrolling and user-triggered reverse SyncTeX are not implemented yet.
 - CLI can write the produced PDF artifact to disk through `OXIPRESSO_ARTIFACT_OUT` and now updates internal `ViewerState`; a separate `oxipresso-viewer --watch <artifact>` process can watch that artifact path through the platform watcher abstraction.
 - The current live-preview bridge is polling-based artifact reload, not a direct editor-protocol or engine-event connection.
@@ -449,14 +450,13 @@ Result:
 ## Suggested Next Steps
 
 1. Implement the TeXpresso-defining incremental checkpoint/restart model so editor changes stop requiring a full engine restart.
-2. Split stdout/log streams in the CLI like TeXpresso (the `.log` write is already visible in the output mirror), and add protocol snapshots covering the real engine flow.
-3. Provide a fontconfig config on Windows (or route font lookup through kpsewhich/font maps) to fix the "Cannot load default config file" runtime error and enable native font features.
-4. Polish XDV glyph rendering: XDV specials, `pic_file` images, color/extend/slant/embolden transforms, and decide whether Windows builds should enable `freetype` by default.
-5. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
-6. Expand original TeXpresso fixture integration tests:
+2. Add protocol snapshots covering the real engine flow (initialization + rebuild message sequences), and `-lines` support for streamed out/log channels.
+3. Polish XDV glyph rendering: XDV specials, `pic_file` images, color/extend/slant/embolden transforms, and decide whether Windows builds should enable `freetype` by default.
+4. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
+5. Expand original TeXpresso fixture integration tests:
    - async register lookup and lookup-file restart scenarios through the real engine.
    - fixture runs (`include.tex`, `includegraphics.tex`) through the FFI XeTeX backend.
-7. Verify Linux builds of the real mode via pkg-config, and keep macOS as the later placeholder.
+6. Verify Linux builds of the real mode via pkg-config, and keep macOS as the later placeholder.
 
 ## Current Git State Expectation
 
