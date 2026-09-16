@@ -167,7 +167,9 @@ impl XdvGlyphRenderBackend {
     fn rasterize(&self, font: &xdv::XdvFont, code: u32, size_px: u32) -> Option<Rc<GrayBitmap>> {
         // The transform fingerprint keeps slanted/extended variants out of the
         // upright cache slots.
-        let transform_key = font.slant.to_bits() ^ font.extend.to_bits().rotate_left(32);
+        let transform_key = font.slant.to_bits()
+            ^ font.extend.to_bits().rotate_left(32)
+            ^ font.embolden.to_bits().rotate_left(16);
         let cache_key = (
             font.name.clone(),
             font.face_index,
@@ -226,6 +228,7 @@ impl XdvGlyphRenderBackend {
             // 8) invalidates every struct offset we rely on.
             let bitmap = apply_extend(bitmap, font.extend);
             let bitmap = apply_slant(bitmap, font.slant);
+            let bitmap = apply_embolden(bitmap, font.embolden);
             Some(bitmap)
         }
     }
@@ -310,6 +313,42 @@ fn apply_slant(bitmap: GrayBitmap, slant: f64) -> GrayBitmap {
         top: bitmap.top,
         width: new_width,
         height: bitmap.height,
+        pixels,
+    }
+}
+
+/// Dilates a gray bitmap by `strength` pixels in each direction (XDV
+/// embolden). Each output pixel takes the max of all source pixels within
+/// the strength radius, creating a visually bolder glyph.
+fn apply_embolden(bitmap: GrayBitmap, strength: f64) -> GrayBitmap {
+    let radius = (strength * 8.0).round() as i64; // scale factor for visible effect
+    if radius < 1 || bitmap.width == 0 || bitmap.height == 0 {
+        return bitmap;
+    }
+    let new_width = bitmap.width + radius as u32 * 2;
+    let new_height = bitmap.height + radius as u32 * 2;
+    let mut pixels = vec![0u8; (new_width * new_height) as usize];
+    for row in 0..bitmap.height as i64 {
+        for col in 0..bitmap.width as i64 {
+            let source = bitmap.pixels[(row as usize) * bitmap.width as usize + col as usize];
+            if source == 0 {
+                continue;
+            }
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let dr = (row + radius + dy) as usize;
+                    let dc = (col + radius + dx) as usize;
+                    let index = dr * new_width as usize + dc;
+                    pixels[index] = pixels[index].max(source);
+                }
+            }
+        }
+    }
+    GrayBitmap {
+        left: bitmap.left - radius,
+        top: bitmap.top + radius,
+        width: new_width,
+        height: new_height,
         pixels,
     }
 }
