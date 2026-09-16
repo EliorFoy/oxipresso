@@ -209,30 +209,81 @@ impl GlyphFontResolver for KpseFontResolver {
 /// the original protocol: stdout becomes `out`, the `.log` file becomes
 /// `log`; both buffers are truncated at the start of a run and flushed at
 /// the end. Other writes (XDV, synctex, aux) are not editor channels.
-fn stream_messages_from_events(events: Vec<OutputEvent>) -> Vec<EditorMessage> {
+///
+/// In `line_output` mode the original only forwards *complete* lines (the
+/// editor buffers accumulate until a newline), so trailing partial lines are
+/// withheld and the appends become `append-lines`.
+fn stream_messages_from_events(events: Vec<OutputEvent>, line_output: bool) -> Vec<EditorMessage> {
     if events.is_empty() {
         return Vec::new();
     }
-    let mut messages = vec![
-        EditorMessage::Truncate {
-            buffer: InfoBuffer::Out,
-            size: 0,
-        },
-        EditorMessage::Truncate {
-            buffer: InfoBuffer::Log,
-            size: 0,
-        },
-    ];
-    for event in events {
-        let buffer = if event.path == "stdout" {
-            InfoBuffer::Out
-        } else if event.path.replace('\\', "/").ends_with(".log") {
-            InfoBuffer::Log
-        } else {
+
+    let mut out_text = String::new();
+    let mut log_text = String::new();
+    for event in &events {
+        let Ok(text) = String::from_utf8(event.data.clone()) else {
             continue;
         };
-        if let Ok(text) = String::from_utf8(event.data) {
-            messages.push(EditorMessage::Append { buffer, text });
+        if event.path == "stdout" {
+            out_text.push_str(&text);
+        } else if event.path.replace('\\', "/").ends_with(".log") {
+            log_text.push_str(&text);
+        }
+    }
+
+    let mut messages = Vec::new();
+    if line_output {
+        messages.push(EditorMessage::TruncateLines {
+            buffer: InfoBuffer::Out,
+            count: 0,
+        });
+        messages.push(EditorMessage::TruncateLines {
+            buffer: InfoBuffer::Log,
+            count: 0,
+        });
+        for (buffer, text) in [(InfoBuffer::Out, &out_text), (InfoBuffer::Log, &log_text)] {
+            if text.is_empty() {
+                continue;
+            }
+            let mut lines: Vec<String> =
+                text.split_inclusive('\n').map(ToOwned::to_owned).collect();
+            // Withhold a trailing partial line until its newline arrives.
+            if let Some(last) = lines.last()
+                && !last.ends_with('\n')
+            {
+                lines.pop();
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            messages.push(EditorMessage::AppendLines {
+                buffer,
+                lines: lines
+                    .into_iter()
+                    .map(|line| line.trim_end_matches('\n').to_string())
+                    .collect(),
+            });
+        }
+    } else {
+        messages.push(EditorMessage::Truncate {
+            buffer: InfoBuffer::Out,
+            size: 0,
+        });
+        messages.push(EditorMessage::Truncate {
+            buffer: InfoBuffer::Log,
+            size: 0,
+        });
+        for event in events {
+            let buffer = if event.path == "stdout" {
+                InfoBuffer::Out
+            } else if event.path.replace('\\', "/").ends_with(".log") {
+                InfoBuffer::Log
+            } else {
+                continue;
+            };
+            if let Ok(text) = String::from_utf8(event.data) {
+                messages.push(EditorMessage::Append { buffer, text });
+            }
         }
     }
     messages.push(EditorMessage::Flush);
@@ -503,7 +554,7 @@ impl OxipressoApp {
     /// buffer, the `.log` file to `log`, a truncate of both buffers starts a
     /// fresh run, and a flush ends it.
     fn stream_output_messages(&mut self) -> Vec<EditorMessage> {
-        stream_messages_from_events(self.engine.take_output_events())
+        stream_messages_from_events(self.engine.take_output_events(), self.options.line_output)
     }
 
     fn engine_output_messages(&self) -> Vec<EditorMessage> {
@@ -915,28 +966,31 @@ mod tests {
 
     #[test]
     fn stream_events_split_into_out_and_log_buffers() {
-        let messages = stream_messages_from_events(vec![
-            OutputEvent {
-                path: "stdout".to_string(),
-                offset: 0,
-                data: b"This is XeTeX\n".to_vec(),
-            },
-            OutputEvent {
-                path: "main.log".to_string(),
-                offset: 0,
-                data: b"log line\n".to_vec(),
-            },
-            OutputEvent {
-                path: "main.xdv".to_string(),
-                offset: 0,
-                data: vec![0xF7, 0x07],
-            },
-            OutputEvent {
-                path: "stdout".to_string(),
-                offset: 14,
-                data: "Output written\n".as_bytes().to_vec(),
-            },
-        ]);
+        let messages = stream_messages_from_events(
+            vec![
+                OutputEvent {
+                    path: "stdout".to_string(),
+                    offset: 0,
+                    data: b"This is XeTeX\n".to_vec(),
+                },
+                OutputEvent {
+                    path: "main.log".to_string(),
+                    offset: 0,
+                    data: b"log line\n".to_vec(),
+                },
+                OutputEvent {
+                    path: "main.xdv".to_string(),
+                    offset: 0,
+                    data: vec![0xF7, 0x07],
+                },
+                OutputEvent {
+                    path: "stdout".to_string(),
+                    offset: 14,
+                    data: "Output written\n".as_bytes().to_vec(),
+                },
+            ],
+            false,
+        );
         assert_eq!(
             messages.first(),
             Some(&EditorMessage::Truncate {
@@ -982,7 +1036,53 @@ mod tests {
 
     #[test]
     fn stream_events_empty_produces_no_messages() {
-        assert!(stream_messages_from_events(Vec::new()).is_empty());
+        assert!(stream_messages_from_events(Vec::new(), false).is_empty());
+        assert!(stream_messages_from_events(Vec::new(), true).is_empty());
+    }
+
+    #[test]
+    fn stream_events_line_mode_forwards_complete_lines_only() {
+        let events = vec![
+            OutputEvent {
+                path: "stdout".to_string(),
+                offset: 0,
+                data: b"first line\nsecond".to_vec(),
+            },
+            OutputEvent {
+                path: "main.log".to_string(),
+                offset: 0,
+                data: b"log line\n".to_vec(),
+            },
+        ];
+        let messages = stream_messages_from_events(events, true);
+        assert!(matches!(
+            messages.first(),
+            Some(EditorMessage::TruncateLines {
+                buffer: InfoBuffer::Out,
+                count: 0
+            })
+        ));
+        let out_lines = messages.iter().find_map(|message| match message {
+            EditorMessage::AppendLines {
+                buffer: InfoBuffer::Out,
+                lines,
+            } => Some(lines.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            out_lines,
+            Some(vec!["first line".to_string()]),
+            "partial trailing line must be withheld"
+        );
+        let log_lines = messages.iter().find_map(|message| match message {
+            EditorMessage::AppendLines {
+                buffer: InfoBuffer::Log,
+                lines,
+            } => Some(lines.clone()),
+            _ => None,
+        });
+        assert_eq!(log_lines, Some(vec!["log line".to_string()]));
+        assert!(matches!(messages.last(), Some(EditorMessage::Flush)));
     }
 
     #[test]
@@ -1615,5 +1715,179 @@ endobj
                 std::env::remove_var(key);
             }
         }
+    }
+
+    /// Protocol snapshot over the real engine (gated: real mode, an existing
+    /// format file, and kpsewhich). Covers the initialization and
+    /// change-rebuild message sequences: stream truncates, out/log appends,
+    /// flushes, input-file and lookup-file notifications, and a parsed
+    /// SyncTeX document for forward search.
+    #[test]
+    fn real_engine_protocol_snapshot() {
+        if std::env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1") {
+            return;
+        }
+        if std::env::var_os("TEXPRESSO_SRC").is_none() {
+            return;
+        }
+        let Some(format_path) = std::env::var_os("OXIPRESSO_XETEX_FORMAT") else {
+            return;
+        };
+        if !std::path::Path::new(&format_path).is_file() {
+            return;
+        }
+        let kpsewhich_available = std::process::Command::new("kpsewhich")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !kpsewhich_available {
+            return;
+        }
+
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(
+            &root_file,
+            "\\documentclass{article}\n\\begin{document}\nSnapshot\n\\end{document}\n",
+        )
+        .unwrap();
+
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            root_file: root_file.clone(),
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+
+        // Initialization sequence.
+        let init = app.initialize().unwrap();
+        assert!(matches!(
+            init.first(),
+            Some(EditorMessage::Truncate {
+                buffer: InfoBuffer::Out,
+                size: 0
+            })
+        ));
+        assert!(matches!(
+            init.get(1),
+            Some(EditorMessage::Truncate {
+                buffer: InfoBuffer::Log,
+                size: 0
+            })
+        ));
+        let out_text: String = init
+            .iter()
+            .filter_map(|message| match message {
+                EditorMessage::Append {
+                    buffer: InfoBuffer::Out,
+                    text,
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            out_text.to_lowercase().contains("xetex"),
+            "out stream should contain the engine banner, got {out_text:?}"
+        );
+        let log_text: String = init
+            .iter()
+            .filter_map(|message| match message {
+                EditorMessage::Append {
+                    buffer: InfoBuffer::Log,
+                    text,
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            log_text.to_lowercase().contains("xetex"),
+            "log stream should contain the engine banner, got {log_text:?}"
+        );
+        assert!(init.iter().any(|message| matches!(
+            message,
+            EditorMessage::Append {
+                buffer: InfoBuffer::Log,
+                ..
+            }
+        )));
+        assert!(
+            init.iter()
+                .any(|message| matches!(message, EditorMessage::Flush))
+        );
+        assert!(init.iter().any(|message| matches!(
+            message,
+            EditorMessage::InputFile { path, .. } if path == "main.tex"
+        )));
+        assert!(init.iter().any(|message| matches!(
+            message,
+            EditorMessage::LookupFile {
+                path,
+                status: oxipresso_editor_protocol::LookupStatus::Successful,
+                ..
+            } if path == "main.tex"
+        )));
+        assert!(app.synctex.is_some(), "SyncTeX sidecar should be parsed");
+
+        // Editor change -> rebuild sequence: channels truncate again and the
+        // engine re-echoes the file open through the out channel.
+        let rebuild = app
+            .handle_editor_line("(change \"main.tex\" 41 8 \"Edited\")")
+            .unwrap();
+        assert!(matches!(
+            rebuild.first(),
+            Some(EditorMessage::Truncate {
+                buffer: InfoBuffer::Out,
+                size: 0
+            })
+        ));
+        let rebuild_out: String = rebuild
+            .iter()
+            .filter_map(|message| match message {
+                EditorMessage::Append {
+                    buffer: InfoBuffer::Out,
+                    text,
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rebuild_out.contains("(main.tex"),
+            "rebuild should re-echo the file open, got {rebuild_out:?}"
+        );
+        assert!(
+            rebuild
+                .iter()
+                .any(|message| matches!(message, EditorMessage::Flush))
+        );
+
+        // Wire-format snapshot for the stream truncates.
+        assert_eq!(
+            serialize_message(
+                &EditorMessage::Truncate {
+                    buffer: InfoBuffer::Out,
+                    size: 0
+                },
+                WireProtocol::Sexp
+            ),
+            "(truncate out 0)"
+        );
+        assert_eq!(
+            serialize_message(
+                &EditorMessage::Truncate {
+                    buffer: InfoBuffer::Log,
+                    size: 0
+                },
+                WireProtocol::Json
+            ),
+            "[\"truncate\",\"log\",0]"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 }
