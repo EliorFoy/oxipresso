@@ -6,7 +6,7 @@ use std::{
 use oxipresso_editor_protocol::{
     EditorCommand, EditorMessage, InfoBuffer, WireProtocol, parse_command, serialize_message,
 };
-use oxipresso_engine_api::{RestartPolicy, RootDocument, TypesettingEngine};
+use oxipresso_engine_api::{OutputEvent, RestartPolicy, RootDocument, TypesettingEngine};
 use oxipresso_engine_external::ExternalEngine;
 use oxipresso_engine_xetex::XetexEngine;
 use oxipresso_render::AutoRenderBackend;
@@ -203,6 +203,40 @@ impl GlyphFontResolver for KpseFontResolver {
         }
         None
     }
+}
+
+/// Maps engine output-stream events onto the editor info buffers, mirroring
+/// the original protocol: stdout becomes `out`, the `.log` file becomes
+/// `log`; both buffers are truncated at the start of a run and flushed at
+/// the end. Other writes (XDV, synctex, aux) are not editor channels.
+fn stream_messages_from_events(events: Vec<OutputEvent>) -> Vec<EditorMessage> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+    let mut messages = vec![
+        EditorMessage::Truncate {
+            buffer: InfoBuffer::Out,
+            size: 0,
+        },
+        EditorMessage::Truncate {
+            buffer: InfoBuffer::Log,
+            size: 0,
+        },
+    ];
+    for event in events {
+        let buffer = if event.path == "stdout" {
+            InfoBuffer::Out
+        } else if event.path.replace('\\', "/").ends_with(".log") {
+            InfoBuffer::Log
+        } else {
+            continue;
+        };
+        if let Ok(text) = String::from_utf8(event.data) {
+            messages.push(EditorMessage::Append { buffer, text });
+        }
+    }
+    messages.push(EditorMessage::Flush);
+    messages
 }
 
 pub struct OxipressoApp {
@@ -442,7 +476,14 @@ impl OxipressoApp {
         &mut self,
         engine_result: oxipresso_engine_api::Result<()>,
     ) -> Result<Vec<EditorMessage>, String> {
-        let mut messages = self.engine_output_messages();
+        let stream_messages = self.stream_output_messages();
+        let has_stream_messages = !stream_messages.is_empty();
+        let mut messages = stream_messages;
+        if !has_stream_messages {
+            // Engines that do not stream their output channels (or runs that
+            // produced no stream writes) fall back to the diagnostics summary.
+            messages.extend(self.engine_output_messages());
+        }
         if let Err(error) = engine_result {
             if messages.is_empty() {
                 messages.extend(self.error_output_messages(error.to_string()));
@@ -455,6 +496,14 @@ impl OxipressoApp {
         self.refresh_synctex_from_engine();
         self.refresh_viewer_from_artifact()?;
         Ok(messages)
+    }
+
+    /// Converts the engine's incremental output-stream writes into editor
+    /// messages, mirroring the original protocol: stdout maps to the `out`
+    /// buffer, the `.log` file to `log`, a truncate of both buffers starts a
+    /// fresh run, and a flush ends it.
+    fn stream_output_messages(&mut self) -> Vec<EditorMessage> {
+        stream_messages_from_events(self.engine.take_output_events())
     }
 
     fn engine_output_messages(&self) -> Vec<EditorMessage> {
@@ -551,7 +600,7 @@ mod tests {
     use super::*;
     use oxipresso_engine_api::{
         ArtifactKind, Diagnostic, DiagnosticSeverity, EngineError, EngineEvent, EngineInit,
-        EngineIo, FileKind, OpenResult, PathId, RestartPolicy, SyncTexArtifact,
+        EngineIo, FileKind, OpenResult, OutputEvent, PathId, RestartPolicy, SyncTexArtifact,
     };
     use std::{
         cell::Cell,
@@ -862,6 +911,78 @@ mod tests {
             )
         }));
         fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn stream_events_split_into_out_and_log_buffers() {
+        let messages = stream_messages_from_events(vec![
+            OutputEvent {
+                path: "stdout".to_string(),
+                offset: 0,
+                data: b"This is XeTeX\n".to_vec(),
+            },
+            OutputEvent {
+                path: "main.log".to_string(),
+                offset: 0,
+                data: b"log line\n".to_vec(),
+            },
+            OutputEvent {
+                path: "main.xdv".to_string(),
+                offset: 0,
+                data: vec![0xF7, 0x07],
+            },
+            OutputEvent {
+                path: "stdout".to_string(),
+                offset: 14,
+                data: "Output written\n".as_bytes().to_vec(),
+            },
+        ]);
+        assert_eq!(
+            messages.first(),
+            Some(&EditorMessage::Truncate {
+                buffer: InfoBuffer::Out,
+                size: 0
+            })
+        );
+        assert_eq!(
+            messages.get(1),
+            Some(&EditorMessage::Truncate {
+                buffer: InfoBuffer::Log,
+                size: 0
+            })
+        );
+        let appends: Vec<&EditorMessage> = messages
+            .iter()
+            .filter(|message| matches!(message, EditorMessage::Append { .. }))
+            .collect();
+        assert_eq!(appends.len(), 3);
+        assert!(matches!(
+            appends[0],
+            EditorMessage::Append {
+                buffer: InfoBuffer::Out,
+                ..
+            }
+        ));
+        assert!(matches!(
+            appends[1],
+            EditorMessage::Append {
+                buffer: InfoBuffer::Log,
+                ..
+            }
+        ));
+        assert!(matches!(
+            appends[2],
+            EditorMessage::Append {
+                buffer: InfoBuffer::Out,
+                ..
+            }
+        ));
+        assert!(matches!(messages.last(), Some(EditorMessage::Flush)));
+    }
+
+    #[test]
+    fn stream_events_empty_produces_no_messages() {
+        assert!(stream_messages_from_events(Vec::new()).is_empty());
     }
 
     #[test]

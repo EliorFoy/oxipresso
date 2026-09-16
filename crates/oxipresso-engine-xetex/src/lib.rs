@@ -10,8 +10,8 @@ pub mod texlive;
 
 use oxipresso_engine_api::{
     ArtifactKind, Diagnostic, DiagnosticSeverity, DocumentArtifact, EngineEvent, EngineInit,
-    EngineIo, FileHandle, FileKind, OpenResult, PathId, RestartPolicy, Result, RootDocument,
-    SyncTexArtifact, TypesettingEngine,
+    EngineIo, FileHandle, FileKind, OpenResult, OutputEvent, PathId, RestartPolicy, Result,
+    RootDocument, SyncTexArtifact, TypesettingEngine,
 };
 use oxipresso_engine_xetex_sys::{
     OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_is_real, oxipresso_xetex_run,
@@ -55,6 +55,7 @@ pub struct XetexEngine {
     diagnostics: Vec<Diagnostic>,
     output: Option<DocumentArtifact>,
     output_synctex: Option<SyncTexArtifact>,
+    output_events: Vec<OutputEvent>,
     initialized: bool,
 }
 
@@ -158,6 +159,7 @@ impl XetexEngine {
             last_error: None,
             output_paths: HashMap::new(),
             output_bytes: HashMap::new(),
+            output_events: Vec::new(),
             diagnostics: Vec::new(),
         };
         let callbacks = OxiXetexCallbacks {
@@ -191,6 +193,7 @@ impl XetexEngine {
         self.diagnostics = std::mem::take(&mut state.diagnostics);
         self.output = select_output_artifact(&root.root_name, &state.output_bytes);
         self.output_synctex = Self::select_synctex_artifact(&state.output_bytes);
+        self.output_events = std::mem::take(&mut state.output_events);
         Ok(result)
     }
 
@@ -273,6 +276,7 @@ struct CallbackState<'a> {
     last_error: Option<String>,
     output_paths: HashMap<u32, String>,
     output_bytes: HashMap<String, Vec<u8>>,
+    output_events: Vec<OutputEvent>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -409,6 +413,12 @@ unsafe extern "C" fn callback_append(
     if let Some(path) = state.output_paths.get(&handle).cloned()
         && let Some(output) = state.output_bytes.get_mut(&path)
     {
+        let offset = output.len();
+        state.output_events.push(OutputEvent {
+            path: path.clone(),
+            offset,
+            data: data.to_vec(),
+        });
         output.extend_from_slice(data);
     }
     match state.io.append(FileHandle(handle), data) {
@@ -597,6 +607,10 @@ impl TypesettingEngine for XetexEngine {
         self.output_synctex.clone()
     }
 
+    fn take_output_events(&mut self) -> Vec<OutputEvent> {
+        std::mem::take(&mut self.output_events)
+    }
+
     fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
@@ -743,6 +757,29 @@ mod tests {
         assert!(
             document.forward_search_path("simple.tex", 4).is_some(),
             "syncTeX forward search should find a hit for simple.tex line 4"
+        );
+
+        // Output streams: stdout chunks feed the `out` buffer and the .log
+        // file feeds the `log` buffer, in write order.
+        let events = rebuild_engine.take_output_events();
+        assert!(
+            events.iter().any(|event| event.path == "stdout"),
+            "engine stdout should be captured as output events"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.path.replace('\\', "/").ends_with(".log")),
+            "engine log file should be captured as output events"
+        );
+        let stdout_text = events
+            .iter()
+            .filter(|event| event.path == "stdout")
+            .map(|event| String::from_utf8_lossy(&event.data))
+            .collect::<String>();
+        assert!(
+            stdout_text.to_lowercase().contains("xetex"),
+            "engine stdout should contain the XeTeX banner, got {stdout_text:?}"
         );
     }
 

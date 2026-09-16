@@ -168,6 +168,16 @@ pub trait EngineIo {
     }
 }
 
+/// One incremental write an engine made to an output stream (stdout, log
+/// file, ...). Editors render these as the `out`/`log` info buffers the same
+/// way the original TeXpresso protocol does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputEvent {
+    pub path: String,
+    pub offset: usize,
+    pub data: Vec<u8>,
+}
+
 pub trait TypesettingEngine {
     fn initialize(&mut self, root: &RootDocument, io: &mut dyn EngineIo) -> Result<EngineInit>;
     fn step(&mut self, io: &mut dyn EngineIo) -> Result<EngineEvent>;
@@ -180,6 +190,11 @@ pub trait TypesettingEngine {
     fn output_document(&self) -> Option<DocumentArtifact>;
     fn output_synctex(&self) -> Option<SyncTexArtifact> {
         None
+    }
+    /// Drains the incremental output-stream writes recorded during the last
+    /// engine run, in write order. Empty for engines that do not track them.
+    fn take_output_events(&mut self) -> Vec<OutputEvent> {
+        Vec::new()
     }
     fn diagnostics(&self) -> &[Diagnostic];
 }
