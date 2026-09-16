@@ -84,6 +84,9 @@ pub struct ViewerGuiApp {
     watcher: Option<PollingFileWatcher>,
     poll_interval: Duration,
     last_watch_check: Option<Instant>,
+    /// Reverse-SyncTeX document loaded from the `.synctex` sidecar next to
+    /// the artifact; enables click-to-source in the viewer.
+    synctex: Option<oxipresso_synctex::SyncTexDocument>,
 }
 
 impl ViewerGuiApp {
@@ -98,6 +101,7 @@ impl ViewerGuiApp {
             watcher: options.watch_path.map(file_watcher),
             poll_interval: options.poll_interval,
             last_watch_check: None,
+            synctex: None,
         };
         if let Some(artifact) = options.initial_artifact {
             app.load_artifact(artifact);
@@ -121,12 +125,40 @@ impl ViewerGuiApp {
                 self.texture = None;
                 self.texture_key = None;
                 self.rendered_size = None;
+                self.reload_synctex_sidecar();
                 true
             }
             Err(error) => {
                 self.status = error.to_string();
                 false
             }
+        }
+    }
+
+    /// Loads the `.synctex` sidecar sitting next to the artifact (same stem),
+    /// if any, enabling reverse SyncTeX (click-to-source) in the viewer.
+    fn reload_synctex_sidecar(&mut self) {
+        self.synctex = None;
+        let Some(source) = self
+            .state
+            .last_artifact
+            .as_ref()
+            .and_then(|artifact| artifact.source_name.as_ref())
+        else {
+            return;
+        };
+        let sidecar = Path::new(source).with_extension("synctex");
+        let Ok(bytes) = std::fs::read(sidecar) else {
+            return;
+        };
+        let artifact = oxipresso_engine_api::SyncTexArtifact {
+            bytes,
+            compressed: false,
+            source_name: None,
+        };
+        match oxipresso_synctex::parse_artifact(&artifact) {
+            Ok(document) => self.synctex = Some(document),
+            Err(error) => self.status = format!("syncTeX sidecar parse failed: {error}"),
         }
     }
 
@@ -239,7 +271,9 @@ impl ViewerGuiApp {
 
     fn page_image(&mut self, ui: &mut egui::Ui) {
         self.ensure_texture(ui.ctx());
-        let Some(texture) = self.texture.as_ref() else {
+        // Clone the handle so the page closure can borrow &mut self for the
+        // click handler (TextureHandle is an Arc).
+        let Some(texture) = self.texture.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label("No document");
             });
@@ -261,12 +295,69 @@ impl ViewerGuiApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    let response = ui.add(egui::Image::new((texture.id(), display_size)));
+                    let response = ui.add(
+                        egui::Image::new((texture.id(), display_size)).sense(egui::Sense::click()),
+                    );
+                    if response.clicked()
+                        && let Some(pointer) = response.interact_pointer_pos()
+                    {
+                        let relative = (pointer - response.rect.min) / response.rect.size();
+                        let fraction_x = relative.x.clamp(0.0, 1.0) as f64;
+                        let fraction_y = relative.y.clamp(0.0, 1.0) as f64;
+                        if let Some((width_pt, height_pt)) = self.page_dims_pt() {
+                            self.apply_synctex_reverse(
+                                fraction_x * width_pt,
+                                fraction_y * height_pt,
+                            );
+                        }
+                    }
                     if let Some(marker_rect) = self.paint_sync_marker(ui, response.rect) {
                         ui.scroll_to_rect(marker_rect, Some(egui::Align::Center));
                     }
                 });
             });
+    }
+
+    /// Page size in points for the current page, from the XDV stream itself.
+    fn page_dims_pt(&self) -> Option<(f64, f64)> {
+        let artifact = self.state.last_artifact.as_ref()?;
+        if !matches!(artifact.kind, ArtifactKind::Xdv | ArtifactKind::Dvi) {
+            return None;
+        }
+        let document = oxipresso_render::xdv::parse_xdv(&artifact.bytes, &mut |_| None).ok()?;
+        let page = document.pages.get(self.state.page)?;
+        Some((page.width_pt, page.height_pt))
+    }
+
+    /// Click-to-source: resolves the clicked page point through reverse
+    /// SyncTeX and pins the source location (marker + status line).
+    fn apply_synctex_reverse(&mut self, x_pt: f64, y_pt: f64) {
+        let page = self.state.page + 1; // SyncTeX pages are 1-based
+        let Some(synctex) = self.synctex.as_ref() else {
+            self.status = format!("No syncTeX sidecar loaded (page {page})");
+            return;
+        };
+        let x_sp = (x_pt * 65_536.0) as i32;
+        let y_sp = (y_pt * 65_536.0) as i32;
+        match synctex.reverse_search_page_point(page, x_sp, y_sp) {
+            Some(hit) => {
+                self.status = format!(
+                    "syncTeX: {}:{} (input {})",
+                    hit.path, hit.line, hit.input_index
+                );
+                self.state.set_sync_position(ViewerSyncPosition {
+                    page: self.state.page,
+                    path: hit.path,
+                    line: hit.line,
+                    x: hit.x,
+                    y: hit.y,
+                    width: hit.width,
+                    height: hit.height,
+                    depth: hit.depth,
+                });
+            }
+            None => self.status = format!("No syncTeX hit on page {page}"),
+        }
     }
 
     fn paint_sync_marker(&self, ui: &egui::Ui, image_rect: egui::Rect) -> Option<egui::Rect> {

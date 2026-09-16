@@ -506,6 +506,30 @@ impl OxipressoApp {
         });
     }
 
+    /// Resolves a click on `page` (1-based SyncTeX numbering) at page
+    /// coordinates in points to a source location through reverse SyncTeX,
+    /// returning the editor notification message for it. This is the
+    /// engine-to-editor half of bidirectional sync: the viewer reports where
+    /// the user clicked, the editor jumps to the source line.
+    pub fn synctex_reverse_message(
+        &self,
+        page: usize,
+        x_pt: f64,
+        y_pt: f64,
+    ) -> Option<EditorMessage> {
+        let synctex = self.synctex.as_ref()?;
+        // SyncTeX coordinates are 1/65536 pt, origin at the page top-left,
+        // y growing downward — the same convention as the DVI renderer.
+        let x_sp = (x_pt * 65536.0) as i32;
+        let y_sp = (y_pt * 65536.0) as i32;
+        let hit = synctex.reverse_search_page_point(page, x_sp, y_sp)?;
+        Some(EditorMessage::Synctex {
+            path: hit.path,
+            line: hit.line,
+            column: 0,
+        })
+    }
+
     fn rebuild(&mut self, policy: RestartPolicy) -> Result<Vec<EditorMessage>, String> {
         let engine_result = match policy {
             RestartPolicy::NoRestartNeeded => return Ok(Vec::new()),
@@ -1038,6 +1062,53 @@ mod tests {
     fn stream_events_empty_produces_no_messages() {
         assert!(stream_messages_from_events(Vec::new(), false).is_empty());
         assert!(stream_messages_from_events(Vec::new(), true).is_empty());
+    }
+
+    #[test]
+    fn synctex_reverse_search_maps_page_point_to_source() {
+        // OXIPRESSO_SYNCTEX_SMOKE points at a real .synctex sidecar
+        // (e.g. produced by the real engine through OXIPRESSO_SYNCTEX_OUT).
+        let Ok(path) = std::env::var("OXIPRESSO_SYNCTEX_SMOKE") else {
+            return;
+        };
+        let Ok(bytes) = fs::read(&path) else {
+            return;
+        };
+
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\documentclass{article}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            root_file,
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+        let artifact = oxipresso_engine_api::SyncTexArtifact {
+            bytes,
+            compressed: false,
+            source_name: None,
+        };
+        app.synctex = oxipresso_synctex::parse_artifact(&artifact).ok();
+
+        // A click in the middle of page 1 must resolve to a source location.
+        let message = app
+            .synctex_reverse_message(1, 300.0, 300.0)
+            .expect("reverse search should find the nearest record");
+        match message {
+            EditorMessage::Synctex { path, line, .. } => {
+                assert!(path.ends_with(".tex"), "reverse hit path {path:?}");
+                assert!(line >= 1, "reverse hit line {line}");
+            }
+            other => panic!("expected a synctex message, got {other:?}"),
+        }
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]

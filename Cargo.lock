@@ -2049,6 +2049,7 @@ dependencies = [
  "oxipresso-engine-api",
  "oxipresso-platform",
  "oxipresso-render",
+ "oxipresso-synctex",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:oxipresso-synctex"]
 pdfium = ["oxipresso-render/pdfium"]
 pdfium-bundled = ["pdfium", "oxipresso-render/pdfium-bundled"]
 
@@ -15,3 +15,4 @@ eframe = { version = "0.34.3", optional = true, default-features = false, featur
 oxipresso-engine-api = { path = "../oxipresso-engine-api" }
 oxipresso-platform = { path = "../oxipresso-platform" }
 oxipresso-render = { path = "../oxipresso-render" }
+oxipresso-synctex = { path = "../oxipresso-synctex", optional = true }
