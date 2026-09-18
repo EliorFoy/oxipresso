@@ -721,9 +721,9 @@ impl RenderBackend for XdvGlyphRenderBackend {
                     };
                     // The bbox form carries the display size directly; the
                     // matrix form sizes from the decoded native pixels
-                    // (1px = 1bp) times the special's scale factor.
+                    // (1px = 1bp) times the special's per-axis (x, y) scale.
                     let (display_w_pt, display_h_pt) = match image_scale {
-                        Some(factor) => (image.width as f64 * factor, image.height as f64 * factor),
+                        Some([sx, sy]) => (image.width as f64 * *sx, image.height as f64 * *sy),
                         None => (*w_pt, *h_pt),
                     };
                     let dest_w = (display_w_pt * scale).round().max(1.0) as i64;

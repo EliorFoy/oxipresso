@@ -98,7 +98,11 @@ impl XdvDocument {
                     hash.write_u64(y_pt.to_bits());
                     hash.write_u64(w_pt.to_bits());
                     hash.write_u64(h_pt.to_bits());
-                    hash.write_u64(scale.map(|s| s.to_bits()).unwrap_or(0));
+                    hash.write_u64(
+                        scale
+                            .map(|[sx, sy]| sx.to_bits() ^ sy.to_bits().rotate_left(32))
+                            .unwrap_or(0),
+                    );
                     hash.write(path.as_bytes());
                 }
             }
@@ -191,14 +195,14 @@ pub enum XdvElement {
     /// An image placed by a `pdf:image` special (`\includegraphics` /
     /// `\XeTeXpicfile`). `x_pt`/`y_pt` is the image's top-left corner on the
     /// page. The bbox form carries the display size directly in `w_pt`/`h_pt`;
-    /// the matrix form carries `scale` instead and the renderer computes the
-    /// display size from the decoded image's native pixel size (1px = 1bp).
+    /// the matrix form carries `scale` (x, y) instead and the renderer computes
+    /// the display size from the decoded image's native pixel size (1px = 1bp).
     Image {
         x_pt: f64,
         y_pt: f64,
         w_pt: f64,
         h_pt: f64,
-        scale: Option<f64>,
+        scale: Option<[f64; 2]>,
         /// Image file path exactly as written in the special.
         path: String,
     },
@@ -764,8 +768,10 @@ struct PdfImageSpecial {
     bbox: Option<[f64; 4]>,
     display_width_pt: Option<f64>,
     display_height_pt: Option<f64>,
-    /// matrix-form scale factors (a and d of the PDF matrix).
-    scale: Option<f64>,
+    /// matrix-form scale factors: (a, d) of the PDF matrix, i.e. the x and y
+    /// scale. Kept separate so `\XeTeXpicfile ... xscaled M yscaled N` does not
+    /// distort (applying `a` to both dimensions was a real bug).
+    scale: Option<[f64; 2]>,
 }
 
 /// Parses `pdf:image bbox X1 Y1 X2 Y2 [clip N] [width Wpt|height Hpt] (<file>)`
@@ -825,7 +831,7 @@ fn parse_pdf_image_special(text: &str) -> Option<PdfImageSpecial> {
                 bbox: None,
                 display_width_pt: None,
                 display_height_pt: None,
-                scale: Some(values[0]),
+                scale: Some([values[0], values[3]]),
             })
         }
         _ => None,
@@ -844,9 +850,9 @@ fn parse_pt_value(token: &str) -> Option<f64> {
 
 /// Resolves the display size in points for a parsed `pdf:image` special.
 /// The bbox form scales the natural bbox by the explicit width/height when
-/// present. The matrix form returns only the scale — the renderer computes
-/// the display size from the decoded image's native pixel size.
-fn resolve_image_size(image: &PdfImageSpecial) -> (f64, f64, Option<f64>) {
+/// present. The matrix form returns only the (x, y) scale — the renderer
+/// computes the display size from the decoded image's native pixel size.
+fn resolve_image_size(image: &PdfImageSpecial) -> (f64, f64, Option<[f64; 2]>) {
     if let Some([x1, y1, x2, y2]) = image.bbox {
         let natural_w = (x2 - x1).abs().max(1e-6);
         let natural_h = (y2 - y1).abs().max(1e-6);
@@ -1336,7 +1342,7 @@ mod tests {
         assert_eq!(y, 0.0);
 
         let (_x, y, w, h, scale, path) = images.remove(0);
-        assert_eq!(scale, Some(0.27682));
+        assert_eq!(scale, Some([0.27682, 0.27682]));
         assert_eq!(w, 0.0, "matrix form defers sizing to the renderer");
         assert_eq!(h, 0.0);
         assert_eq!(path, "../doc/logo.png");
@@ -1352,6 +1358,21 @@ mod tests {
             .elements
             .retain(|element| !matches!(element, XdvElement::Image { .. }));
         assert_ne!(digest_with, without.page_digest(0).unwrap());
+    }
+
+    #[test]
+    fn parses_nonuniform_matrix_image_xy_scale() {
+        // `\XeTeXpicfile ... xscaled M yscaled N` => matrix with a != d. The
+        // parser must keep both axes separate (using `a` for both distorted the
+        // image) — here a=2, d=4.
+        let special = parse_pdf_image_special("pdf:image matrix 2 0 0 4 0 0 page 0 (a.png)")
+            .expect("matrix special parses");
+        assert_eq!(
+            special.scale,
+            Some([2.0, 4.0]),
+            "x and y scale kept separate"
+        );
+        assert_eq!(special.bbox, None);
     }
 
     /// Builds a one-page XDV containing a pagesize + one `pdf:image` special.
