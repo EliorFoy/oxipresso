@@ -850,6 +850,18 @@ mod tests {
         let synctex = rebuild_engine.output_synctex().expect("syncTeX sidecar");
         assert!(!synctex.compressed);
         assert!(synctex.bytes.starts_with(b"SyncTeX Version:"));
+        // TeXpresso's always-on `synctex_texpresso_extension` (enabled in the
+        // real shim) makes the engine emit `/<tag>` closed-input records; a real
+        // TeXpresso sidecar has them, so ours must too (parser tolerates them).
+        let synctex_text = std::str::from_utf8(&synctex.bytes).unwrap();
+        assert!(
+            synctex_text.lines().any(|line| {
+                line.len() > 1
+                    && line.starts_with('/')
+                    && line[1..].bytes().all(|b| b.is_ascii_digit())
+            }),
+            "syncTeX should carry TeXpresso's /<tag> closed-input records"
+        );
         let document = oxipresso_synctex::parse_artifact(&synctex).unwrap();
         assert!(
             !document.inputs.is_empty(),

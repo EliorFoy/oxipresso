@@ -706,6 +706,11 @@ int oxipresso_xetex_run(const oxi_xetex_config *config,
      * gzip, but the plain stream needs no extra flag plumbing). */
     tt_xetex_set_int_variable("synctex_enabled", config->synctex_enabled ? 1 : 0);
     tt_xetex_set_int_variable("synctex_use_gz", 0);
+    /* TeXpresso's always-on extension (main.c sets it unconditionally): it makes
+     * synctex_end_file_reading emit `/<tag>` closed-input records into the
+     * sidecar, matching the `.synctex` byte layout TeXpresso produces. Our
+     * parser ignores the `/` records (they are advisory input-closure markers). */
+    tt_xetex_set_int_variable("synctex_texpresso_extension", 1);
     status = tt_engine_xetex_main(session.format_path,
                                   config->in_initex_mode && session.primary_name[0]
                                       ? session.primary_name
