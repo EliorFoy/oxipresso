@@ -161,6 +161,27 @@ mod tests {
     }
 
     #[test]
+    fn navigation_and_zoom_are_bounded_on_empty_document() {
+        // The CLI holds a page_count 0 ViewerState until the first artifact
+        // loads; an editor could send next/prev/zoom before then. These must
+        // never panic or wrap.
+        let mut state = ViewerState::default(); // page_count 0
+        state.next_page();
+        state.previous_page();
+        state.set_page(5);
+        assert_eq!(state.page, 0, "no pages: page stays 0, no underflow/panic");
+        // Zoom saturates at both clamps regardless of repeated adjustment.
+        for _ in 0..50 {
+            state.adjust_zoom(1.0);
+        }
+        assert_eq!(state.zoom, 8.0, "zoom clamped at max");
+        for _ in 0..100 {
+            state.adjust_zoom(-1.0);
+        }
+        assert_eq!(state.zoom, 0.1, "zoom clamped at min");
+    }
+
+    #[test]
     fn loading_artifact_updates_page_count_and_clamps_page() {
         let artifact = DocumentArtifact {
             kind: ArtifactKind::Pdf,
