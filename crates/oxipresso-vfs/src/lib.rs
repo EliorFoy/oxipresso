@@ -922,6 +922,20 @@ mod tests {
     }
 
     #[test]
+    fn close_editor_without_disk_reports_zero_offset() {
+        // TeXpresso interpret_close: with no fs_data, `changed` stays 0 (still
+        // reports a change so the engine reloads / sees the now-absent file).
+        // Exercises the unwrap_or(Some(0)) branch, distinct from the with-disk
+        // first_diff path covered above.
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("only-editor.tex", b"hello".to_vec()); // editor-only, no disk
+        let outcome = vfs
+            .close_editor("only-editor.tex")
+            .expect("closing an editor-only buffer still reports a change");
+        assert_eq!(outcome.changed_offset, Some(0));
+    }
+
+    #[test]
     fn open_read_records_input_file_once() {
         let mut vfs = VirtualFileSystem::new();
         vfs.open_editor("main.tex", b"content".to_vec());
