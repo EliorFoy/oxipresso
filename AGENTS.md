@@ -307,7 +307,7 @@ Result:
 - Known runtime noise: fontconfig prints `Cannot load default config file` (non-fatal; see Not Done Yet).
 
 Additional protocol snapshots verified (real engine, gated CLI test `real_engine_protocol_snapshot`):
-
+- Re-run against real XeTeX at round 156 (all engine-side + parser fixes accumulated since r132 present): `cargo test -p oxipresso-engine-xetex` in real mode → **13/13, 0 ignored** in 35.66s (real tests actually executed, not self-skipped), including `real_xetex_bootstrap_builds_format_and_typesets_simple` (real format bootstrap → real XDV + asserts `/<tag>` synctex-extension records present + reverse_sync on the real sidecar + include/includegraphics/missing-input fixtures) and `real_engine_protocol_snapshot` (reverse-sync over the wire). Confirms r132/133/141/142/145 cohere end-to-end on the actual engine.
 - Initialization sequence: `(truncate out 0)` + `(truncate log 0)` first, then the engine's stdout/log appends — including the XeTeX banner and TeX's per-character file-open echo (`(`, `m`, `a`, `i`...) — then `(flush)`, `input-file`, and a successful `lookup-file` for the root.
 - The SyncTeX document is parsed and attached after initialization.
 - Change-rebuild sequence: both channels re-truncate, the file open is re-echoed (`(main.tex`), and a flush closes the run.
