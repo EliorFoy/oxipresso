@@ -342,6 +342,15 @@ Result:
 - stdout was emitted as `(truncate out 0)`, `(append out "...")`, `(flush)`;
 - root lookup emitted `(lookup-file read successful "main.tex")`.
 
+Additional external compile-failure path verified (real `xelatex`, round 56):
+
+```powershell
+$env:OXIPRESSO_ENGINE='external'
+cargo run -q -p oxipresso-cli --bin oxipresso -- -test-initialize <temp>\broken.tex   # \undefinedmacroxyz
+```
+
+Result: exit **0** (the CLI session survives a failed compile rather than crashing), and the editor wire carried `(append out "…")` including TeX's actual error text (`broken.tex:3: Undefined control sequence.` and the `l.3 …` context line). This is the external backend reading the `.log` and emitting an `Error` diagnostic, confirming the "report engine errors to the editor without failing the session" invariant for a real syntax error.
+
 ## Not Done Yet
 
 - Incremental rebuild status: three of four layers are done — (1) format cache (no re-bootstrap), (2) renderer-side page digest cache (unchanged XDV pages reuse rendered output), (3) `read_files`-based rebuild skipping (edits to files the engine never read cost nothing), (4) kpsewhich persistent resolution cache (warm rebuilds 15.5s → ~600ms). The remaining layer — resuming typesetting from an engine-state checkpoint instead of a full re-run — is the only open piece. The original uses fork() at read "fences" (copy-on-write process snapshots; see `src/frontend/engine_tex.c` fences and `engine/main/fork.c`), which has no Windows equivalent; per the design constraints this must become one cross-platform engine-state serialization/restore model, a large self-contained project (the engine globals span pool/equiv/trie/font memory structures). At ~600ms warm rebuilds the preview is already interactive; the serialization layer would shave the remaining ~300-400ms of format-load + input-replay time.
