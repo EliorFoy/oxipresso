@@ -10,6 +10,13 @@ pub fn font_directories() -> Vec<PathBuf> {
     dirs
 }
 
-pub fn file_watcher(path: PathBuf) -> PollingFileWatcher {
-    PollingFileWatcher::new(path)
+/// Platform watcher factory (Windows).
+///
+/// Currently returns the portable [`PollingFileWatcher`]. A native
+/// `ReadDirectoryChangesW` watcher was attempted and removed because raw
+/// overlapped-Win32 cancellation was not yet reliable here (see AGENTS.md
+/// notes); the `Box<dyn FileWatcher>` interface lets it be swapped in later
+/// without touching any caller.
+pub fn file_watcher(path: PathBuf) -> Box<dyn crate::FileWatcher> {
+    Box::new(PollingFileWatcher::new(path))
 }

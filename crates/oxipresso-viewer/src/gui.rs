@@ -7,7 +7,7 @@ use std::{
 
 use eframe::egui;
 use oxipresso_engine_api::{ArtifactKind, DocumentArtifact};
-use oxipresso_platform::{FileWatchEvent, FileWatcher, PollingFileWatcher, file_watcher};
+use oxipresso_platform::{FileWatchEvent, FileWatcher, file_watcher};
 use oxipresso_render::{AutoRenderBackend, RenderBackend, RenderedPage};
 
 use crate::{FitMode, ViewerState, ViewerSyncPosition, load_artifact_from_path};
@@ -81,7 +81,7 @@ pub struct ViewerGuiApp {
     texture_key: Option<TextureKey>,
     rendered_size: Option<egui::Vec2>,
     status: String,
-    watcher: Option<PollingFileWatcher>,
+    watcher: Option<Box<dyn FileWatcher>>,
     poll_interval: Duration,
     last_watch_check: Option<Instant>,
     /// Reverse-SyncTeX document loaded from the `.synctex` sidecar next to
@@ -163,7 +163,7 @@ impl ViewerGuiApp {
     }
 
     pub fn watch_path(&self) -> Option<&Path> {
-        self.watcher.as_ref().map(FileWatcher::path)
+        self.watcher.as_deref().map(FileWatcher::path)
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -211,7 +211,7 @@ impl ViewerGuiApp {
     }
 
     fn poll_watched_artifact(&mut self) {
-        let Some(event) = self.watcher.as_mut().map(FileWatcher::poll) else {
+        let Some(event) = self.watcher.as_mut().map(|watcher| watcher.poll()) else {
             return;
         };
         match event {

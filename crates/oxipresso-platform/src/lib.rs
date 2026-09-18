@@ -107,7 +107,7 @@ impl FileWatcher for PollingFileWatcher {
     }
 }
 
-pub fn file_watcher(path: impl Into<PathBuf>) -> PollingFileWatcher {
+pub fn file_watcher(path: impl Into<PathBuf>) -> Box<dyn FileWatcher> {
     platform_file_watcher(path.into())
 }
 
@@ -152,20 +152,20 @@ fn platform_font_directories() -> Vec<PathBuf> {
 }
 
 #[cfg(windows)]
-fn platform_file_watcher(path: PathBuf) -> PollingFileWatcher {
+fn platform_file_watcher(path: PathBuf) -> Box<dyn FileWatcher> {
     windows::file_watcher(path)
 }
 #[cfg(target_os = "linux")]
-fn platform_file_watcher(path: PathBuf) -> PollingFileWatcher {
+fn platform_file_watcher(path: PathBuf) -> Box<dyn FileWatcher> {
     linux::file_watcher(path)
 }
 #[cfg(target_os = "macos")]
-fn platform_file_watcher(path: PathBuf) -> PollingFileWatcher {
+fn platform_file_watcher(path: PathBuf) -> Box<dyn FileWatcher> {
     macos::file_watcher(path)
 }
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn platform_file_watcher(path: PathBuf) -> PollingFileWatcher {
-    PollingFileWatcher::new(path)
+fn platform_file_watcher(path: PathBuf) -> Box<dyn FileWatcher> {
+    Box::new(PollingFileWatcher::new(path))
 }
 
 #[cfg(test)]

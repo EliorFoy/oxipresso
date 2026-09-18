@@ -13,6 +13,6 @@ pub fn font_directories() -> Vec<PathBuf> {
     dirs
 }
 
-pub fn file_watcher(path: PathBuf) -> PollingFileWatcher {
-    PollingFileWatcher::new(path)
+pub fn file_watcher(path: PathBuf) -> Box<dyn crate::FileWatcher> {
+    Box::new(PollingFileWatcher::new(path))
 }
