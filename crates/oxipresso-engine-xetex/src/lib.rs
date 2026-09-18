@@ -591,7 +591,13 @@ impl TypesettingEngine for XetexEngine {
     }
 
     fn restart(&mut self, _io: &mut dyn EngineIo) -> Result<()> {
+        // A restart discards the current run's derived state so a consumer
+        // inspecting the engine before the next run sees a clean slate rather
+        // than a stale sidecar/stream/diagnostics from the prior run.
         self.output = None;
+        self.output_synctex = None;
+        self.output_events.clear();
+        self.diagnostics.clear();
         Ok(())
     }
 
@@ -680,6 +686,49 @@ mod tests {
         assert_eq!(artifact.kind, ArtifactKind::Xdv);
         assert_eq!(artifact.bytes, b"OXIPRESSO-STUB-XDV");
         assert_eq!(artifact.source_name.as_deref(), Some("simple.xdv"));
+    }
+
+    #[test]
+    fn restart_discards_prior_run_derived_state() {
+        if XetexEngine::real_mode() {
+            return;
+        }
+        let mut engine = XetexEngine::new();
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("simple.tex", b"hello".to_vec());
+        let root = RootDocument {
+            root_dir: PathBuf::from("."),
+            root_name: "simple.tex".to_string(),
+            include_paths: Vec::new(),
+            stream_mode: false,
+        };
+        engine.initialize(&root, &mut vfs).unwrap();
+        assert!(
+            engine.output_document().is_some(),
+            "stub run yields an artifact"
+        );
+        assert!(
+            !engine.diagnostics().is_empty(),
+            "stub run reports diagnostics"
+        );
+
+        engine.restart(&mut vfs).unwrap();
+        assert!(
+            engine.output_document().is_none(),
+            "restart must drop the stale artifact"
+        );
+        assert!(
+            engine.diagnostics().is_empty(),
+            "restart must clear stale diagnostics"
+        );
+        assert!(
+            engine.output_synctex().is_none(),
+            "restart must drop any stale sidecar"
+        );
+        assert!(
+            engine.take_output_events().is_empty(),
+            "restart must drop stale output events"
+        );
     }
 
     #[test]
