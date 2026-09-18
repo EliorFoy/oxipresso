@@ -887,6 +887,73 @@ mod tests {
         assert_eq!(backend.render_misses.get(), 1);
     }
 
+    /// Builds a one-page XDV with a pagesize special and a matrix-form
+    /// `pdf:image` special (`\XeTeXpicfile`), which carries only a scale, not
+    /// an explicit display size.
+    fn image_xdv_matrix(special: &str) -> Vec<u8> {
+        let pagesize = b"pdf:pagesize width 614.295pt height 794.96999pt";
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]); // PRE, XDV id 7
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]); // BOP
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        stream.extend_from_slice(&[239u8, pagesize.len() as u8]);
+        stream.extend_from_slice(pagesize);
+        stream.extend_from_slice(&[239u8, special.len() as u8]);
+        stream.extend_from_slice(special.as_bytes());
+        stream.extend_from_slice(&[140u8]); // EOP
+        stream.extend_from_slice(&[248u8]); // POST
+        stream.extend_from_slice(&[0u8; 24]);
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&[249u8]); // POST_POST
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        stream.push(7);
+        stream.extend_from_slice(&[223u8; 8]);
+        stream
+    }
+
+    #[test]
+    fn pdf_image_matrix_form_sizes_from_native_pixels_times_scale() {
+        // 24×24 native PNG; matrix scale 2.5 => 60pt display; at 96 dpi
+        // (px_per_pt 4/3) => 80px, placed at the DVI origin (96px, 96px).
+        let png = solid_png(24, 24, [0, 0, 255, 255]);
+        let backend = XdvGlyphRenderBackend::with_image_loader(
+            Box::new(NullFonts),
+            Box::new(StubImages { bytes: png }),
+        );
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: image_xdv_matrix("pdf:image matrix 2.5 0.0 0.0 2.5 0.0 0.0 page 0 (logo.png)"),
+            source_name: Some("matrix.xdv".to_string()),
+        };
+        let page = backend.render_page(&artifact, 0).unwrap();
+        let at = |px: usize, py: usize| -> [u8; 4] {
+            let offset = (py * page.width as usize + px) * 4;
+            [
+                page.pixels_rgba[offset],
+                page.pixels_rgba[offset + 1],
+                page.pixels_rgba[offset + 2],
+                page.pixels_rgba[offset + 3],
+            ]
+        };
+        // Origin at 96px; the image spans [96, 176). Center and an in-range
+        // edge are blue; just past the far edge is white — this asserts the
+        // 60pt→80px sizing (bbox form would not exercise the scale×native path).
+        assert_eq!(at(136, 136), [0, 0, 255, 255], "image center is blue");
+        assert_eq!(at(170, 170), [0, 0, 255, 255], "near-edge still blue");
+        assert_eq!(
+            at(190, 190),
+            [255, 255, 255, 255],
+            "past the far edge white"
+        );
+        assert_eq!(at(5, 5), [255, 255, 255, 255], "corner stays white");
+    }
+
     #[test]
     fn pdf_image_specials_render_placeholder_when_loader_missing() {
         let backend = XdvGlyphRenderBackend::with_image_loader(
