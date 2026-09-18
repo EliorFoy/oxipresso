@@ -1064,6 +1064,47 @@ endobj
     }
 
     #[test]
+    fn render_page_beyond_last_page_is_error_not_panic() {
+        // A stale/oversized page index (e.g. the viewer holding a page from a
+        // document that just shrank) must return Err, never index-panic.
+        let backend = PdfMetadataRenderBackend;
+        let one = pdf(b"%PDF-1.7\n<< /Type /Page >>");
+        assert_eq!(backend.page_count(&one).unwrap(), 1);
+        assert!(backend.render_page(&one, 0).is_ok());
+        assert!(
+            backend.render_page(&one, 1).is_err(),
+            "page 1 does not exist"
+        );
+        assert!(
+            backend.render_page(&one, usize::MAX).is_err(),
+            "huge index must not overflow before the bounds guard"
+        );
+    }
+
+    #[test]
+    fn adversarial_xdv_bytes_degrade_without_panicking() {
+        // The XDV/DVI placeholder walk consumes arbitrary engine-artifact bytes.
+        // Truncated multibyte opcodes and random streams must be handled by the
+        // bounds-checked byte reader — yielding Err or a placeholder — never a
+        // panic. Locks the parser hot path against index-overrun regressions.
+        let backend = PdfMetadataRenderBackend;
+        let cases: Vec<Vec<u8>> = vec![
+            vec![247, 0, 0, 0, 1], // bop header truncated mid-record
+            vec![148, 0, 0],       // set_rule with no rule operands
+            vec![242, 255, 255],   // fnt2 with a truncated font id
+            vec![239, 9],          // special claiming 9 bytes that aren't there
+            (0u8..=64).collect(),  // arbitrary opcode soup
+            vec![0u8; 0],          // empty stream
+        ];
+        for bytes in cases {
+            let artifact = dvi_like(ArtifactKind::Xdv, &bytes);
+            let _count = backend.page_count(&artifact); // must not panic
+            let _p0 = backend.render_page(&artifact, 0); // Err or placeholder, not panic
+            let _p99 = backend.render_page(&artifact, 99);
+        }
+    }
+
+    #[test]
     fn auto_backend_falls_back_to_metadata_placeholder() {
         let backend = AutoRenderBackend::default();
         let artifact = pdf(b"%PDF-1.7\n<< /Type /Page >>");
