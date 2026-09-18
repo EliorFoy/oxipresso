@@ -760,6 +760,7 @@ mod tests {
 
     #[test]
     fn register_does_not_emit_until_engine_lookup() {
+        let _env = env_lock();
         let options = CliOptions {
             include_paths: Vec::new(),
             protocol: WireProtocol::Sexp,
@@ -783,6 +784,7 @@ mod tests {
 
     #[test]
     fn resume_emits_promised_lookup_after_engine_requests_registered_root() {
+        let _env = env_lock();
         let options = CliOptions {
             include_paths: Vec::new(),
             protocol: WireProtocol::Sexp,
@@ -808,6 +810,7 @@ mod tests {
 
     #[test]
     fn stream_register_open_resume_reads_editor_root() {
+        let _env = env_lock();
         let options = CliOptions {
             include_paths: Vec::new(),
             protocol: WireProtocol::Sexp,
@@ -837,6 +840,7 @@ mod tests {
 
     #[test]
     fn stream_register_promised_file_then_open_triggers_rebuild() {
+        let _env = env_lock();
         let options = CliOptions {
             include_paths: Vec::new(),
             protocol: WireProtocol::Sexp,
@@ -905,6 +909,7 @@ mod tests {
 
     #[test]
     fn initialize_emits_input_file_for_root_read() {
+        let _env = env_lock();
         let temp_dir = unique_temp_dir();
         fs::create_dir_all(&temp_dir).unwrap();
         let root_file = temp_dir.join("main.tex");
@@ -1002,6 +1007,7 @@ g1,20:65536000,65536000\n\
 
     #[test]
     fn json_protocol_initialization_serializes_messages_as_json() {
+        let _env = env_lock();
         let temp_dir = unique_temp_dir();
         fs::create_dir_all(&temp_dir).unwrap();
         let root_file = temp_dir.join("main.tex");
@@ -1439,6 +1445,7 @@ g1,20:65536000,65536000\n\
 
     #[test]
     fn cli_external_engine_compiles_original_include_fixture_with_i_flag_when_available() {
+        let _env = env_lock();
         if !ExternalEngine::is_available("xelatex") {
             return;
         }
@@ -1477,6 +1484,7 @@ g1,20:65536000,65536000\n\
 
     #[test]
     fn cli_external_engine_persists_synctex_when_requested() {
+        let _env = env_lock();
         if !ExternalEngine::is_available("xelatex") {
             return;
         }
@@ -1512,6 +1520,7 @@ g1,20:65536000,65536000\n\
 
     #[test]
     fn cli_external_engine_reports_missing_input_without_failing_session_when_available() {
+        let _env = env_lock();
         if !ExternalEngine::is_available("xelatex") {
             return;
         }
@@ -2111,11 +2120,32 @@ endobj
     }
 
     fn unique_temp_dir() -> PathBuf {
+        // nanos alone can collide between tests started in the same clock
+        // tick (Windows timers are coarse); combine with a monotonic per-process
+        // counter so concurrently-running tests never share/remove a dir.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("oxipresso-cli-test-{nonce}"))
+        std::env::temp_dir().join(format!(
+            "oxipresso-cli-test-{}-{nonce}-{seq}",
+            std::process::id()
+        ))
+    }
+
+    /// The process environment is global state. Tests that set `OXIPRESSO_ENGINE`
+    /// (to exercise the external backend) must not overlap with tests whose
+    /// assertions depend on the ambient/default engine, or a parallel run picks
+    /// the wrong backend. `run_with_io` and `OxipressoApp::new` both consult
+    /// `OXIPRESSO_ENGINE` via `choose_engine`, so every env-sensitive test
+    /// serializes on this lock.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {

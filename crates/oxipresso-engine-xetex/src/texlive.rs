@@ -227,9 +227,20 @@ mod tests {
         script
     }
 
+    /// A process- and nanosecond-unique temp dir. Windows reuses PIDs and a
+    /// previous aborted run can leave a same-named dir behind, so a bare
+    /// `process::id()` is not enough — the nonce guarantees no collision.
+    fn unique_dir(prefix: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()))
+    }
+
     #[test]
     fn resolution_cache_persists_hits_and_misses_across_instances() {
-        let dir = std::env::temp_dir().join(format!("oxi-kpse-test-{}", std::process::id()));
+        let dir = unique_dir("oxi-kpse-test");
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("article.sty");
         std::fs::write(&target, b"\\ProvidesPackage{article}").unwrap();
@@ -269,7 +280,7 @@ mod tests {
 
     #[test]
     fn cache_flushes_during_run_before_drop() {
-        let dir = std::env::temp_dir().join(format!("oxi-kpse-flush-{}", std::process::id()));
+        let dir = unique_dir("oxi-kpse-flush");
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("flushme.sty");
         std::fs::write(&target, b"content").unwrap();
@@ -294,7 +305,7 @@ mod tests {
 
     #[test]
     fn negative_cache_avoids_respawning_for_missing_files() {
-        let dir = std::env::temp_dir().join(format!("oxi-kpse-miss-{}", std::process::id()));
+        let dir = unique_dir("oxi-kpse-miss");
         std::fs::create_dir_all(&dir).unwrap();
         // A stub that succeeds at --version but fails every lookup —
         // kpsewhich's missing-file behavior.
