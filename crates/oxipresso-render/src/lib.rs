@@ -926,6 +926,9 @@ fn is_pdf_delimiter_or_whitespace(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used by the freetype-gated render smoke; unused in the default build.
+    #[allow(unused_imports)]
+    use std::path::PathBuf;
 
     fn pdf(bytes: &[u8]) -> DocumentArtifact {
         DocumentArtifact {
