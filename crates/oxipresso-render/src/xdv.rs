@@ -1158,6 +1158,29 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_tfm_bytes_degrade_without_panicking() {
+        // parse_tfm_widths is fed real .tfm bytes resolved from disk / kpsewhich;
+        // a corrupt or hand-built TFM must return None, never panic on the
+        // length / offset / ec<bc-underflow guards.
+        fn header(lf: u16, lh: u16, bc: u16, ec: u16, nw: u16) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(&lf.to_be_bytes());
+            v.extend_from_slice(&lh.to_be_bytes());
+            v.extend_from_slice(&bc.to_be_bytes());
+            v.extend_from_slice(&ec.to_be_bytes());
+            v.extend_from_slice(&nw.to_be_bytes());
+            v.resize(24, 0);
+            v
+        }
+        assert_eq!(parse_tfm_widths(&[]), None); // < 24 bytes
+        assert_eq!(parse_tfm_widths(&[0u8; 10]), None);
+        assert!(parse_tfm_widths(&header(6, 0, 5, 2, 1)).is_none()); // ec < bc
+        assert!(parse_tfm_widths(&header(6, 0, 0, 0, 100)).is_none()); // width_base + nw > lf
+        assert!(parse_tfm_widths(&header(65535, 65535, 0, 65535, 65535)).is_none()); // lf beyond buf
+        assert!(parse_tfm_widths(&vec![0xABu8; 64]).is_none()); // garbage
+    }
+
+    #[test]
     fn classic_tfm_advances_match_tftopl_reference() {
         // Authoritative regression for `parse_tfm_widths` + the `char_width_dvi`
         // TFM->DVI advance: the per-code classic-font advance at 10pt for the real
