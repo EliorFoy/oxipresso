@@ -950,6 +950,44 @@ mod tests {
                 "the logo PNG should be resolved through the VFS, inputs: {inputs:?}"
             );
         }
+
+        // Missing-input robustness on the REAL engine: a document that \inputs
+        // an absent file must not yield a successful artifact, and must not
+        // wedge the process — the next valid document still typesets (proves
+        // halt-on-error + setjmp/longjmp abort capture return control cleanly).
+        {
+            let mut bad_engine = XetexEngine::new();
+            let mut bad_vfs = VirtualFileSystem::new();
+            bad_vfs.open_editor(
+                "missing-input-test.tex",
+                b"\\input{this-file-does-not-exist-oxipresso}\n".to_vec(),
+            );
+            if let Some(r) = texlive::KpsewhichResolver::auto() {
+                bad_vfs.set_resolver(Box::new(r));
+            }
+            let bad_root = RootDocument {
+                root_dir: fixture.parent().unwrap().to_path_buf(),
+                root_name: "missing-input-test.tex".to_string(),
+                include_paths: Vec::new(),
+                stream_mode: false,
+            };
+            let bad_result = bad_engine.initialize(&bad_root, &mut bad_vfs);
+            assert!(
+                !(matches!(bad_result, Ok(_)) && bad_engine.output_document().is_some()),
+                "a missing \\input must not produce a successful artifact"
+            );
+
+            // Recovery: a subsequent valid document still typesets cleanly.
+            let mut good_engine = XetexEngine::new();
+            let mut good_vfs = VirtualFileSystem::new();
+            good_vfs.open_editor("simple.tex", fs::read(&fixture).unwrap());
+            good_vfs.set_resolver(Box::new(texlive::KpsewhichResolver::auto().unwrap()));
+            good_engine.initialize(&root, &mut good_vfs).unwrap();
+            assert!(
+                good_engine.output_document().is_some(),
+                "the real engine must recover and typeset a valid doc after a failing one"
+            );
+        }
     }
 
     #[test]
