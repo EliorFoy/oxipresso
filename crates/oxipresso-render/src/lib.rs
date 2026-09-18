@@ -1193,20 +1193,37 @@ endobj
             source_name: Some(path.clone()),
         };
         let backend = XdvGlyphRenderBackend::new(Box::new(KpseFontResolver));
-        assert!(backend.page_count(&artifact).unwrap() >= 1);
-        let page = backend.render_page(&artifact, 0).unwrap();
-        assert_eq!(
-            page.pixels_rgba.len(),
-            (page.width * page.height * 4) as usize
-        );
-        let dark_pixels = page
-            .pixels_rgba
-            .chunks_exact(4)
-            .filter(|pixel| pixel[0] < 128)
-            .count();
+        let pages = backend.page_count(&artifact).unwrap();
+        assert!(pages >= 1, "real XDV has at least one page");
+        let mut total_dark = 0usize;
+        for index in 0..pages {
+            let page = backend
+                .render_page(&artifact, index)
+                .unwrap_or_else(|_| panic!("page {index} of {pages} must render"));
+            assert_eq!(
+                page.pixels_rgba.len(),
+                (page.width * page.height * 4) as usize,
+                "page {index} buffer size"
+            );
+            assert!(
+                page.width > 0 && page.height > 0,
+                "page {index} has non-empty dimensions"
+            );
+            total_dark += page
+                .pixels_rgba
+                .chunks_exact(4)
+                .filter(|pixel| pixel[0] < 128)
+                .count();
+        }
+        // A page index beyond the document must be a clean error, not a panic
+        // or a bogus render.
         assert!(
-            dark_pixels > 200,
-            "real XDV page should contain rendered text, got {dark_pixels} dark pixels"
+            backend.render_page(&artifact, pages).is_err(),
+            "page index beyond count must error"
+        );
+        assert!(
+            total_dark > 200,
+            "real XDV must contain rendered text, got {total_dark} dark pixels across {pages} pages"
         );
     }
 
