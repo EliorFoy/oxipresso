@@ -744,6 +744,34 @@ mod tests {
     }
 
     #[test]
+    fn open_base64_command_decodes_payload_or_errors() {
+        // `open-base64` must decode the standard-alphabet payload into the
+        // editor buffer, and must reject malformed base64 rather than store a
+        // silently-wrong decode.
+        let mut vfs = VirtualFileSystem::new();
+        let good = EditorCommand::Open {
+            path: "b.tex".to_string(),
+            data: b"aGVsbG8=".to_vec(), // base64("hello")
+            base64: true,
+        };
+        vfs.apply_editor_command(&good).unwrap();
+        assert_eq!(
+            vfs.lookup("b.tex").and_then(|e| e.edit_data.clone()),
+            Some(b"hello".to_vec())
+        );
+
+        let bad = EditorCommand::Open {
+            path: "c.tex".to_string(),
+            data: b"!!!not base64!!!".to_vec(),
+            base64: true,
+        };
+        assert!(
+            vfs.apply_editor_command(&bad).is_err(),
+            "malformed base64 must be rejected"
+        );
+    }
+
+    #[test]
     fn open_read_records_input_file_once() {
         let mut vfs = VirtualFileSystem::new();
         vfs.open_editor("main.tex", b"content".to_vec());
