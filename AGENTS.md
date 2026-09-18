@@ -226,7 +226,7 @@ Implemented crates:
   - Performs first-stage live rebuilds: editor changes and `rescan` compute/apply a restart policy, then restart or full initialize the selected engine when not paused.
   - The current FFI and external backends still use full restart behavior, but the CLI rebuild loop now follows the `RestartPolicy` boundary.
   - Emits `input-file` messages for successfully opened inputs, including root reads during initialization.
-  - Handles simple viewer commands for previous/next page and crop/invert/theme state in the internal viewer model.
+  - Handles simple viewer commands for previous/next page and crop/invert/theme state in the internal viewer model. `Crop`/`Invert` call real `ViewerState` toggles; `Theme { bg, fg }` currently only sets `ViewerState::themed` and **discards the editor's requested colors** (no field stores them and the GUI uses its own palette) — honoring editor-specified theme colors is an open fidelity gap, not yet wired.
   - Handles `synctex-forward` by using the latest parsed SyncTeX document to update internal viewer page state and store hit coordinates.
   - `synctex-forward` integration is tested with editor path variants matching Windows-style absolute SyncTeX input paths.
   - Registers the root directory and `-I` include paths as VFS disk roots for all engine backends.
