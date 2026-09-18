@@ -451,10 +451,17 @@ impl OxipressoApp {
             _ => {}
         }
 
-        let outcome = self
-            .vfs
-            .apply_editor_command(&command)
-            .map_err(|e| e.to_string())?;
+        // TeXpresso's change appliers report invalid offsets/lines/not-open or
+        // bad base64 with "…skipping" to stderr and keep serving; a semantically
+        // invalid (but well-formed) editor command must not kill the long-lived
+        // session. Only genuine engine faults below remain fatal.
+        let outcome = match self.vfs.apply_editor_command(&command) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                eprintln!("[command] {error}");
+                None
+            }
+        };
         let mut restart_policy =
             matches!(command, EditorCommand::Rescan).then_some(RestartPolicy::FullRestartRequired);
         if let Some(ChangeOutcome {
@@ -2459,6 +2466,43 @@ endobj
             assert!(messages.is_empty(), "bad input {bad:?} produced messages");
         }
         // The session is still alive after the bad lines: a valid command works.
+        assert!(app.handle_editor_line("(pause)").is_ok());
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn semantically_invalid_change_is_skipped_not_fatal() {
+        // TeXpresso tolerates a well-formed but semantically invalid change
+        // (bad line / not-open file / bad base64) by printing "skipping" and
+        // continuing. A stale `(change-lines ...)` must not kill the session.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("oxi-cli-badchange-{nonce}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\begin{document}x\\end{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file: root_file.clone(),
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+        // change-lines to a file that is not open in the VFS -> Err internally,
+        // must be tolerated (Ok) rather than aborting.
+        app.handle_editor_line(r#"(change-lines "ghost.tex" 5 1 "x")"#)
+            .expect("invalid change must be skipped, not fatal");
+        // change with a byte range past EOF on the root file -> tolerated.
+        app.handle_editor_line(r#"(change "main.tex" 99999 5 "x")"#)
+            .expect("out-of-range change must be skipped, not fatal");
+        // Session still alive.
         assert!(app.handle_editor_line("(pause)").is_ok());
         fs::remove_dir_all(temp_dir).unwrap();
     }
