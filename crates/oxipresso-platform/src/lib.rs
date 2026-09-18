@@ -33,10 +33,17 @@ pub fn current_platform() -> PlatformInfo {
 
 pub fn canonicalize_for_display(path: impl AsRef<Path>) -> String {
     let path = path.as_ref();
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/")
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = canonical.to_string_lossy();
+    // On Windows, std::fs::canonicalize returns an extended-length path
+    // (`\\?\C:\...`, or `\\?\UNC\server\share` for network shares). That prefix
+    // is meaningless to display and would survive the separator swap as `//?/`.
+    // Strip it (harmless on Unix, where no path begins with `\\?\`).
+    let stripped = match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!("\\\\{rest}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+    };
+    stripped.replace('\\', "/")
 }
 
 pub fn font_directories() -> Vec<PathBuf> {
@@ -230,6 +237,26 @@ mod tests {
 
         assert_eq!(watcher.poll(), FileWatchEvent::Unchanged);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn canonicalize_for_display_strips_extended_length_prefix() {
+        // Windows std::fs::canonicalize prepends `\\?\`; the display helper must
+        // not surface it as a `//?/` (or any leading `//`) path. On Unix the
+        // temp dir has no such prefix, so the assertions hold everywhere.
+        let display = canonicalize_for_display(std::env::temp_dir());
+        assert!(
+            !display.starts_with("//?/"),
+            "extended-length prefix leaked into display path: {display}"
+        );
+        assert!(
+            !display.starts_with("//"),
+            "expected a normalized display path, got: {display}"
+        );
+        assert!(
+            display.contains('/'),
+            "expected forward-slash display path: {display}"
+        );
     }
 
     fn unique_temp_dir() -> PathBuf {
