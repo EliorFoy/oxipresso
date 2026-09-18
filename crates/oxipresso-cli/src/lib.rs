@@ -1972,6 +1972,29 @@ endobj
         )));
         assert!(app.synctex.is_some(), "SyncTeX sidecar should be parsed");
 
+        // Reverse SyncTeX over the editor wire: the app maps viewer points
+        // (points) on a real page through reverse search to a source location
+        // and produces the engine-to-editor `synctex` notification. Sampling a
+        // few page-1 points keeps this content-independent.
+        let reversed = [
+            app.synctex_reverse_message(1, 200.0, 120.0),
+            app.synctex_reverse_message(1, 120.0, 200.0),
+            app.synctex_reverse_message(1, 60.0, 60.0),
+        ]
+        .into_iter()
+        .flatten()
+        .next();
+        assert!(
+            matches!(reversed, Some(EditorMessage::Synctex { .. })),
+            "reverse search on the real page 1 should map a point to a source location"
+        );
+        if let Some(EditorMessage::Synctex { path, line, .. }) = &reversed {
+            assert!(
+                !path.is_empty() && *line > 0,
+                "reverse hit should name a real source location, got {path}:{line}"
+            );
+        }
+
         // Editor change -> rebuild sequence: channels truncate again and the
         // engine re-echoes the file open through the out channel.
         let rebuild = app
