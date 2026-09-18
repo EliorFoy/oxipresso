@@ -213,6 +213,7 @@ Implemented crates:
   - Adds `oxipresso` binary.
   - Adds optional `oxipresso-viewer` binary behind the `gui` feature.
   - Parses TeXpresso-compatible flags: `-I`, `-json`, `-lines`, `-texlive`, `-tectonic`, `-test-initialize`, `-stream`.
+  - Startup-flag parsing was cross-checked line-by-line against TeXpresso `src/frontend/driver.c` (round 124): all seven flags match, plus `driver.c`'s contract — unknown `-option` rejected, `-I` requires a following path, exactly one document argument (a second is rejected), and no document argument is an error. `-gui` is the sole oxipresso addition. Locked by `rejects_malformed_arguments` (which asserts `-I` no-value, `-I`-swallowing-the-doc, unknown `-nope`, two roots, and no root all `Err`, plus a valid default). Together with the editor-command arity audit (round 113), the entire external input surface (argv + editor wire + JSON/sexp) is now verified faithful to the reference.
   - `-tectonic` is rejected with a clear "not implemented yet" error rather than silently falling back to TeX Live/kpsewhich resolution (the Tectonic provider is unimplemented; `OxipressoApp` always uses the kpsewhich resolver when available, so the flag must not imply otherwise). `-texlive` is accepted and selects `PackageProvider::Texlive`.
   - Initializes `XetexEngine`.
   - Reads editor commands from stdin and applies VFS updates.
