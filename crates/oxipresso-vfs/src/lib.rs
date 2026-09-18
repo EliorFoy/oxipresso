@@ -772,6 +772,37 @@ mod tests {
     }
 
     #[test]
+    fn close_editor_reverts_to_disk_and_reports_change_once() {
+        // Editors expect: closing a buffer reverts reads to the on-disk bytes,
+        // reports a change (so a rebuild can drop the edit), and a second close
+        // or closing a never-edited file is a no-op returning None.
+        let mut vfs = VirtualFileSystem::new();
+        vfs.ensure_file("a.tex").disk_data = Some(b"disk version".to_vec());
+        vfs.open_editor("a.tex", b"editor version".to_vec());
+        assert_eq!(
+            vfs.lookup("a.tex").unwrap().edit_data.as_deref(),
+            Some(&b"editor version"[..])
+        );
+
+        let outcome = vfs
+            .close_editor("a.tex")
+            .expect("closing an edited buffer reports");
+        assert_eq!(
+            outcome.changed_offset,
+            Some(0),
+            "diff starts at byte 0 (d/e)"
+        );
+        let entry = vfs.lookup("a.tex").unwrap();
+        assert!(entry.edit_data.is_none(), "editor buffer is dropped");
+        assert_eq!(entry.disk_data.as_deref(), Some(&b"disk version"[..]));
+
+        // Second close: no edit_data left => None (no spurious change).
+        assert!(vfs.close_editor("a.tex").is_none());
+        // Unknown path => None.
+        assert!(vfs.close_editor("nope.tex").is_none());
+    }
+
+    #[test]
     fn open_read_records_input_file_once() {
         let mut vfs = VirtualFileSystem::new();
         vfs.open_editor("main.tex", b"content".to_vec());
