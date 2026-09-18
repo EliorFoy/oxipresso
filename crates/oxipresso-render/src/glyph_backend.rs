@@ -54,7 +54,9 @@ pub struct XdvGlyphRenderBackend {
     faces: RefCell<HashMap<(String, u32), ft::FT_Face>>,
     font_files: RefCell<HashMap<String, Option<Rc<Vec<u8>>>>>,
     glyph_cache: RefCell<HashMap<(String, u32, u32, u32, u64), Option<Rc<GrayBitmap>>>>,
-    image_cache: RefCell<HashMap<String, Option<Rc<DecodedImage>>>>,
+    /// Decoded images keyed by (path, content hash) so an in-place image edit
+    /// (same path, different bytes) re-decodes rather than serving a stale one.
+    image_cache: RefCell<HashMap<(String, u64), Option<Rc<DecodedImage>>>>,
     parsed: RefCell<Option<(u64, Rc<xdv::XdvDocument>)>>,
     /// Rendered pages keyed by XDV page content digest. Pages whose digest
     /// matches a previous rebuild are reused without re-rendering, which is
@@ -273,16 +275,48 @@ impl XdvGlyphRenderBackend {
     /// Loads and decodes an image referenced by a `pdf:image` special, with
     /// per-path caching. Currently supports PNG (the format `\XeTeXpicfile`
     /// and `graphicx` most commonly feed XeTeX on this path).
-    fn decode_image(&self, path: &str) -> Option<Rc<DecodedImage>> {
-        if let Some(cached) = self.image_cache.borrow().get(path) {
-            return cached.clone();
+    /// Reads every referenced image's current bytes once (via the loader),
+    /// returning `path -> (content_hash, decoded)`. Decodes are memoized in
+    /// `image_cache` by `(path, content_hash)`, so an in-place file edit
+    /// (new bytes, same path) yields a new hash and forces re-decode. The
+    /// content hashes let `render_page` fold image state into the page-cache
+    /// key, so edited images invalidate the cached rendered page.
+    fn load_page_images(
+        &self,
+        page_data: &xdv::XdvPage,
+    ) -> HashMap<String, (u64, Option<Rc<DecodedImage>>)> {
+        let mut result: HashMap<String, (u64, Option<Rc<DecodedImage>>)> = HashMap::new();
+        for element in &page_data.elements {
+            let xdv::XdvElement::Image { path, .. } = element else {
+                continue;
+            };
+            if result.contains_key(path) {
+                continue;
+            }
+            let bytes = self.image_loader.borrow_mut().find_image_file(path);
+            let Some(bytes) = bytes else {
+                result.insert(path.clone(), (0, None));
+                continue;
+            };
+            let hash = fnv_hash(&bytes);
+            let cache_key = (path.clone(), hash);
+            // Clone the cache hit first so the immutable borrow ends before
+            // the mutable borrow below (a `match` scrutinee borrow would live
+            // through the arm and panic on `borrow_mut`).
+            let cached = self.image_cache.borrow().get(&cache_key).cloned();
+            let decoded = match cached {
+                Some(decoded) => decoded,
+                None => {
+                    let decoded = decode_png(&bytes);
+                    self.image_cache
+                        .borrow_mut()
+                        .insert(cache_key, decoded.clone());
+                    decoded
+                }
+            };
+            result.insert(path.clone(), (hash, decoded));
         }
-        let bytes = self.image_loader.borrow_mut().find_image_file(path)?;
-        let decoded = decode_png(&bytes);
-        self.image_cache
-            .borrow_mut()
-            .insert(path.to_string(), decoded.clone());
-        decoded
+        result
     }
 
     fn parse_document(&self, artifact: &DocumentArtifact) -> Result<Rc<xdv::XdvDocument>> {
@@ -553,15 +587,28 @@ impl RenderBackend for XdvGlyphRenderBackend {
         let Some(page_digest) = document.page_digest(page) else {
             return Err(EngineError::new("page index out of range"));
         };
-        if let Some(cached) = self.page_cache.borrow().get(&page_digest) {
-            let mut cached = cached.clone();
-            cached.index = page;
-            return Ok(cached);
-        }
         let page_data = document
             .pages
             .get(page)
             .ok_or_else(|| EngineError::new("page index out of range"))?;
+        // Load referenced images once (also detects in-place content edits) and
+        // fold their content hashes into the cache key, so replacing an image
+        // file invalidates the cached rendered page even though the XDV bytes
+        // (which only reference path + geometry) are unchanged.
+        let images = self.load_page_images(page_data);
+        let image_salt = images
+            .values()
+            .fold(0u64, |acc, (hash, _)| acc ^ hash.rotate_left(17));
+        let cache_key = if image_salt == 0 {
+            page_digest
+        } else {
+            page_digest ^ image_salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        };
+        if let Some(cached) = self.page_cache.borrow().get(&cache_key) {
+            let mut cached = cached.clone();
+            cached.index = page;
+            return Ok(cached);
+        }
         #[cfg(test)]
         self.render_misses.set(self.render_misses.get() + 1);
         let scale = self.px_per_pt;
@@ -639,7 +686,10 @@ impl RenderBackend for XdvGlyphRenderBackend {
                     scale: image_scale,
                     path,
                 } => {
-                    let Some(image) = self.decode_image(path) else {
+                    let Some(image) = images
+                        .get(path.as_str())
+                        .and_then(|(_, decoded)| decoded.clone())
+                    else {
                         continue;
                     };
                     // The bbox form carries the display size directly; the
@@ -680,7 +730,7 @@ impl RenderBackend for XdvGlyphRenderBackend {
                     cache.remove(&oldest);
                 }
             }
-            cache.insert(page_digest, rendered.clone());
+            cache.insert(cache_key, rendered.clone());
         }
         Ok(rendered)
     }
@@ -689,7 +739,6 @@ impl RenderBackend for XdvGlyphRenderBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xdv;
 
     struct SystemFont;
     impl FontResolver for SystemFont {
@@ -971,6 +1020,56 @@ mod tests {
             page.pixels_rgba
                 .chunks_exact(4)
                 .all(|pixel| pixel == [255, 255, 255, 255])
+        );
+    }
+
+    /// Image loader whose current bytes can be swapped between renders
+    /// (shared via `Rc<RefCell<..>>`) to simulate an in-place file edit.
+    struct SwapImages {
+        current: Rc<RefCell<Vec<u8>>>,
+    }
+    impl ImageLoader for SwapImages {
+        fn find_image_file(&mut self, _path: &str) -> Option<Vec<u8>> {
+            Some(self.current.borrow().clone())
+        }
+    }
+
+    #[test]
+    fn in_place_image_edit_invalidates_cached_page() {
+        // Same XDV (image referenced by an unchanged path/geometry), but the
+        // image file's bytes change between renders. The renderer must NOT
+        // serve the stale cached page — image content is folded into the
+        // page-cache key. Guards the documented image-edit-invalidation fix.
+        let shared = Rc::new(RefCell::new(solid_png(2, 2, [255, 0, 0, 255])));
+        let backend = XdvGlyphRenderBackend::with_image_loader(
+            Box::new(NullFonts),
+            Box::new(SwapImages {
+                current: Rc::clone(&shared),
+            }),
+        );
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: image_xdv("logo.png"),
+            source_name: Some("edit.xdv".to_string()),
+        };
+        let rgb_at = |page: &RenderedPage, x: usize, y: usize| {
+            let o = (y * page.width as usize + x) * 4;
+            [
+                page.pixels_rgba[o],
+                page.pixels_rgba[o + 1],
+                page.pixels_rgba[o + 2],
+            ]
+        };
+        let first = backend.render_page(&artifact, 0).unwrap();
+        assert_eq!(rgb_at(&first, 120, 120), [255, 0, 0], "first render: red");
+
+        // Replace the image bytes in place (same path); the XDV is unchanged.
+        *shared.borrow_mut() = solid_png(2, 2, [0, 0, 255, 255]);
+        let second = backend.render_page(&artifact, 0).unwrap();
+        assert_eq!(
+            rgb_at(&second, 120, 120),
+            [0, 0, 255],
+            "in-place image edit must invalidate the cached page and show the new image"
         );
     }
 }

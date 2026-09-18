@@ -1284,7 +1284,7 @@ mod tests {
         assert_eq!(x, 0.0);
         assert_eq!(y, 0.0);
 
-        let (x, y, w, h, scale, path) = images.remove(0);
+        let (_x, y, w, h, scale, path) = images.remove(0);
         assert_eq!(scale, Some(0.27682));
         assert_eq!(w, 0.0, "matrix form defers sizing to the renderer");
         assert_eq!(h, 0.0);
