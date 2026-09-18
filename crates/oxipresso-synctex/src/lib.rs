@@ -43,6 +43,14 @@ pub struct SyncTexDocument {
     pub output: Option<String>,
     pub inputs: Vec<SyncTexInput>,
     pub records: Vec<SyncTexRecord>,
+    /// syncTeX `Magnification` header (spec default 1000). All real engine
+    /// output uses 1000, so the current coordinate conversions (1pt = 65536sp)
+    /// are correct; a magnification-aware mapper would scale stored coords by
+    /// `magnification / 1000`. Exposed so the value is not silently dropped.
+    pub magnification: i32,
+    pub unit: i32,
+    pub x_offset: i32,
+    pub y_offset: i32,
 }
 
 impl SyncTexDocument {
@@ -170,6 +178,11 @@ pub fn parse_text(text: &str) -> Result<SyncTexDocument> {
     let mut inputs = Vec::new();
     let mut records = Vec::new();
     let mut current_page = None;
+    // syncTeX-spec header defaults; overridden by explicit lines below.
+    let mut magnification = 1000;
+    let mut unit = 1;
+    let mut x_offset = 0;
+    let mut y_offset = 0;
 
     for line in text.lines() {
         if let Some(value) = line.strip_prefix("Output:") {
@@ -184,6 +197,22 @@ pub fn parse_text(text: &str) -> Result<SyncTexDocument> {
                     .map_err(|_| SyncTexError::new("invalid SyncTeX input index"))?,
                 path: path.to_string(),
             });
+        } else if let Some(value) = line.strip_prefix("Magnification:") {
+            if let Ok(n) = value.trim().parse::<i32>() {
+                magnification = n;
+            }
+        } else if let Some(value) = line.strip_prefix("Unit:") {
+            if let Ok(n) = value.trim().parse::<i32>() {
+                unit = n;
+            }
+        } else if let Some(value) = line.strip_prefix("X Offset:") {
+            if let Ok(n) = value.trim().parse::<i32>() {
+                x_offset = n;
+            }
+        } else if let Some(value) = line.strip_prefix("Y Offset:") {
+            if let Ok(n) = value.trim().parse::<i32>() {
+                y_offset = n;
+            }
         } else if let Some(page) = parse_sheet_start(line)? {
             current_page = Some(page);
         } else if let Some(page) = current_page
@@ -197,6 +226,10 @@ pub fn parse_text(text: &str) -> Result<SyncTexDocument> {
         output,
         inputs,
         records,
+        magnification,
+        unit,
+        x_offset,
+        y_offset,
     })
 }
 
@@ -376,6 +409,26 @@ g1,3:11380982,8865055\n\
         assert_eq!(hit.line, 3);
         assert_eq!(hit.path, "c:/tmp/main.tex");
         assert!(document.forward_search_index(1, 6).is_some());
+    }
+
+    #[test]
+    fn parses_synctex_header_fields() {
+        // syncTeX-spec defaults when the header omits the lines.
+        let d = parse_text("SyncTeX Version:1\nOutput:pdf\nContent:\n{1\n}\n").unwrap();
+        assert_eq!(
+            (d.magnification, d.unit, d.x_offset, d.y_offset),
+            (1000, 1, 0, 0)
+        );
+        // Explicit header values are captured rather than silently dropped
+        // (real engine output uses Magnification:1000 Unit:1 X/Y Offset:0).
+        let d = parse_text(
+            "SyncTeX Version:1\nOutput:pdf\nMagnification:1200\nUnit:72\nX Offset:5\nY Offset:-3\nContent:\n{1\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (d.magnification, d.unit, d.x_offset, d.y_offset),
+            (1200, 72, 5, -3)
+        );
     }
 
     #[test]
