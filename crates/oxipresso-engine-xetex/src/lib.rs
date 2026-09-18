@@ -796,6 +796,93 @@ mod tests {
             stdout_text.to_lowercase().contains("xetex"),
             "engine stdout should contain the XeTeX banner, got {stdout_text:?}"
         );
+
+        // Original `include.tex` fixture through the REAL engine, with the
+        // `incpath` directory on the search path so `\input{test.tex}` resolves.
+        {
+            let Some(include) = oxipresso_testkit::original_texpresso_fixture("include.tex") else {
+                return;
+            };
+            let Some(resolver) = texlive::KpsewhichResolver::auto() else {
+                return;
+            };
+            let include_dir = include.parent().unwrap().to_path_buf();
+            let incpath = include_dir.join("incpath");
+            let mut engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("include.tex", fs::read(&include).unwrap());
+            vfs.set_disk_roots(vec![include_dir.clone(), incpath.clone()]);
+            vfs.set_resolver(Box::new(resolver));
+            let root = RootDocument {
+                root_dir: include_dir,
+                root_name: "include.tex".to_string(),
+                include_paths: vec![incpath],
+                stream_mode: false,
+            };
+            engine
+                .initialize(&root, &mut vfs)
+                .expect("real engine should typeset include.tex");
+            let artifact = engine
+                .output_document()
+                .expect("include.tex should produce an artifact");
+            assert!(!artifact.bytes.is_empty());
+            let inputs = vfs.take_input_events();
+            assert!(
+                inputs
+                    .iter()
+                    .any(|event| event.path.replace('\\', "/").ends_with("test.tex")),
+                "`\\input{{test.tex}}` should read incpath/test.tex through -I, inputs: {inputs:?}"
+            );
+        }
+
+        // Original `includegraphics.tex` fixture: the PNG resolves through the
+        // VFS and the engine embeds it as a `pdf:image` special in the XDV.
+        {
+            let Some(graphics) =
+                oxipresso_testkit::original_texpresso_fixture("includegraphics.tex")
+            else {
+                return;
+            };
+            let Some(resolver) = texlive::KpsewhichResolver::auto() else {
+                return;
+            };
+            let graphics_dir = graphics.parent().unwrap().to_path_buf();
+            let mut engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("includegraphics.tex", fs::read(&graphics).unwrap());
+            vfs.set_disk_roots(vec![graphics_dir.clone()]);
+            vfs.set_resolver(Box::new(resolver));
+            let root = RootDocument {
+                root_dir: graphics_dir,
+                root_name: "includegraphics.tex".to_string(),
+                include_paths: Vec::new(),
+                stream_mode: false,
+            };
+            engine
+                .initialize(&root, &mut vfs)
+                .expect("real engine should typeset includegraphics.tex");
+            let artifact = engine
+                .output_document()
+                .expect("includegraphics.tex should produce an artifact");
+            assert!(!artifact.bytes.is_empty());
+            let xdv_text = String::from_utf8_lossy(&artifact.bytes);
+            assert!(
+                xdv_text.contains("pdf:image"),
+                "XDV should embed a `pdf:image` special for the included graphic"
+            );
+            assert!(
+                xdv_text.contains("texpresso_logo_v2.png"),
+                "the `pdf:image` special should name the logo PNG"
+            );
+            let inputs = vfs.take_input_events();
+            assert!(
+                inputs.iter().any(|event| event
+                    .path
+                    .replace('\\', "/")
+                    .ends_with("texpresso_logo_v2.png")),
+                "the logo PNG should be resolved through the VFS, inputs: {inputs:?}"
+            );
+        }
     }
 
     #[test]
