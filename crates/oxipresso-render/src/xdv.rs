@@ -1193,6 +1193,39 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_parse_xdv_never_panics() {
+        // parse_xdv drives the whole bounds-checked display-list reader (opcode
+        // dispatch, glyph arrays, specials, font defs). Two deterministic,
+        // reproducible batteries that must never panic (Ok or Err both pass):
+        //   1. a seeded xorshift stream of random buffers (opcode soup);
+        //   2. a truncation sweep of a real valid XDV at every byte cut.
+        let mut no_tfm = |_name: &str| -> Option<Vec<u8>> { None };
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        for _case in 0..20_000usize {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let mixed = state.wrapping_mul(0x2545_F491_4F6F_DD1D);
+            let len = (mixed % 64) as usize;
+            let mut buf = Vec::with_capacity(len);
+            for i in 0..len {
+                let mut s = state ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                s ^= s >> 12;
+                s ^= s << 25;
+                buf.push((s >> 33) as u8);
+            }
+            let _ = parse_xdv(&buf, &mut no_tfm);
+        }
+        let base = synthetic_xdv();
+        for cut in 0..=base.len() {
+            let _ = parse_xdv(&base[..cut], &mut no_tfm);
+        }
+        // The full valid stream still parses (guards against the fuzz silently
+        // disabling the parser).
+        assert!(parse_xdv(&base, &mut no_tfm).is_ok());
+    }
+
+    #[test]
     fn corrupt_tfm_bytes_degrade_without_panicking() {
         // parse_tfm_widths is fed real .tfm bytes resolved from disk / kpsewhich;
         // a corrupt or hand-built TFM must return None, never panic on the
