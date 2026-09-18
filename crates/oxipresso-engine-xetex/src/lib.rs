@@ -755,6 +755,25 @@ mod tests {
             "syncTeX forward search should find a hit for simple.tex line 4"
         );
 
+        // Reverse search: querying at a real record's own coordinates returns
+        // a hit bound to a recorded input file (exact point => distance 0, so
+        // this is content-independent and not brittle).
+        {
+            let record = document
+                .records
+                .iter()
+                .find(|record| document.input_by_index(record.input_index).is_some())
+                .expect("real syncTeX should contain a record with a known input");
+            let hit = document
+                .reverse_search_page_point(record.page, record.x, record.y)
+                .expect("reverse search at a record's own point must hit");
+            assert!(
+                !hit.path.is_empty(),
+                "reverse hit should carry the source path, got {hit:?}"
+            );
+            assert_eq!(hit.input_index, record.input_index);
+        }
+
         // Output streams: stdout chunks feed the `out` buffer and the .log
         // file feeds the `log` buffer, in write order.
         let events = rebuild_engine.take_output_events();
