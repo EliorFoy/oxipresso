@@ -931,6 +931,76 @@ mod tests {
     }
 
     #[test]
+    fn synctex_reverse_message_converts_points_to_sp_and_guards_missing_sidecar() {
+        // Always-run (no real engine / env gate): builds a minimal plain
+        // sidecar, verifies `synctex_reverse_message` scales viewer points to
+        // SyncTeX sp units (x_sp = pt * 65536), picks the nearest record, and
+        // returns None when no sidecar is loaded (early-session click).
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\documentclass{article}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file,
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+
+        // No sidecar yet: a click resolves to None, never panics.
+        assert!(
+            app.synctex_reverse_message(1, 300.0, 300.0).is_none(),
+            "reverse search with no sidecar must be None"
+        );
+
+        // Record A at (300pt, 300pt) => sp 300*65536; record B at (1000pt).
+        let sidecar = "SyncTeX Version:1\n\
+Output:main.pdf\n\
+Input:1:main.tex\n\
+Content:\n\
+{1\n\
+g1,10:19660800,19660800\n\
+g1,20:65536000,65536000\n\
+}\n";
+        let artifact = oxipresso_engine_api::SyncTexArtifact {
+            bytes: sidecar.as_bytes().to_vec(),
+            compressed: false,
+            source_name: None,
+        };
+        app.synctex = oxipresso_synctex::parse_artifact(&artifact).ok();
+        assert!(app.synctex.is_some(), "minimal sidecar should parse");
+
+        // pt 300 => exactly record A.
+        match app
+            .synctex_reverse_message(1, 300.0, 300.0)
+            .expect("hit at record A's point")
+        {
+            EditorMessage::Synctex { path, line, .. } => {
+                assert_eq!(path, "main.tex");
+                assert_eq!(line, 10, "300pt maps to record A line 10");
+            }
+            other => panic!("expected synctex message, got {other:?}"),
+        }
+        // pt 990 is nearer record B (1000pt) than A (300pt) => line 20.
+        match app
+            .synctex_reverse_message(1, 990.0, 990.0)
+            .expect("hit at nearest record B")
+        {
+            EditorMessage::Synctex { line, .. } => {
+                assert_eq!(line, 20, "nearest-record selection must scale correctly");
+            }
+            other => panic!("expected synctex message, got {other:?}"),
+        }
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
     fn json_protocol_initialization_serializes_messages_as_json() {
         let temp_dir = unique_temp_dir();
         fs::create_dir_all(&temp_dir).unwrap();
