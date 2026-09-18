@@ -611,6 +611,29 @@ fn push_classic_glyph(
     }
 }
 
+/// Convert xcolor `hsb` (hue/saturation/brightness, each in [0,1]) to linear
+/// RGB in [0,1]. Uses the standard hexcone HSV formula.
+fn hsb_to_rgb(h: f64, s: f64, v: f64) -> (f64, f64, f64) {
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    // xcolor hue is [0,1]; wrap into [0,1) then scale to the 6 hue sectors.
+    let h = h - h.floor();
+    let sector = h * 6.0;
+    let i = sector.floor() as i32;
+    let f = sector - sector.floor();
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    match i % 6 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    }
+}
+
 enum ColorSpecial {
     Push(u32),
     Pop,
@@ -631,11 +654,17 @@ fn parse_color_special(text: &str) -> Option<ColorSpecial> {
                 .collect();
             let channel = |value: f64| ((value.clamp(0.0, 1.0)) * 255.0).round() as u32;
             let rgba = match model {
-                "rgb" | "hsb" if values.len() >= 3 => {
+                "rgb" if values.len() >= 3 => {
                     (channel(values[0]) << 24)
                         | (channel(values[1]) << 16)
                         | (channel(values[2]) << 8)
                         | 0xff
+                }
+                "hsb" if values.len() >= 3 => {
+                    // xcolor's `hsb` model (H,S,B each in [0,1]); the previous
+                    // code aliased it to rgb and produced wrong colors.
+                    let (r, g, b) = hsb_to_rgb(values[0], values[1], values[2]);
+                    (channel(r) << 24) | (channel(g) << 16) | (channel(b) << 8) | 0xff
                 }
                 "gray" if values.len() >= 1 => {
                     let level = channel(values[0]);
@@ -1136,6 +1165,28 @@ mod tests {
             digests.len(),
             unique,
             "real XDV pages should have unique digests"
+        );
+    }
+
+    #[test]
+    fn decodes_hsb_color_special_not_rgb() {
+        // xcolor hsb: (0,1,1)=red, (2/3,1,1)=blue, (0,0,0.5)=50% gray.
+        // The old code treated hsb as raw rgb, so (0,1,1) would have been
+        // near-black, not red.
+        let red = parse_color_special("color push hsb 0 1 1");
+        assert!(
+            matches!(red, Some(ColorSpecial::Push(0xff00_00ff))),
+            "hsb red"
+        );
+        let blue = parse_color_special("color push hsb 0.66666666 1 1");
+        assert!(
+            matches!(blue, Some(ColorSpecial::Push(0x0000_ffff))),
+            "hsb blue"
+        );
+        let gray = parse_color_special("color push hsb 0 0 0.5");
+        assert!(
+            matches!(gray, Some(ColorSpecial::Push(0x8080_80ff))),
+            "hsb gray"
         );
     }
 
