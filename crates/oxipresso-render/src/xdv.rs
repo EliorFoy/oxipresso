@@ -1047,11 +1047,11 @@ mod tests {
             // Select font 40 (FNT2, two-byte operand)
             .push(FNT1 + 1)
             .u16(40)
-            // SET_GLYPHS: width 100, one glyph at (0, 0), glyph id 65
+            // SET_GLYPHS: width 100, one glyph at x-offset 655360 (=10pt), y 0
             .push(SET_GLYPHS)
             .s32(100)
             .u16(1)
-            .s32(0)
+            .s32(655360)
             .s32(0)
             .u16(65)
             // SET_RULE 1000x1000 sp
@@ -1086,14 +1086,26 @@ mod tests {
         assert_eq!(font.name, "lmroman12-regular");
         assert!((font.size_pt - 12.0).abs() < 1e-6);
 
+        // Non-tautological pin of the DVI unit->point conversion: the header's
+        // num/den (25400000 / 473628672) MUST yield exactly 1/65536 pt per unit.
+        // (The rule test below previously reused `document.pt_per_unit`, so it
+        // could never catch a wrong divisor -- the same class of smoke-invisible
+        // risk as the classic TFM advance.)
+        assert!(
+            (document.pt_per_unit - (1.0 / 65536.0)).abs() < 1e-12,
+            "pt_per_unit = {} (expected 1/65536)",
+            document.pt_per_unit
+        );
+
         let mut rules = 0;
         let mut glyph_runs = 0;
         for element in &page.elements {
             match element {
                 XdvElement::Rule { w_pt, h_pt, .. } => {
                     rules += 1;
-                    assert!((*w_pt - 1000.0 * document.pt_per_unit).abs() < 1e-9);
-                    assert!((*h_pt - 1000.0 * document.pt_per_unit).abs() < 1e-9);
+                    // 1000 DVI units at the pinned 1/65536 pt/unit = explicit value.
+                    assert!((*w_pt - 1000.0 / 65536.0).abs() < 1e-9);
+                    assert!((*h_pt - 1000.0 / 65536.0).abs() < 1e-9);
                 }
                 XdvElement::Glyphs {
                     font_id,
@@ -1105,6 +1117,12 @@ mod tests {
                     assert_eq!(*color_rgba, None);
                     assert_eq!(glyphs.len(), 1);
                     assert_eq!(glyphs[0].code, 65);
+                    // 655360-unit glyph offset at 1/65536 => 10pt absolute X (pen starts at 0).
+                    assert!(
+                        (glyphs[0].x_pt - 10.0).abs() < 1e-6,
+                        "glyph x_pt = {}",
+                        glyphs[0].x_pt
+                    );
                 }
                 XdvElement::Image { .. } => {
                     panic!("synthetic XDV should not contain images");
