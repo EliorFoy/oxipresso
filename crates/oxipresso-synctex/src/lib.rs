@@ -99,7 +99,11 @@ impl SyncTexDocument {
                 let input = self.input_by_index(record.input_index)?;
                 Some((record, input, coordinate_distance_squared(record, x, y)))
             })
-            .min_by_key(|(_, _, distance)| *distance)
+            // Nearest first; among boxes equidistant from the click (nested
+            // hboxes that all contain it) prefer the innermost = narrowest
+            // known width, so a click lands on the specific glyph/word rather
+            // than its enclosing line box. Unknown width sorts last.
+            .min_by_key(|(record, _, distance)| (*distance, record.width.unwrap_or(i32::MAX)))
             .map(|(record, input, _)| SyncTexHit {
                 page: record.page,
                 input_index: record.input_index,
@@ -443,6 +447,30 @@ g1,20:280,200\n\
         .unwrap();
         let hit = document.reverse_search_page_point(1, 250, 200).unwrap();
         assert_eq!(hit.line, 10, "click inside a known box must resolve to it");
+    }
+
+    #[test]
+    fn reverse_search_prefers_innermost_on_nested_boxes() {
+        // Two records both containing the click (an enclosing line box x[0,1000]
+        // on line 5 and a word box x[100,150] on line 7), equal distance. The
+        // innermost (narrowest) box must win, so a click lands on the specific
+        // word (line 7), not the enclosing line (line 5).
+        let document = parse_text(
+            "SyncTeX Version:1\n\
+Output:main.pdf\n\
+Input:1:main.tex\n\
+Content:\n\
+{1\n\
+g1,5:0,0,1000,0\n\
+g1,7:100,0,50,0\n\
+}\n",
+        )
+        .unwrap();
+        let hit = document.reverse_search_page_point(1, 120, 0).unwrap();
+        assert_eq!(
+            hit.line, 7,
+            "nested equidistant boxes resolve to the innermost"
+        );
     }
 
     #[test]
