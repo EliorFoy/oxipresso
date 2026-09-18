@@ -70,10 +70,13 @@ where
                 provider = PackageProvider::Texlive;
             }
             "-tectonic" => {
-                if provider == PackageProvider::Texlive {
-                    return Err("-texlive and -tectonic are mutually exclusive".to_string());
-                }
-                provider = PackageProvider::Tectonic;
+                // The Tectonic package provider is not implemented; the CLI
+                // would otherwise silently fall back to kpsewhich (TeX Live)
+                // resolution, making `-tectonic` a no-op lie. Fail clearly.
+                return Err(
+                    "the Tectonic package provider is not implemented yet; use -texlive or the default"
+                        .to_string(),
+                );
             }
             "-test-initialize" => initialize_only = true,
             "-stream" => stream_mode = true,
@@ -756,6 +759,20 @@ mod tests {
     #[test]
     fn rejects_provider_conflict() {
         assert!(parse_args(["-texlive", "-tectonic", "main.tex"]).is_err());
+    }
+
+    #[test]
+    fn rejects_unimplemented_tectonic_provider() {
+        // `-tectonic` must fail loudly, not silently behave like TeX Live.
+        let err = parse_args(["-tectonic", "main.tex"]).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("tectonic")
+                && err.to_lowercase().contains("not implemented"),
+            "unexpected message: {err}"
+        );
+        // `-texlive` remains accepted and selects the TeX Live provider.
+        let opts = parse_args(["-texlive", "main.tex"]).unwrap();
+        assert!(matches!(opts.provider, PackageProvider::Texlive));
     }
 
     #[test]
