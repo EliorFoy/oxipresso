@@ -379,6 +379,39 @@ g1,3:11380982,8865055\n\
     }
 
     #[test]
+    fn resolves_noncontiguous_input_indices_by_declared_field() {
+        // SyncTeX input indices are 1-based and may have gaps. Lookup must be
+        // by the declared `index` field, not the position in the inputs vector
+        // (a `inputs[index - 1]` refactor would silently break multi-input docs).
+        let document = parse_text(
+            "SyncTeX Version:1\n\
+Output:main.pdf\n\
+Input:1:main.tex\n\
+Input:3:inc/deep.tex\n\
+Content:\n\
+{1\n\
+g3,5:100,100\n\
+}\n",
+        )
+        .unwrap();
+        let input = document.input_by_index(3).expect("index 3 is present");
+        assert_eq!(
+            input.path, "inc/deep.tex",
+            "index 3 is the second element but must match by declared field"
+        );
+        assert!(
+            document.input_by_index(2).is_none(),
+            "index 2 is not declared"
+        );
+        // Forward lookup by path resolves through the correct declared index.
+        let hit = document
+            .forward_search_path("inc/deep.tex", 5)
+            .expect("hit");
+        assert_eq!(hit.input_index, 3);
+        assert_eq!(hit.line, 5);
+    }
+
+    #[test]
     fn forward_search_prefers_last_record_at_or_before_line() {
         // Records at source lines 5 and 10. Jumping from line 8 must return the
         // box at line 5 (the last content at-or-before the cursor), NOT line 10
