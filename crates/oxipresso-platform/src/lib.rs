@@ -43,6 +43,33 @@ pub fn font_directories() -> Vec<PathBuf> {
     platform_font_directories()
 }
 
+/// Sets a process environment variable so that both Rust and native C code
+/// (calling `getenv`) observe it.
+///
+/// On Windows, the MSVC CRT snapshots the environment block at startup, so
+/// `std::env::set_var` (which calls `SetEnvironmentVariableW`) is invisible to
+/// C `getenv` callers; this function additionally mirrors the value into the
+/// CRT block via `_wputenv_s`. This is the single place that OS quirk lives so
+/// engine adapters stay platform-neutral.
+///
+/// # Safety
+/// Mutates the process-global environment. Concurrent readers (including C
+/// code calling `getenv`) may observe a torn state; call during startup before
+/// native code begins reading the environment.
+pub unsafe fn set_process_env(name: &str, value: &std::ffi::OsStr) {
+    unsafe {
+        std::env::set_var(name, value);
+    }
+    platform_set_crt_env(name, value);
+}
+
+#[cfg(windows)]
+fn platform_set_crt_env(name: &str, value: &std::ffi::OsStr) {
+    windows::set_crt_env(name, value);
+}
+#[cfg(not(windows))]
+fn platform_set_crt_env(_name: &str, _value: &std::ffi::OsStr) {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileWatchEvent {
     Unchanged,

@@ -1989,6 +1989,7 @@ version = "0.1.0"
 dependencies = [
  "oxipresso-engine-api",
  "oxipresso-engine-xetex-sys",
+ "oxipresso-platform",
  "oxipresso-synctex",
  "oxipresso-testkit",
  "oxipresso-vfs",

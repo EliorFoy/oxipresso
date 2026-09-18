@@ -21,25 +21,6 @@ use oxipresso_engine_xetex_sys::{
 /// single-instance, so every engine invocation is serialized process-wide.
 static ENGINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// MSVC's CRT caches the environment block at startup, so C code calling
-/// `getenv` never sees Rust's `env::set_var` (which uses
-/// `SetEnvironmentVariableW`). Mirror the update into the CRT via `_putenv_s`
-/// so the engine's fontconfig picks the variable up.
-#[cfg(windows)]
-fn set_windows_crt_env(name: &str, value: &std::ffi::OsStr) {
-    use std::os::windows::ffi::OsStrExt;
-    unsafe extern "C" {
-        fn _wputenv_s(name: *const u16, value: *const u16) -> c_int;
-    }
-    let mut name_wide: Vec<u16> = name.encode_utf16().collect();
-    name_wide.push(0);
-    let mut value_wide: Vec<u16> = value.encode_wide().collect();
-    value_wide.push(0);
-    unsafe {
-        _wputenv_s(name_wide.as_ptr(), value_wide.as_ptr());
-    }
-}
-
 /// How the engine should be driven for one `oxipresso_xetex_run` invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EngineRun {
@@ -104,11 +85,11 @@ impl XetexEngine {
         });
         if let Some(path) = candidate {
             // Edition-2024 unsafe: process-global environment adjustment that
-            // must happen before the engine's fontconfig init.
+            // must happen before the engine's fontconfig init. `set_process_env`
+            // also mirrors into the Windows CRT block so the engine's C fontconfig
+            // `getenv` sees it.
             unsafe {
-                env::set_var("FONTCONFIG_PATH", &path);
-                #[cfg(windows)]
-                set_windows_crt_env("FONTCONFIG_PATH", path.as_os_str());
+                oxipresso_platform::set_process_env("FONTCONFIG_PATH", path.as_os_str());
             }
         }
     }
