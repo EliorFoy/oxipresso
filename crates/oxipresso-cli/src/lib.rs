@@ -463,6 +463,13 @@ impl OxipressoApp {
                 None
             }
         };
+        // TeXpresso rescan schedules a disk scan so external on-disk edits (a
+        // file changed outside the editor open/change stream) are picked up
+        // before rebuilding. Reload the root from disk best-effort so the
+        // rebuild sees current bytes, not the stale VFS copy.
+        if matches!(command, EditorCommand::Rescan) {
+            let _ = self.prime_root_from_disk();
+        }
         let mut restart_policy =
             matches!(command, EditorCommand::Rescan).then_some(RestartPolicy::FullRestartRequired);
         if let Some(ChangeOutcome {
@@ -2008,6 +2015,59 @@ g1,20:65536000,65536000\n\
             init_count.get(),
             2,
             "rescan must force exactly one full rebuild"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn rescan_reloads_external_disk_edits_to_the_root() {
+        // TeXpresso rescan means "changed on disk, redo everything": a file
+        // edited outside the editor open/change stream must be picked up.
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\begin{document}ORIGINAL\\end{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file: root_file.clone(),
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+        app.engine = Box::new(CountingArtifactEngine {
+            init_count: Rc::new(Cell::new(0)),
+            artifact: two_page_pdf_artifact(),
+        });
+        app.initialize().unwrap();
+        let before = String::from_utf8_lossy(
+            app.vfs
+                .lookup("main.tex")
+                .unwrap()
+                .edit_data
+                .as_deref()
+                .unwrap(),
+        )
+        .to_string();
+        assert!(before.contains("ORIGINAL"));
+        fs::write(&root_file, "\\begin{document}EXTERNAL\\end{document}\n").unwrap();
+        app.handle_editor_line("(rescan)").unwrap();
+        let after = String::from_utf8_lossy(
+            app.vfs
+                .lookup("main.tex")
+                .unwrap()
+                .edit_data
+                .as_deref()
+                .unwrap(),
+        )
+        .to_string();
+        assert!(
+            after.contains("EXTERNAL"),
+            "rescan must reload the root from disk"
         );
         fs::remove_dir_all(temp_dir).unwrap();
     }
