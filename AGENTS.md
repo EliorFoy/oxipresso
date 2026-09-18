@@ -354,7 +354,7 @@ Result:
 - No Tectonic provider is implemented yet; the TeX Live path is covered by `KpsewhichResolver` (kpsewhich with persistent cache), but not the full original texlive dependency-tape validation.
 - No Linux CI/build verification has been run.
 - No macOS implementation or verification has been done.
-- Original TeXpresso fixture coverage now includes `simple.tex`, `include.tex`, `missing-input.tex`, and `includegraphics.tex` through the external backend when fixtures and `xelatex` are available. The core behaviors from `test_stream.sh`, `test-register.sh`, and the non-blocking missing-file path in `test-lookup-file.sh` now have Rust unit coverage, and the real-engine init/rebuild protocol flow has a gated snapshot test (`real_engine_protocol_snapshot`).
+- Original TeXpresso fixture coverage now includes `simple.tex`, `include.tex`, `missing-input.tex`, and `includegraphics.tex` through the external backend when fixtures and `xelatex` are available. **`include.tex` (with `\input{test.tex}` resolved through an include path) and `includegraphics.tex` (PNG resolved through the VFS, `pdf:image` special present in the XDV) now also run through the REAL FFI engine** via the extended gated test `real_xetex_bootstrap_builds_format_and_typesets_simple` (runs only in real mode, ~35s). The core behaviors from `test_stream.sh`, `test-register.sh`, and the non-blocking missing-file path in `test-lookup-file.sh` have Rust unit coverage, and the real-engine init/rebuild protocol flow has a gated snapshot test (`real_engine_protocol_snapshot`).
 
 ## Important Design Constraints
 
