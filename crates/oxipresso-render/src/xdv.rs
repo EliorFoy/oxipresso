@@ -820,10 +820,14 @@ fn resolve_image_size(image: &PdfImageSpecial) -> (f64, f64, Option<f64>) {
     if let Some([x1, y1, x2, y2]) = image.bbox {
         let natural_w = (x2 - x1).abs().max(1e-6);
         let natural_h = (y2 - y1).abs().max(1e-6);
-        let w_pt = image.display_width_pt.unwrap_or(natural_w);
-        let h_pt = image
-            .display_height_pt
-            .unwrap_or_else(|| natural_h * (w_pt / natural_w));
+        // graphicx may specify width, height, both, or neither; keep the
+        // natural aspect ratio when only one dimension is given.
+        let (w_pt, h_pt) = match (image.display_width_pt, image.display_height_pt) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, natural_h * (w / natural_w)),
+            (None, Some(h)) => (natural_w * (h / natural_h), h),
+            (None, None) => (natural_w, natural_h),
+        };
         (w_pt, h_pt, None)
     } else if let Some(scale) = image.scale {
         (0.0, 0.0, Some(scale))
@@ -1278,6 +1282,70 @@ mod tests {
             .elements
             .retain(|element| !matches!(element, XdvElement::Image { .. }));
         assert_ne!(digest_with, without.page_digest(0).unwrap());
+    }
+
+    /// Builds a one-page XDV containing a pagesize + one `pdf:image` special.
+    fn xdv_with_image_special(special: &str) -> Vec<u8> {
+        let pagesize = b"pdf:pagesize width 614.295pt height 794.96999pt";
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]);
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]);
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        stream.extend_from_slice(&[239u8, pagesize.len() as u8]);
+        stream.extend_from_slice(pagesize);
+        let s = special.as_bytes();
+        stream.extend_from_slice(&[239u8, s.len() as u8]);
+        stream.extend_from_slice(s);
+        stream.extend_from_slice(&[140u8]);
+        stream
+    }
+
+    fn first_image_size(special: &str) -> (f64, f64) {
+        let doc = parse_xdv(&xdv_with_image_special(special), &mut no_tfm).unwrap();
+        doc.pages[0]
+            .elements
+            .iter()
+            .find_map(|element| match element {
+                XdvElement::Image { w_pt, h_pt, .. } => Some((*w_pt, *h_pt)),
+                _ => None,
+            })
+            .expect("image element")
+    }
+
+    #[test]
+    fn image_bbox_aspect_ratio_honors_width_height_or_both() {
+        // natural bbox 100x50 (2:1). width-only scales height to keep aspect;
+        // height-only must scale width to keep aspect (was a real bug);
+        // both honored independently; neither uses natural size.
+        let (w, h) = first_image_size("pdf:image bbox 0 0 100 50 clip 0 width 40pt (x.png)");
+        assert!(
+            (w - 40.0).abs() < 1e-3 && (h - 20.0).abs() < 1e-3,
+            "width-only -> 40x20"
+        );
+
+        let (w, h) = first_image_size("pdf:image bbox 0 0 100 50 clip 0 height 25pt (x.png)");
+        assert!(
+            (w - 50.0).abs() < 1e-3 && (h - 25.0).abs() < 1e-3,
+            "height-only must scale width to keep 2:1 aspect, got {w}x{h}"
+        );
+
+        let (w, h) =
+            first_image_size("pdf:image bbox 0 0 100 50 clip 0 width 30pt height 10pt (x.png)");
+        assert!(
+            (w - 30.0).abs() < 1e-3 && (h - 10.0).abs() < 1e-3,
+            "both honored"
+        );
+
+        let (w, h) = first_image_size("pdf:image bbox 0 0 100 50 clip 0 (x.png)");
+        assert!(
+            (w - 100.0).abs() < 1e-3 && (h - 50.0).abs() < 1e-3,
+            "neither -> natural"
+        );
     }
 
     #[test]
