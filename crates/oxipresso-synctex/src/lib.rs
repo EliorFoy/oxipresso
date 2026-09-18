@@ -339,7 +339,13 @@ fn coordinate_distance_squared(record: &SyncTexRecord, x: i32, y: i32) -> i64 {
         None => (rx - cx).abs(),
     };
     let dy = ry - i64::from(y);
-    dx * dx + dy * dy
+    // dx/dy are i64 widened from i32 sidecar coordinates, but a corrupt/hand-
+    // built `.synctex` loaded from disk (the viewer's threat model) can hold
+    // near-i32::MAX values, so `dx*dx + dy*dy` can exceed i64::MAX. Saturate:
+    // the result is only used to rank candidates, so an overflowed distance
+    // degrades to "farthest" (i64::MAX) instead of panicking or wrapping to a
+    // spuriously small value that would win the min_by_key.
+    dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
 }
 
 #[cfg(test)]
@@ -409,6 +415,20 @@ g1,3:11380982,8865055\n\
         assert_eq!(hit.line, 3);
         assert_eq!(hit.path, "c:/tmp/main.tex");
         assert!(document.forward_search_index(1, 6).is_some());
+    }
+
+    #[test]
+    fn reverse_search_saturates_on_corrupt_extreme_coordinates() {
+        // A hand-built sidecar (the viewer reads .synctex from disk) can carry
+        // near-i32::MAX box coordinates; the squared distance must saturate to
+        // i64::MAX (ranked farthest) rather than overflow-panic or wrap to a
+        // spuriously tiny value that would win the min.
+        let document = parse_text(
+            "SyncTeX Version:1\nOutput:main.pdf\nInput:1:main.tex\nContent:\n{1\n[1,9:2147483647,0:2147483647,0,0\n[1,3:1000,1000:2000,0,0\n}\n",
+        )
+        .unwrap();
+        let hit = document.reverse_search_page_point(1, i32::MIN, 0).unwrap();
+        assert_eq!(hit.line, 3);
     }
 
     #[test]
