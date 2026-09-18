@@ -671,6 +671,21 @@ impl RenderBackend for XdvGlyphRenderBackend {
         let scale = self.px_per_pt;
         let width = (page_data.width_pt * scale).round().max(1.0) as u32;
         let height = (page_data.height_pt * scale).round().max(1.0) as u32;
+        // A corrupt/hand-edited .xdv (the viewer and `--features freetype` builds
+        // open artifacts from disk) can declare an absurd pdf:pagesize; the `as
+        // u32` cast saturates to u32::MAX, and width*height*4 then overflows u64
+        // (debug panic) or wraps into an undersized buffer that the glyph blit
+        // would run off. Cap to a bound far above any real TeX page (maxdimen is
+        // ~21888px at 96dpi) and use checked arithmetic — a bogus page is an Err,
+        // never a panic. Real documents are unaffected.
+        const MAX_PAGE_PX: u32 = 65_536;
+        if width > MAX_PAGE_PX || height > MAX_PAGE_PX {
+            return Err(EngineError::new("XDV page dimensions out of range"));
+        }
+        let pixel_count = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|area| area.checked_mul(4))
+            .ok_or_else(|| EngineError::new("XDV page size overflow"))?;
         // Editor theme colors (default white background / black ink): the page
         // is painted with the background and uncolored glyphs/rules use the
         // foreground as their ink, matching TeXpresso's background_color /
@@ -678,7 +693,7 @@ impl RenderBackend for XdvGlyphRenderBackend {
         let [bg_r, bg_g, bg_b] = self.background.get();
         let [fg_r, fg_g, fg_b] = self.foreground.get();
         let foreground_packed = ((fg_r as u32) << 16) | ((fg_g as u32) << 8) | (fg_b as u32);
-        let mut canvas = vec![0u8; width as usize * height as usize * 4];
+        let mut canvas = vec![0u8; pixel_count];
         for pixel in canvas.chunks_exact_mut(4) {
             pixel[0] = bg_r;
             pixel[1] = bg_g;
@@ -1076,7 +1091,10 @@ mod tests {
     /// One-page XDV with a `set_rule` (50pt square at the origin pen), used to
     /// exercise theme background (untouched corner) and foreground (the rule).
     fn rule_xdv() -> Vec<u8> {
-        let pagesize = b"pdf:pagesize width 614.295pt height 794.96999pt";
+        xdv_stream(b"pdf:pagesize width 614.295pt height 794.96999pt")
+    }
+
+    fn xdv_stream(pagesize: &[u8]) -> Vec<u8> {
         let mut stream: Vec<u8> = Vec::new();
         stream.extend_from_slice(&[247u8, 7]); // PRE, XDV id 7
         stream.extend_from_slice(&25_400_000u32.to_be_bytes());
@@ -1101,6 +1119,23 @@ mod tests {
         stream.push(7);
         stream.extend_from_slice(&[223u8; 8]);
         stream
+    }
+
+    #[test]
+    fn absurd_xdv_page_size_is_rejected_without_overflow_panic() {
+        // A corrupt/hand-edited .xdv declaring a huge pdf:pagesize must not
+        // overflow the `width*height*4` byte count (debug panic / release
+        // undersized buffer). It should be a graceful Err.
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: xdv_stream(b"pdf:pagesize width 100000000pt height 100000000pt"),
+            source_name: Some("huge.xdv".to_string()),
+        };
+        let backend = XdvGlyphRenderBackend::new(Box::new(NullFonts));
+        assert!(
+            backend.render_page(&artifact, 0).is_err(),
+            "absurd page dimensions must be an Err, not a panic"
+        );
     }
 
     #[test]
