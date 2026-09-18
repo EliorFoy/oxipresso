@@ -643,9 +643,10 @@ fn parse_color_special(text: &str) -> Option<ColorSpecial> {
                 }
                 "cmyk" if values.len() >= 4 => {
                     let [c, m, y, k] = [values[0], values[1], values[2], values[3]];
-                    let red = 1.0 - (c + k).clamp(0.0, 1.0);
-                    let green = 1.0 - (m + k).clamp(0.0, 1.0);
-                    let blue = 1.0 - (y + k).clamp(0.0, 1.0);
+                    // Standard CMYK->RGB (multiplicative), matching xcolor.
+                    let red = (1.0 - c) * (1.0 - k);
+                    let green = (1.0 - m) * (1.0 - k);
+                    let blue = (1.0 - y) * (1.0 - k);
                     (channel(red) << 24) | (channel(green) << 16) | (channel(blue) << 8) | 0xff
                 }
                 _ => return None,
@@ -1135,6 +1136,24 @@ mod tests {
             digests.len(),
             unique,
             "real XDV pages should have unique digests"
+        );
+    }
+
+    #[test]
+    fn converts_cmyk_color_special_multiplicatively() {
+        // Standard CMYK->RGB (1-c)(1-k): primaries and a mid-tone that the
+        // previous additive formula got wrong.
+        let cyan = parse_color_special("color push cmyk 1 0 0 0");
+        assert!(matches!(cyan, Some(ColorSpecial::Push(0x00ff_ffff))));
+        let white = parse_color_special("color push cmyk 0 0 0 0");
+        assert!(matches!(white, Some(ColorSpecial::Push(0xffff_ffff))));
+        let black = parse_color_special("color push cmyk 0 0 0 1");
+        assert!(matches!(black, Some(ColorSpecial::Push(0x0000_00ff))));
+        // cmyk(0.5,0,0,0.5): R=(0.5)(0.5)=0.25->64, G=B=(1)(0.5)=0.5->128.
+        let teal = parse_color_special("color push cmyk 0.5 0 0 0.5");
+        assert!(
+            matches!(teal, Some(ColorSpecial::Push(0x4080_80ff))),
+            "mid-tone cmyk must use multiplicative conversion"
         );
     }
 
