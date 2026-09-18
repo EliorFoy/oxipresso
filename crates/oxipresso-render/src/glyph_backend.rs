@@ -385,7 +385,10 @@ fn decode_png(bytes: &[u8]) -> Option<Rc<DecodedImage>> {
 }
 
 /// Composites a decoded RGBA image onto the page canvas, stretched to
-/// `dest_w × dest_h` pixels at `dest_x/dest_y` (nearest-neighbor sampling).
+/// `dest_w × dest_h` pixels at `dest_x/dest_y`. Each destination pixel is the
+/// box-average of the source rectangle it covers: identical to nearest-
+/// neighbour for 1:1/upscale (a single source pixel) but it blends the covered
+/// pixels when downscaling instead of dropping most of the image.
 fn blit_image(
     canvas: &mut [u8],
     canvas_width: u32,
@@ -399,35 +402,49 @@ fn blit_image(
     if dest_w <= 0 || dest_h <= 0 || image.width == 0 || image.height == 0 {
         return;
     }
+    let iw = image.width as i64;
+    let ih = image.height as i64;
     for row in 0..dest_h {
         let page_y = dest_y + row;
         if page_y < 0 || page_y >= canvas_height as i64 {
             continue;
         }
-        let source_y = (row * image.height as i64 / dest_h) as u32;
+        let y0 = (row * ih / dest_h).clamp(0, ih - 1);
+        let y1 = (((row + 1) * ih / dest_h).max(y0 + 1)).min(ih);
         for column in 0..dest_w {
             let page_x = dest_x + column;
             if page_x < 0 || page_x >= canvas_width as i64 {
                 continue;
             }
-            let source_x = (column * image.width as i64 / dest_w) as u32;
-            let source = (source_y as usize * image.width as usize + source_x as usize) * 4;
-            let alpha = image.pixels[source + 3] as u32;
-            let dest = (page_y as usize * canvas_width as usize + page_x as usize) * 4;
-            if alpha >= 255 {
-                canvas[dest] = image.pixels[source];
-                canvas[dest + 1] = image.pixels[source + 1];
-                canvas[dest + 2] = image.pixels[source + 2];
-                canvas[dest + 3] = 255;
-            } else if alpha > 0 {
-                // Source-over blend against the opaque white page.
-                let inverse = 255 - alpha;
-                for channel in 0..3 {
-                    let source_value = image.pixels[source + channel] as u32;
-                    let dest_value = canvas[dest + channel] as u32;
-                    canvas[dest + channel] =
-                        ((source_value * alpha + dest_value * inverse) / 255) as u8;
+            let x0 = (column * iw / dest_w).clamp(0, iw - 1);
+            let x1 = (((column + 1) * iw / dest_w).max(x0 + 1)).min(iw);
+            let mut sum = [0u64; 4];
+            let mut count = 0u64;
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let s = (sy * iw + sx) as usize * 4;
+                    for c in 0..4 {
+                        sum[c] += image.pixels[s + c] as u64;
+                    }
+                    count += 1;
                 }
+            }
+            let r = (sum[0] / count) as u32;
+            let g = (sum[1] / count) as u32;
+            let b = (sum[2] / count) as u32;
+            let a = (sum[3] / count) as u32;
+            let dest = (page_y as usize * canvas_width as usize + page_x as usize) * 4;
+            if a >= 255 {
+                canvas[dest] = r as u8;
+                canvas[dest + 1] = g as u8;
+                canvas[dest + 2] = b as u8;
+                canvas[dest + 3] = 255;
+            } else if a > 0 {
+                // Source-over blend against the opaque white page.
+                let inverse = 255 - a;
+                canvas[dest] = ((r * a + canvas[dest] as u32 * inverse) / 255) as u8;
+                canvas[dest + 1] = ((g * a + canvas[dest + 1] as u32 * inverse) / 255) as u8;
+                canvas[dest + 2] = ((b * a + canvas[dest + 2] as u32 * inverse) / 255) as u8;
                 canvas[dest + 3] = 255;
             }
         }
@@ -1071,5 +1088,45 @@ mod tests {
             [0, 0, 255],
             "in-place image edit must invalidate the cached page and show the new image"
         );
+    }
+
+    #[test]
+    fn blit_image_box_averages_downscale() {
+        // A 2x2 checkerboard (red/blue diagonal) scaled to 1x1 must average to
+        // ~(127,0,127), not collapse to a single corner pixel as nearest would.
+        let checker = DecodedImage {
+            width: 2,
+            height: 2,
+            pixels: vec![
+                255, 0, 0, 255, // 0,0 red
+                0, 0, 255, 255, // 1,0 blue
+                0, 0, 255, 255, // 0,1 blue
+                255, 0, 0, 255, // 1,1 red
+            ],
+        };
+        let mut canvas = vec![0u8; 4]; // 1x1
+        blit_image(&mut canvas, 1, 1, &checker, 0, 0, 1, 1);
+        assert_eq!(
+            [canvas[0], canvas[1], canvas[2]],
+            [127, 0, 127],
+            "downscale must box-average, got {:?}",
+            &canvas[0..3]
+        );
+        assert_eq!(canvas[3], 255);
+    }
+
+    #[test]
+    fn blit_image_upscale_fills_uniform_source() {
+        // 1x1 opaque red stretched to 2x2 fills every destination pixel red.
+        let red = DecodedImage {
+            width: 1,
+            height: 1,
+            pixels: vec![255, 0, 0, 255],
+        };
+        let mut canvas = vec![255u8; 4 * 4]; // 2x2 white
+        blit_image(&mut canvas, 2, 2, &red, 0, 0, 2, 2);
+        for px in canvas.chunks_exact(4) {
+            assert_eq!(px, [255, 0, 0, 255], "upscale fills red");
+        }
     }
 }
