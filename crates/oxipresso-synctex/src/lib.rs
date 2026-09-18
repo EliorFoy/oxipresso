@@ -215,10 +215,14 @@ pub fn parse_text(text: &str) -> Result<SyncTexDocument> {
             }
         } else if let Some(page) = parse_sheet_start(line)? {
             current_page = Some(page);
-        } else if let Some(page) = current_page
-            && let Some(record) = parse_record_line(line, page)?
-        {
-            records.push(record);
+        } else if let Some(page) = current_page {
+            // A malformed content record (e.g. a truncated trailing line left
+            // by an engine killed mid-write) is skipped rather than aborting
+            // the whole sidecar, so valid records still drive forward/reverse
+            // sync. Structural Input/sheet lines still error (see r141 model).
+            if let Ok(Some(record)) = parse_record_line(line, page) {
+                records.push(record);
+            }
         }
     }
 
@@ -429,6 +433,19 @@ g1,3:11380982,8865055\n\
         .unwrap();
         let hit = document.reverse_search_page_point(1, i32::MIN, 0).unwrap();
         assert_eq!(hit.line, 3);
+    }
+
+    #[test]
+    fn parse_skips_malformed_content_records_but_keeps_the_rest() {
+        // A truncated/garbage record line (e.g. engine killed mid-write) must
+        // not discard the whole sidecar: valid records still drive the sync.
+        let document = parse_text(
+            "SyncTeX Version:1\nOutput:main.pdf\nInput:1:main.tex\nContent:\n{1\n[1,3:100,200:300,0,0\n[1,4:notanumber,y\n[1,5:400,500:600,0,0\n}\n",
+        )
+        .unwrap();
+        assert_eq!(document.records.len(), 2);
+        assert_eq!(document.records[0].line, 3);
+        assert_eq!(document.records[1].line, 5);
     }
 
     #[test]
