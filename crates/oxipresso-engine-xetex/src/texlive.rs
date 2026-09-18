@@ -271,7 +271,7 @@ mod tests {
             .with_cache_path(&cache);
         let bytes = resolver.resolve("article.sty", FileKind::Tex).unwrap();
         assert_eq!(bytes, b"\\ProvidesPackage{article}");
-        let (hits, misses) = resolver.cache_stats();
+        let (hits, _misses) = resolver.cache_stats();
         assert_eq!(hits, 1);
         drop(resolver);
 

@@ -926,7 +926,6 @@ fn is_pdf_delimiter_or_whitespace(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn pdf(bytes: &[u8]) -> DocumentArtifact {
         DocumentArtifact {
