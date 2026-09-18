@@ -808,11 +808,11 @@ mod tests {
         let msg = EditorMessage::Append {
             buffer: InfoBuffer::Out,
             pos: 0,
-            text: "x\ty(z)\"w\\v\n".to_string(),
+            text: "x\ty(z)\"w\\v\r\n".to_string(),
         };
         assert_eq!(
             serialize_message(&msg, WireProtocol::Sexp),
-            r#"(append out 0 "x\ty(z)\"w\\v\n")"#
+            r#"(append out 0 "x\ty(z)\"w\\v\r\n")"#
         );
     }
 
