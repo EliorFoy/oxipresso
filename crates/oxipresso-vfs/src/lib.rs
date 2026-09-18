@@ -692,6 +692,32 @@ mod tests {
     }
 
     #[test]
+    fn change_range_spans_multiple_lines_with_utf16_columns() {
+        // Source-faithful to TeXpresso main.c BASE_RANGE: columns are UTF-16 code
+        // units relative to each endpoint's line start, and start_line..end_line
+        // may differ. Here [line0 char5 .. line1 char1] spans "\nw".
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("m.tex", "hello\nw😀rld\n".as_bytes().to_vec());
+        vfs.apply_change(
+            "m.tex",
+            &Change::Range {
+                start_line: 0,
+                start_char: 5,
+                end_line: 1,
+                end_char: 1, // one UTF-16 unit past the line-1 'w'
+                data: "|".as_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::str::from_utf8(vfs.lookup("m.tex").unwrap().edit_data.as_deref().unwrap())
+                .unwrap(),
+            "hello|😀rld\n",
+            "multi-line range replaces bytes [5..7) = newline + 'w'"
+        );
+    }
+
+    #[test]
     fn applies_utf16_range_change() {
         let mut vfs = VirtualFileSystem::new();
         vfs.open_editor("main.tex", "a\n😀b\n".as_bytes().to_vec());
