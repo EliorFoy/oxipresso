@@ -19,6 +19,8 @@ real time.
   an image in place correctly invalidates the cached render.
 - **Live preview GUI**: `-gui` runs the engine, an egui window, and the editor
   wire (stdin/stdout) in one process — the same architecture as the original.
+- **Editor theme**: a `(theme bg fg)` command sets the preview page background and
+  default ink color (converted like the original), repainting cached pages.
 - **Bidirectional SyncTeX**: forward search (source → PDF page) and reverse
   search (PDF click → source line) with sidecar capture and parsing.
 - **Editor protocol**: TeXpresso-compatible S-expression and JSON wire protocol
