@@ -1606,6 +1606,88 @@ mod tests {
         artifact: oxipresso_engine_api::DocumentArtifact,
     }
 
+    /// Same as `CountingArtifactEngine` but declares that unrelated edits need
+    /// no rebuild, exercising the CLI's `NoRestartNeeded` short-circuit.
+    struct NoRestartEngine {
+        init_count: Rc<Cell<usize>>,
+        artifact: oxipresso_engine_api::DocumentArtifact,
+    }
+
+    impl TypesettingEngine for NoRestartEngine {
+        fn initialize(
+            &mut self,
+            _root: &RootDocument,
+            _io: &mut dyn EngineIo,
+        ) -> oxipresso_engine_api::Result<EngineInit> {
+            self.init_count.set(self.init_count.get() + 1);
+            Ok(EngineInit {
+                engine_name: "no-restart-test".to_string(),
+            })
+        }
+        fn step(&mut self, _io: &mut dyn EngineIo) -> oxipresso_engine_api::Result<EngineEvent> {
+            Ok(EngineEvent::Idle)
+        }
+        fn apply_change_hint(
+            &mut self,
+            _changed_file: &PathId,
+            _byte_offset: usize,
+        ) -> oxipresso_engine_api::Result<RestartPolicy> {
+            Ok(RestartPolicy::NoRestartNeeded)
+        }
+        fn restart(&mut self, _io: &mut dyn EngineIo) -> oxipresso_engine_api::Result<()> {
+            Ok(())
+        }
+        fn output_document(&self) -> Option<oxipresso_engine_api::DocumentArtifact> {
+            Some(self.artifact.clone())
+        }
+        fn diagnostics(&self) -> &[Diagnostic] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn no_restart_hint_skips_rebuild_on_edit() {
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\begin{document}x\\end{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file: root_file.clone(),
+        };
+        let root = root_document(&options).unwrap();
+        let init_count = Rc::new(Cell::new(0));
+        let mut app = OxipressoApp::new(options, root);
+        app.engine = Box::new(NoRestartEngine {
+            init_count: Rc::clone(&init_count),
+            artifact: two_page_pdf_artifact(),
+        });
+        app.initialize().unwrap();
+        assert_eq!(init_count.get(), 1);
+
+        // The engine declares no rebuild needed (its `read_files` never
+        // included this file); the CLI must short-circuit and not re-init.
+        let messages = app
+            .handle_editor_line(r#"(change "main.tex" 0 0 "%")"#)
+            .unwrap();
+        assert_eq!(
+            init_count.get(),
+            1,
+            "a NoRestartNeeded edit must not rebuild"
+        );
+        assert!(
+            messages.is_empty(),
+            "no editor messages should be emitted for a skipped rebuild, got {messages:?}"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
     struct FailingDiagnosticEngine {
         diagnostics: Vec<Diagnostic>,
     }
