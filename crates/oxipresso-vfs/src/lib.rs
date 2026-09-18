@@ -875,6 +875,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn first_diff_reports_first_diverging_byte() {
+        // `first_diff` computes `changed_offset` for editor-open/disk-revert,
+        // which drives rebuild-skip; a wrong offset would mis-target rebuilds.
+        assert_eq!(first_diff(b"abc", b"abc"), None, "identical -> no change");
+        assert_eq!(first_diff(b"abc", b"abd"), Some(2), "mid mismatch");
+        assert_eq!(first_diff(b"abc", b"xbc"), Some(0), "first byte differs");
+        assert_eq!(first_diff(b"abc", b"abcd"), Some(3), "append -> old len");
+        assert_eq!(first_diff(b"abcd", b"abc"), Some(3), "trim -> shorter len");
+        assert_eq!(first_diff(b"", b"a"), Some(0), "empty old");
+        assert_eq!(first_diff(b"a", b""), Some(0), "empty new");
+    }
+
     fn unique_temp_dir() -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
