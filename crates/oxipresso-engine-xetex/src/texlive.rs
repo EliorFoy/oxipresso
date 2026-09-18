@@ -373,4 +373,37 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn load_cache_tolerates_malformed_entries() {
+        // The kpse cache is a user-writable temp file a prior/interrupted/
+        // hand-edited run may leave malformed. load_cache must keep the good
+        // lines and ignore bad ones (no tabs / unknown tag / truncated hit),
+        // never panic.
+        let dir = unique_dir("oxi-kpse-malformed");
+        std::fs::create_dir_all(&dir).unwrap();
+        let version_only = dir.join("version-kpsewhich.cmd");
+        std::fs::write(
+            &version_only,
+            "@if \"%~1\"==\"--version\" (\r\n  @echo fake kpsewhich 1.0\r\n  @exit /b 0\r\n)\r\n@exit /b 1\r\n",
+        )
+        .unwrap();
+        let cache = dir.join("cache.txt");
+        std::fs::write(
+            &cache,
+            "garbage-no-tabs\n\
+             hit\tarticle.cls\tC:/texlive/texmf-dist/tex/latex/article.cls\n\
+             bogus\twhatever\tx\n\
+             miss\tmissing.sty\n\
+             hit\ttruncated-no-path\n",
+        )
+        .unwrap();
+        let resolver = KpsewhichResolver::from_program(&version_only)
+            .unwrap()
+            .with_cache_path(&cache);
+        // Exactly one valid hit and one valid miss load; the rest are skipped.
+        assert_eq!(resolver.cache_stats(), (1, 1));
+        drop(resolver);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

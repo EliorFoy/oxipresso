@@ -1212,7 +1212,7 @@ mod tests {
         assert!(parse_tfm_widths(&header(6, 0, 5, 2, 1)).is_none()); // ec < bc
         assert!(parse_tfm_widths(&header(6, 0, 0, 0, 100)).is_none()); // width_base + nw > lf
         assert!(parse_tfm_widths(&header(65535, 65535, 0, 65535, 65535)).is_none()); // lf beyond buf
-        assert!(parse_tfm_widths(&vec![0xABu8; 64]).is_none()); // garbage
+        assert!(parse_tfm_widths(&[0xABu8; 64]).is_none()); // garbage
     }
 
     #[test]
