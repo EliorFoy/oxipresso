@@ -1758,6 +1758,59 @@ g1,20:65536000,65536000\n\
         fs::remove_dir_all(temp_dir).unwrap();
     }
 
+    #[test]
+    fn pause_suppresses_rebuild_until_resume() {
+        // Editors rely on: while paused, edits update the VFS but must NOT
+        // rebuild; the next `resume` re-initializes the engine and picks them
+        // up. Counting engine initializations to prove exactly one rebuild on
+        // resume and none while paused.
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\begin{document}x\\end{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file,
+        };
+        let root = root_document(&options).unwrap();
+        let init_count = Rc::new(Cell::new(0));
+        let mut app = OxipressoApp::new(options, root);
+        app.engine = Box::new(CountingArtifactEngine {
+            init_count: Rc::clone(&init_count),
+            artifact: two_page_pdf_artifact(),
+        });
+        app.initialize().unwrap();
+        assert_eq!(init_count.get(), 1);
+
+        // Pause: no rebuild.
+        app.handle_editor_line("(pause)").unwrap();
+        assert_eq!(init_count.get(), 1, "pause itself must not rebuild");
+
+        // Edit while paused: VFS updates, engine is NOT re-initialized.
+        app.handle_editor_line(r#"(change "main.tex" 0 0 "%")"#)
+            .unwrap();
+        assert_eq!(
+            init_count.get(),
+            1,
+            "edits while paused must not rebuild the engine"
+        );
+
+        // Resume: exactly one rebuild, now picking up the edit.
+        app.handle_editor_line("(resume)").unwrap();
+        assert_eq!(
+            init_count.get(),
+            2,
+            "resume must re-initialize once to apply deferred edits"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
     struct FailingDiagnosticEngine {
         diagnostics: Vec<Diagnostic>,
     }
