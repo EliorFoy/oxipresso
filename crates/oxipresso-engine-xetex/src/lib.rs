@@ -133,7 +133,7 @@ impl XetexEngine {
             format_path_len: format_path_text.len(),
             primary_name: primary_name.as_ptr(),
             primary_name_len: primary_name_text.len(),
-            build_date: 0,
+            build_date: parse_source_date_epoch(std::env::var_os("SOURCE_DATE_EPOCH")),
             stream_mode: i32::from(root.stream_mode),
             in_initex_mode: i32::from(run == EngineRun::FormatBootstrap),
             synctex_enabled: i32::from(run == EngineRun::Normal),
@@ -481,6 +481,17 @@ unsafe extern "C" fn callback_diagnostic(
 /// matches the VFS-normalized change hint `sub/inc.tex`. Deliberately minimal
 /// (it does not merge relative and absolute forms), so it only ever makes a
 /// genuine match succeed.
+/// TeXpresso honors the `SOURCE_DATE_EPOCH` environment variable for a
+/// reproducible build timestamp (see `main.c`: `strtoll(getenv(...))`). We do
+/// the same, but fall back to a deterministic `0` (not the current time) when
+/// it is unset/invalid, so warm rebuilds and cached render digests stay stable.
+fn parse_source_date_epoch(raw: Option<std::ffi::OsString>) -> u64 {
+    raw.and_then(|value| value.into_string().ok())
+        .map(|text| text.trim().to_owned())
+        .and_then(|text| text.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn path_key(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     match normalized.strip_prefix("./") {
@@ -1091,6 +1102,25 @@ mod tests {
                 ArtifactKind::Unknown => panic!("real XeTeX smoke produced unknown artifact kind"),
             }
         }
+    }
+
+    #[test]
+    fn parse_source_date_epoch_matches_texpresso() {
+        use std::ffi::OsString;
+        // TeXpresso honors SOURCE_DATE_EPOCH (reproducible builds); we parse it
+        // and fall back to a deterministic 0 otherwise (never the wall clock).
+        assert_eq!(
+            parse_source_date_epoch(Some(OsString::from("1700000000"))),
+            1700000000
+        );
+        assert_eq!(parse_source_date_epoch(Some(OsString::from("  42  "))), 42); // trimmed
+        assert_eq!(parse_source_date_epoch(None), 0); // unset -> deterministic 0
+        assert_eq!(parse_source_date_epoch(Some(OsString::from(""))), 0);
+        assert_eq!(
+            parse_source_date_epoch(Some(OsString::from("not-a-number"))),
+            0
+        );
+        assert_eq!(parse_source_date_epoch(Some(OsString::from("-5"))), 0); // negative not valid epoch
     }
 
     #[test]
