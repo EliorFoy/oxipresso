@@ -1244,4 +1244,49 @@ mod tests {
         );
         assert_eq!(out.left, -2); // canvas grows 2px to the left, baseline kept at original x
     }
+
+    #[test]
+    fn blit_gray_composites_coverage_and_clips() {
+        // Black glyph (0x000000FF) over an opaque-white page: full coverage ->
+        // black; 50% coverage -> midpoint gray; result alpha forced opaque.
+        let bm = GrayBitmap {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 1,
+            pixels: vec![255, 128],
+        };
+        let mut canvas = vec![255u8; 2 * 4]; // 2x1 white RGBA
+        blit_gray(&mut canvas, 2, 1, &bm, 0, 0, 0x0000_00FF);
+        assert_eq!(&canvas[0..4], &[0, 0, 0, 255], "full coverage -> black");
+        assert_eq!(
+            &canvas[4..8],
+            &[127, 127, 127, 255],
+            "50% coverage of black over white -> 127 gray, opaque"
+        );
+
+        // A glyph placed off the left edge must not panic and uses the correct
+        // (in-bounds) source column: left=-1 means column 1 lands at x=0.
+        let mut clipped = vec![255u8; 4]; // 1x1 white
+        blit_gray(
+            &mut clipped,
+            1,
+            1,
+            &GrayBitmap {
+                left: 0,
+                top: 0,
+                width: 2,
+                height: 1,
+                pixels: vec![0, 255],
+            },
+            -1,
+            0,
+            0x0000_00FF,
+        );
+        assert_eq!(
+            &clipped[..],
+            &[0, 0, 0, 255],
+            "clipped glyph uses column at x=0"
+        );
+    }
 }
