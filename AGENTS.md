@@ -175,7 +175,7 @@ Implemented crates:
   - Parses basic `Output:` and `Input:<index>:<path>` metadata.
   - Parses sheet/page starts and common node records such as `[`, `(`, `h`, `g`, `k`, preserving page, input index, source line, and coordinates.
   - Provides lookup by input index.
-  - Provides first forward lookup by input index or source path, returning the nearest source-line hit.
+  - Provides forward lookup by input index or source path, returning the last box record at-or-before the requested source line (earliest as fallback) — the de-facto forward-sync behavior, corrected from an earlier nearest-by-absolute-distance heuristic that could jump to a later line's box.
   - Normalizes SyncTeX/editor paths for forward lookup by converting backslashes, collapsing duplicate slashes, removing leading `./`, and matching absolute/relative suffixes in either direction.
   - Provides first reverse lookup by page and point, returning the nearest source record.
   - Has tests for plain metadata, compressed artifact parsing, record parsing, forward lookup, Windows/relative path matching, reverse lookup, and invalid input index handling.
@@ -240,7 +240,7 @@ Implemented crates:
 
 ## Verified
 
-Test totals currently: **98 passing in the default stub workspace** across 11 crates (cli 29, render 22 default, vfs 12, engine-xetex 9, engine-external 8, synctex 6, viewer 3 default, editor-protocol 5, platform 2, testkit + engine-api), plus **32/32** with the `freetype` render feature (adds image-decode, premultiplied box-filter compositing, per-axis matrix scale, and the image-edit-invalidation regression), **7/7** viewer GUI, and env-gated real-engine tests (`real_xetex_bootstrap...` incl. include/includegraphics/missing-input/reverse-syncTeX/restart-policy, and `real_engine_protocol_snapshot` reverse-over-wire). CLI tests that mutate the process-global `OXIPRESSO_ENGINE` are serialized on a shared lock so parallel `cargo test` is deterministic (verified green over repeated full-workspace runs).
+Test totals currently: **101 passing in the default stub workspace** across 11 crates (cli 29, render 22 default, vfs 12, engine-xetex 9, engine-external 8, synctex 7, viewer 3 default, editor-protocol 7, platform 2, testkit + engine-api), plus **32/32** with the `freetype` render feature (adds image-decode, premultiplied box-filter compositing, per-axis matrix scale, and the image-edit-invalidation regression), **7/7** viewer GUI, and env-gated real-engine tests (`real_xetex_bootstrap...` incl. include/includegraphics/missing-input/reverse-syncTeX/restart-policy, and `real_engine_protocol_snapshot` reverse-over-wire). CLI tests that mutate the process-global `OXIPRESSO_ENGINE` are serialized on a shared lock so parallel `cargo test` is deterministic (verified green over repeated full-workspace runs).
 
 **Test-mode contract:** the default `cargo test --workspace` builds the **stub** engine (no `OXIPRESSO_USE_REAL_XETEX`), and that is the supported/verified invocation. A few CLI tests (e.g. the `run_with_io` stream/json tests) assert the *stub* engine's fixed output and are NOT guarded by `real_mode()`; running the whole workspace as a real-engine build (setting `OXIPRESSO_USE_REAL_XETEX=1` at build time) makes ~3 of them fail spuriously — that is a harness mis-invocation, not a regression. Real-engine behavior is covered by the dedicated env-gated tests (`real_xetex_bootstrap...`, `real_engine_protocol_snapshot`), which self-skip unless real mode is active.
 
