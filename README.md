@@ -11,21 +11,28 @@ real time.
   with automatic format bootstrap from `xelatex.ini` and TeX Live package
   resolution through `kpsewhich`.
 - **Real glyph rendering**: XDV pages are rendered with FreeType-rasterized
-  glyphs, including color specials, slant/extend transforms, and native OTF/Type1
-  font lookup from the TeX distribution.
+  glyphs, including color specials (`rgb`/`gray`/`cmyk`/`hsb`), the slant/extend/
+  embolden transform trio, and native OTF/Type1 font lookup from the TeX
+  distribution.
+- **Images**: `pdf:image` specials from `\includegraphics` and `\XeTeXpicfile`
+  are parsed, PNGs decoded, and composited onto pages (alpha blending); editing
+  an image in place correctly invalidates the cached render.
 - **Live preview GUI**: `-gui` runs the engine, an egui window, and the editor
   wire (stdin/stdout) in one process — the same architecture as the original.
 - **Bidirectional SyncTeX**: forward search (source → PDF page) and reverse
   search (PDF click → source line) with sidecar capture and parsing.
 - **Editor protocol**: TeXpresso-compatible S-expression and JSON wire protocol
   with `open`/`change`/`lookup-file`/`input-file`/`truncate`/`append`/`flush`
-  and streamed `out`/`log` info buffers.
-- **Incremental render caching**: pages whose XDV content is unchanged after an
-  edit are reused from cache instead of re-rendered.
+  and streamed `out`/`log` info buffers (plus `pause`/`resume`/`rescan`).
+- **Interactive incremental rebuilds**: a format cache, a persistent `kpsewhich`
+  resolution cache (≈25× faster warm rebuilds: 15.5s → ~600ms), `read_files`-based
+  rebuild skipping (edits to files the engine never read cost nothing), and a
+  content-hash page cache so unchanged XDV pages are reused — the preview stays
+  responsive across edits.
 - **Cross-platform architecture**: Rust owns the protocol, VFS, engine
   abstraction, platform layer, and rendering; the C engine is isolated behind
   a stable FFI shim. Windows is the primary target; Linux and macOS seams are
-  preserved.
+  preserved (core crates cross-check for `x86_64-unknown-linux-musl`).
 
 ## Quick start
 
@@ -92,7 +99,7 @@ harfbuzz, graphite2, fontconfig, icu, libpng, zlib).
 | `oxipresso-engine-xetex` | Safe Rust wrapper (bootstrap, SyncTeX, output events, TeX Live resolver) |
 | `oxipresso-engine-external` | External `xelatex` process backend |
 | `oxipresso-platform` | Platform isolation + file watcher |
-| `oxipresso-render` | XDV/DVI parser + FreeType glyph renderer + PDF (PDFium) |
+| `oxipresso-render` | XDV/DVI parser + FreeType glyph + PNG image renderer + PDF (PDFium) |
 | `oxipresso-synctex` | SyncTeX decoder + forward/reverse lookup |
 | `oxipresso-viewer` | Viewer state model + standalone egui viewer |
 | `oxipresso-testkit` | Shared fixtures and test helpers |
