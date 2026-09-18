@@ -52,21 +52,35 @@ impl SyncTexDocument {
 
     pub fn forward_search_index(&self, input_index: usize, line: usize) -> Option<SyncTexHit> {
         let input = self.input_by_index(input_index)?;
-        self.records
+        // Correct forward-sync: the last box record at-or-before the requested
+        // line (the content the cursor is currently on); fall back to the
+        // earliest record when the request precedes everything. Picking the
+        // minimum absolute distance could jump to a *later* line's box.
+        let mut at_or_before: Option<&SyncTexRecord> = None;
+        let mut earliest: Option<&SyncTexRecord> = None;
+        for record in self
+            .records
             .iter()
             .filter(|record| record.input_index == input_index)
-            .min_by_key(|record| record.line.abs_diff(line))
-            .map(|record| SyncTexHit {
-                page: record.page,
-                input_index,
-                path: input.path.clone(),
-                line: record.line,
-                x: record.x,
-                y: record.y,
-                width: record.width,
-                height: record.height,
-                depth: record.depth,
-            })
+        {
+            if record.line <= line && at_or_before.is_none_or(|best| record.line >= best.line) {
+                at_or_before = Some(record);
+            }
+            if earliest.is_none_or(|first| record.line < first.line) {
+                earliest = Some(record);
+            }
+        }
+        at_or_before.or(earliest).map(|record| SyncTexHit {
+            page: record.page,
+            input_index,
+            path: input.path.clone(),
+            line: record.line,
+            x: record.x,
+            y: record.y,
+            width: record.width,
+            height: record.height,
+            depth: record.depth,
+        })
     }
 
     pub fn forward_search_path(&self, path: &str, line: usize) -> Option<SyncTexHit> {
@@ -338,6 +352,35 @@ g1,3:11380982,8865055\n\
         assert_eq!(hit.line, 3);
         assert_eq!(hit.path, "c:/tmp/main.tex");
         assert!(document.forward_search_index(1, 6).is_some());
+    }
+
+    #[test]
+    fn forward_search_prefers_last_record_at_or_before_line() {
+        // Records at source lines 5 and 10. Jumping from line 8 must return the
+        // box at line 5 (the last content at-or-before the cursor), NOT line 10
+        // — which a minimum-absolute-distance heuristic would wrongly choose
+        // (|8-10| < |8-5|). A request before all records falls back to earliest.
+        let document = parse_text(
+            "SyncTeX Version:1\n\
+Output:main.pdf\n\
+Input:1:main.tex\n\
+Content:\n\
+{1\n\
+g1,5:100,100\n\
+g1,10:400,400\n\
+}\n",
+        )
+        .unwrap();
+        assert_eq!(document.forward_search_path("main.tex", 8).unwrap().line, 5);
+        assert_eq!(
+            document.forward_search_path("main.tex", 10).unwrap().line,
+            10
+        );
+        assert_eq!(
+            document.forward_search_path("main.tex", 12).unwrap().line,
+            10
+        );
+        assert_eq!(document.forward_search_path("main.tex", 2).unwrap().line, 5);
     }
 
     #[test]
