@@ -240,7 +240,9 @@ Implemented crates:
 
 ## Verified
 
-Full verification (all modes, round 12):
+Test totals currently: **92 passing in the default stub workspace** across 11 crates (cli 29, render 18 default, vfs 11, engine-xetex 9, engine-external 8, synctex 6, viewer 3 default, editor-protocol 4, platform 2, testkit + engine-api), plus **24/24** with the `freetype` render feature, **7/7** viewer GUI, and env-gated real-engine tests (`real_xetex_bootstrap...` incl. include/includegraphics/missing-input/reverse-syncTeX/restart-policy, and `real_engine_protocol_snapshot` reverse-over-wire). CLI tests that mutate the process-global `OXIPRESSO_ENGINE` are serialized on a shared lock so parallel `cargo test` is deterministic (verified green over repeated full-workspace runs).
+
+Earlier snapshot (all modes, round 12):
 
 - Stub mode: 73 tests green across 9 crates (cli 24, render 17, vfs 10, engine-external 8, viewer 3, synctex 6, editor-protocol 3, platform 2, engine-api 0).
 - Freetype mode: 20/20 render tests (including real-XDV smoke and system-font rasterization).
