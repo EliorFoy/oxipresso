@@ -1140,6 +1140,46 @@ mod tests {
     }
 
     #[test]
+    fn classic_tfm_advances_match_tftopl_reference() {
+        // Authoritative regression for `parse_tfm_widths` + the `char_width_dvi`
+        // TFM->DVI advance: the per-code classic-font advance at 10pt for the real
+        // cmr10.tfm must match widths read independently from `tftopl`
+        // (em x design-size 10pt x 65536). This is the glyph spacing the
+        // dark-pixel render smoke cannot see, so it is pinned here. Self-skips
+        // when no TeX distribution is present (CI-safe).
+        let out = match std::process::Command::new("kpsewhich")
+            .arg("cmr10.tfm")
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return,
+        };
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let Ok(bytes) = std::fs::read(&path) else {
+            return;
+        };
+        let widths = parse_tfm_widths(&bytes).expect("real cmr10.tfm parses");
+        let dvi_at_10pt =
+            |code: usize| -> i64 { (widths[code] * (10.0f64 * (1i64 << 20) as f64) as i64) >> 24 };
+        // code -> expected DVI units (tftopl em * 10 * 65536), +/-2 for rounding.
+        for (code, expected) in [
+            (32u32, 182045i64), // space (kern-tagged)
+            (45, 218454),       // hyphen (kern-tagged)
+            (65, 491521),       // A
+            (77, 600748),       // M
+            (105, 182045),      // i
+            (108, 182045),      // l
+            (120, 345887),      // x
+        ] {
+            let got = dvi_at_10pt(code as usize);
+            assert!(
+                (got - expected).abs() <= 2,
+                "cmr10 code {code}: got {got}, tftopl reference {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_real_xdv_when_env_var_points_at_artifact() {
         let Ok(path) = std::env::var("OXIPRESSO_XDV_SMOKE") else {
             return;
