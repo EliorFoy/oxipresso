@@ -759,6 +759,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_arguments() {
+        // Each of these must be a clean Err, not a panic or a silent misparse —
+        // they guard the CLI input contract against user typos.
+        assert!(parse_args(["-I"]).is_err(), "-I with no value");
+        assert!(
+            parse_args(["-I", "build", "-json"]).is_err(),
+            "-I consumes 'build', leaving no root document"
+        );
+        assert!(parse_args(["-nope", "main.tex"]).is_err(), "unknown option");
+        assert!(
+            parse_args(["a.tex", "b.tex"]).is_err(),
+            "two root documents rejected"
+        );
+        assert!(
+            parse_args::<Vec<String>, String>(vec![]).is_err(),
+            "no root document"
+        );
+        // Default (no flags) is a valid Sexp, non-line, non-stream, non-gui run.
+        let opts = parse_args(["main.tex"]).unwrap();
+        assert_eq!(opts.protocol, WireProtocol::Sexp);
+        assert!(!opts.line_output && !opts.stream_mode && !opts.gui && !opts.initialize_only);
+    }
+
+    #[test]
     fn register_does_not_emit_until_engine_lookup() {
         let _env = env_lock();
         let options = CliOptions {
