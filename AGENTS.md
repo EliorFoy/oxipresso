@@ -61,6 +61,7 @@ Implemented crates:
   - Malformed/untrusted input is rejected with an error, never a panic: all field reads go through `expect_*`/`expect_arity` (returning `Err`), array indexing is guarded by arity checks, and `.expect()` is used only on infallible serialization of the parser's own types. Locked by `parsers_reject_malformed_input_without_panicking` (sexp + json malformed cases + a valid control).
   - Serializes editor messages as S-expression or JSON.
   - Supports first-stage commands including `open`, `open-base64`, `close`, `change`, `change-lines`, `change-range`, `register`, `pause`, `resume`, page/window/theme commands, and SyncTeX forward command.
+  - Every command's arity + argument types were cross-checked verb-by-verb against TeXpresso `src/frontend/editor.c` (round 113): all 19 verbs match TeXpresso's `len` exactly (the parser's `args` excludes the verb, so `expect_arity` is `len-1`; `expect_arity` is a strict equality like the reference's `len != N`; `move-window`/`map-window` require exactly 4 f32; `open`/`open-base64` share arity 2 with the base64 flag from the verb; unknown verbs error). Protocol surface is confirmed faithful to the reference, not merely spot-checked.
 
 - `oxipresso-vfs`
   - Implements editor-backed virtual file system.
