@@ -70,7 +70,7 @@ Implemented crates:
   - `open-base64` decodes with the base64 `STANDARD` engine (canonical alphabet **with required `=` padding**); malformed or unpadded payloads are rejected with an error, never a panic or a silent mis-decode (tested by `open_base64_command_decodes_payload_or_errors`).
   - Implements UTF-16 code unit to UTF-8 byte offset conversion for `change-range` — matching TeXpresso `main.c` `BASE_RANGE` (columns are UTF-16 code units relative to each endpoint's line; multi-line ranges use the absolute end-line start), pinned by `change_range_spans_multiple_lines_with_utf16_columns`.
   - Tracks promised files.
-  - Opening a promised file through the editor now reports a change at offset 0 so promised-file fulfillment can trigger a rebuild.
+  - Opening a promised file through the editor now reports a change at offset 0 so promised-file fulfillment can trigger a rebuild. (Deliberate adaptation from TeXpresso `interpret_open`, which on a promised file's first open does *not* notify — its engine is blocked on that very read. Our non-blocking FFI has no such block, so the change event drives the rebuild; exercised by the register/deferred + non-blocking-lookup CLI tests.)
   - Tracks files that were requested by engine reads, including failed lookup attempts.
   - Opening a file after a failed engine lookup now reports a change at offset 0 so non-blocking `lookup-file failed` workflows can trigger a rebuild when the editor provides the file.
   - Supports disk-root fallback search after editor/disk cached content. CLI seeds disk roots from the root directory plus `-I` include paths.
