@@ -640,6 +640,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parsers_reject_malformed_input_without_panicking() {
+        // The CLI feeds untrusted editor bytes through these parsers; malformed
+        // input must produce Err (never panic/crash the session). All cases use
+        // known verbs with unambiguous arity/type errors or broken structure.
+        let malformed_sexp = [
+            "(",
+            ")",
+            "(open",
+            "(open \"unterminated",
+            "(open)",
+            "(open \"a\")",
+            "(open \"a\" \"b\" \"c\")",
+            "(change \"a\" 0 0)",
+            "(((",
+            "( )",
+        ];
+        let malformed_json = [
+            "",
+            "not json",
+            "[",
+            "{}",
+            "[1,2,3]",
+            "[\"open\"]",
+            "[\"open\",\"a\",\"b\",\"c\"]",
+            "[\"change\",\"a\",1,2]",
+            "[\"change-range\",\"m\",1,2,3]",
+        ];
+        for input in malformed_sexp {
+            assert!(
+                parse_command(input, WireProtocol::Sexp).is_err(),
+                "sexp input should error, not panic: {input:?}"
+            );
+        }
+        for input in malformed_json {
+            assert!(
+                parse_command(input, WireProtocol::Json).is_err(),
+                "json input should error, not panic: {input:?}"
+            );
+        }
+        // Control: valid commands still parse, proving these aren't blanket errors.
+        assert!(parse_command(r#"(open "a.tex" "hi")"#, WireProtocol::Sexp).is_ok());
+        assert!(parse_command(r#"["open","a.tex","hi"]"#, WireProtocol::Json).is_ok());
+    }
+
+    #[test]
     fn parses_sexp_change_range() {
         let cmd = parse_command(
             r#"(change-range "main.tex" 1 2 3 4 "hello")"#,
