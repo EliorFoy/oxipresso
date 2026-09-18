@@ -710,4 +710,22 @@ mod tests {
             r#"["synctex","dir/main.tex",12,3]"#
         );
     }
+
+    #[test]
+    fn serializes_append_lines_flattened_in_both_protocols() {
+        // Line-mode info-buffer append flattens each line into the message
+        // array; the exact wire shape is what editors parse per line.
+        let msg = EditorMessage::AppendLines {
+            buffer: InfoBuffer::Out,
+            lines: vec!["first".to_string(), "second".to_string()],
+        };
+        assert_eq!(
+            serialize_message(&msg, WireProtocol::Sexp),
+            r#"(append-lines out "first" "second")"#
+        );
+        assert_eq!(
+            serialize_message(&msg, WireProtocol::Json),
+            r#"["append-lines","out","first","second"]"#
+        );
+    }
 }
