@@ -285,10 +285,18 @@ impl VirtualFileSystem {
                 (start, end - start, insert.as_slice())
             }
         };
-        if offset + remove > data.len() {
+        // Editor-supplied offset/remove are f64->usize casts and can be huge, so
+        // `offset + remove` may overflow (debug panic / release wrap into a
+        // reversed slice). Use checked arithmetic: an overflow means the range
+        // is past the file, matching TeXpresso's bounded skip (a catchable Err,
+        // not a crash). Valid inputs are unaffected.
+        let end = offset
+            .checked_add(remove)
+            .ok_or_else(|| EngineError::new("change range is outside the file"))?;
+        if end > data.len() {
             return Err(EngineError::new("change range is outside the file"));
         }
-        data.splice(offset..offset + remove, insert.iter().copied());
+        data.splice(offset..end, insert.iter().copied());
         Ok(ChangeOutcome {
             path: key,
             changed_offset: Some(offset),
@@ -688,6 +696,41 @@ mod tests {
                 )
                 .is_err(),
             "line offset past the last line is an error"
+        );
+    }
+
+    #[test]
+    fn huge_change_offsets_are_rejected_without_overflow_panic() {
+        // offset/remove are f64->usize casts and can be enormous; `offset +
+        // remove` must be computed with checked arithmetic so it cannot overflow
+        // the bounds check (a debug panic / release reversed slice). In-range
+        // edits are unaffected.
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("big.tex", b"hello".to_vec());
+        let err = vfs
+            .apply_change(
+                "big.tex",
+                &Change::Bytes {
+                    offset: usize::MAX,
+                    remove: 1,
+                    data: vec![b'x'],
+                },
+            )
+            .expect_err("offset+remove overflow must be an Err, not a panic");
+        assert!(err.to_string().contains("outside the file"));
+        // A valid full-content edit still applies.
+        vfs.apply_change(
+            "big.tex",
+            &Change::Bytes {
+                offset: 0,
+                remove: 5,
+                data: b"hi".to_vec(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vfs.lookup("big.tex").unwrap().edit_data.as_deref().unwrap(),
+            b"hi"
         );
     }
 
