@@ -297,7 +297,7 @@ unsafe extern "C" fn callback_open_read(
             if handle.is_null() {
                 return state.set_error("FFI open_read handle output is null");
             }
-            state.read_files.insert(path.to_string());
+            state.read_files.insert(path_key(path));
             unsafe {
                 *handle = file_handle.0;
             }
@@ -475,6 +475,20 @@ unsafe extern "C" fn callback_diagnostic(
     });
 }
 
+/// Canonical key for matching engine-read paths against VFS change-hint paths:
+/// forward slashes and no leading `./`. Both sides of the `apply_change_hint`
+/// comparison run through this, so an engine path like `sub\inc.tex` still
+/// matches the VFS-normalized change hint `sub/inc.tex`. Deliberately minimal
+/// (it does not merge relative and absolute forms), so it only ever makes a
+/// genuine match succeed.
+fn path_key(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    match normalized.strip_prefix("./") {
+        Some(rest) => rest.to_string(),
+        None => normalized,
+    }
+}
+
 fn callback_file_kind(kind: c_int) -> FileKind {
     match kind {
         1 => FileKind::Pk,
@@ -584,7 +598,13 @@ impl TypesettingEngine for XetexEngine {
         // If the engine never opened the changed file during the last run,
         // the current output doesn't depend on it and the rebuild can be
         // skipped (the engine will pick up the change on the next rebuild).
-        if !self.read_files.contains(&changed_file.0) {
+        // Compare on a canonical path key (forward slashes, no leading "./") so
+        // an edit to an engine-read file is not wrongly skipped just because
+        // the engine's requested path and the VFS-normalized change path use
+        // different separators/forms. Canonicalizing only ever makes a genuine
+        // match succeed; a false over-match costs an unnecessary (correct)
+        // rebuild rather than serving a stale preview.
+        if !self.read_files.contains(&path_key(&changed_file.0)) {
             return Ok(RestartPolicy::NoRestartNeeded);
         }
         Ok(RestartPolicy::FullRestartRequired)
@@ -686,6 +706,43 @@ mod tests {
         assert_eq!(artifact.kind, ArtifactKind::Xdv);
         assert_eq!(artifact.bytes, b"OXIPRESSO-STUB-XDV");
         assert_eq!(artifact.source_name.as_deref(), Some("simple.xdv"));
+    }
+
+    #[test]
+    fn change_hint_matches_engine_path_regardless_of_separator() {
+        let mut engine = XetexEngine::new();
+        // The engine opened an include under a Windows-style backslash path.
+        engine.read_files.insert(path_key("sub\\inc.tex"));
+        // A VFS-normalized (forward slash) change hint must resolve to a real
+        // dependency, not be skipped — the pre-fix exact-string compare said No.
+        assert_eq!(
+            engine
+                .apply_change_hint(&PathId("sub/inc.tex".to_string()), 0)
+                .unwrap(),
+            RestartPolicy::FullRestartRequired,
+            "backslash-read path must match a slash change hint"
+        );
+        assert_eq!(
+            engine
+                .apply_change_hint(&PathId("./sub/inc.tex".to_string()), 0)
+                .unwrap(),
+            RestartPolicy::FullRestartRequired,
+            "leading ./ hint must match"
+        );
+        // Unrelated file still skips, and relative/absolute are NOT conflated.
+        assert_eq!(
+            engine
+                .apply_change_hint(&PathId("other.tex".to_string()), 0)
+                .unwrap(),
+            RestartPolicy::NoRestartNeeded
+        );
+        assert_eq!(
+            engine
+                .apply_change_hint(&PathId("/abs/sub/inc.tex".to_string()), 0)
+                .unwrap(),
+            RestartPolicy::NoRestartNeeded,
+            "must not merge relative and absolute forms"
+        );
     }
 
     #[test]
