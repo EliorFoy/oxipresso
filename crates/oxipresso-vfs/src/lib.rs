@@ -700,6 +700,52 @@ mod tests {
     }
 
     #[test]
+    fn huge_line_and_column_numbers_are_rejected_without_hang_or_panic() {
+        // change-lines/change-range derive byte spans by scanning for newlines /
+        // UTF-16 columns. A scanner that looped `while remaining > 0` on an
+        // editor-supplied usize::MAX line or column would hang; the bounded
+        // scanners must instead scan the buffer once and return an error. An
+        // unbounded implementation stalls this test (i.e. the test IS the guard).
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("lines.tex", b"a\nb\nc".to_vec());
+        assert!(
+            vfs.apply_change(
+                "lines.tex",
+                &Change::Lines {
+                    offset: usize::MAX,
+                    remove: usize::MAX,
+                    data: vec![b'x'],
+                }
+            )
+            .is_err(),
+            "huge start line is an Err, not a hang/panic"
+        );
+        assert!(
+            vfs.apply_change(
+                "lines.tex",
+                &Change::Range {
+                    start_line: 0,
+                    start_char: usize::MAX, // column past any real line
+                    end_line: 2,
+                    end_char: 1,
+                    data: vec![b'x'],
+                }
+            )
+            .is_err(),
+            "huge UTF-16 column is an Err, not a hang/panic"
+        );
+        // The buffer is unchanged and still usable afterwards.
+        assert_eq!(
+            vfs.lookup("lines.tex")
+                .unwrap()
+                .edit_data
+                .as_deref()
+                .unwrap(),
+            b"a\nb\nc"
+        );
+    }
+
+    #[test]
     fn huge_change_offsets_are_rejected_without_overflow_panic() {
         // offset/remove are f64->usize casts and can be enormous; `offset +
         // remove` must be computed with checked arithmetic so it cannot overflow
