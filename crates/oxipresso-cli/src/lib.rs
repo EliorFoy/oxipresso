@@ -1811,6 +1811,44 @@ g1,20:65536000,65536000\n\
         fs::remove_dir_all(temp_dir).unwrap();
     }
 
+    #[test]
+    fn rescan_forces_a_full_rebuild_without_a_vfs_change() {
+        // `rescan` is the editor's "something on disk changed, redo everything"
+        // signal: it must trigger exactly one full rebuild even when no tracked
+        // file reported a change.
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\begin{document}x\\end{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file,
+        };
+        let root = root_document(&options).unwrap();
+        let init_count = Rc::new(Cell::new(0));
+        let mut app = OxipressoApp::new(options, root);
+        app.engine = Box::new(CountingArtifactEngine {
+            init_count: Rc::clone(&init_count),
+            artifact: two_page_pdf_artifact(),
+        });
+        app.initialize().unwrap();
+        assert_eq!(init_count.get(), 1);
+
+        app.handle_editor_line("(rescan)").unwrap();
+        assert_eq!(
+            init_count.get(),
+            2,
+            "rescan must force exactly one full rebuild"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
     struct FailingDiagnosticEngine {
         diagnostics: Vec<Diagnostic>,
     }
