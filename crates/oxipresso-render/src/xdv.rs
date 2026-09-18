@@ -670,7 +670,7 @@ fn parse_color_special(text: &str) -> Option<ColorSpecial> {
                     let (r, g, b) = hsb_to_rgb(values[0], values[1], values[2]);
                     (channel(r) << 24) | (channel(g) << 16) | (channel(b) << 8) | 0xff
                 }
-                "gray" if values.len() >= 1 => {
+                "gray" if !values.is_empty() => {
                     let level = channel(values[0]);
                     (level << 24) | (level << 16) | (level << 8) | 0xff
                 }

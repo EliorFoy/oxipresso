@@ -1030,7 +1030,7 @@ mod tests {
             };
             let bad_result = bad_engine.initialize(&bad_root, &mut bad_vfs);
             assert!(
-                !(matches!(bad_result, Ok(_)) && bad_engine.output_document().is_some()),
+                !(bad_result.is_ok() && bad_engine.output_document().is_some()),
                 "a missing \\input must not produce a successful artifact"
             );
 
