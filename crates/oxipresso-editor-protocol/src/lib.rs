@@ -728,4 +728,37 @@ mod tests {
             r#"["append-lines","out","first","second"]"#
         );
     }
+
+    #[test]
+    fn sexp_escapes_engine_text_specials() {
+        // Engine log/stdout text is full of parens, quotes, backslashes and
+        // newlines (TeX's per-char file-open echo, file paths, error messages).
+        // The sexp escaper must quote it and escape the control chars while
+        // leaving parens literal (they are harmless inside a quoted string).
+        let msg = EditorMessage::Append {
+            buffer: InfoBuffer::Out,
+            text: "x\ty(z)\"w\\v\n".to_string(),
+        };
+        assert_eq!(
+            serialize_message(&msg, WireProtocol::Sexp),
+            r#"(append out "x\ty(z)\"w\\v\n")"#
+        );
+    }
+
+    #[test]
+    fn sexp_parser_reads_escaped_text_with_parens() {
+        // The other half of the wire: a quoted string containing an escaped
+        // quote, an escaped backslash, a \n escape, and literal parens must
+        // parse back to the exact bytes — critically, the inner `)` must NOT
+        // terminate the enclosing list early.
+        let cmd = parse_command(r#"(open "p.tex" "a\n(b)c\"d\\e")"#, WireProtocol::Sexp).unwrap();
+        match cmd {
+            EditorCommand::Open { path, data, base64 } => {
+                assert_eq!(path, "p.tex");
+                assert!(!base64);
+                assert_eq!(String::from_utf8(data).unwrap(), "a\n(b)c\"d\\e");
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
 }
