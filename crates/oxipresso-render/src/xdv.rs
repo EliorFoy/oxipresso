@@ -908,7 +908,11 @@ fn char_width_dvi(
     // width in DVI units (1/65536 pt) = tfm_w * s / 2^24.
     let tfm_w = widths[index];
     let at_size = (font.size_pt * (1 << 20) as f64) as i64;
-    (tfm_w * at_size) >> 24
+    // `at_size` saturates from a corrupt XDV font size, and `tfm_w` (a real
+    // fix-word) times it can overflow i64 — which panics in debug and wraps to
+    // a bogus advance in release. Saturate the product: a nonsense size yields
+    // a huge advance that the glyph blit clips off-canvas, never a panic.
+    (tfm_w.saturating_mul(at_size)) >> 24
 }
 
 /// Minimal TFM parser extracting per-char-code widths (fix_word, 20.12 em).
@@ -1155,6 +1159,37 @@ mod tests {
         // char 0 uses width index 1 -> slot 0 carries the 0.75em width.
         assert_eq!(widths[0], 0x000C_0000);
         assert_eq!(widths[1], 0);
+    }
+
+    #[test]
+    fn char_width_dvi_saturates_on_corrupt_font_size() {
+        // A corrupt XDV font size_pt makes at_size saturate to i64::MAX; a
+        // real fix-word tfm_w * at_size then overflows i64 (debug panic) in
+        // char_width_dvi. The saturating_mul fix must return a huge-but-finite
+        // advance instead of panicking.
+        let mut fonts = HashMap::new();
+        fonts.insert(
+            1u32,
+            XdvFont {
+                id: 1,
+                native: false,
+                name: "cmr10".to_string(),
+                size_pt: 1e15,
+                design_size_pt: 10.0,
+                face_index: 0,
+                color_rgba: None,
+                extend: 1.0,
+                slant: 0.0,
+                embolden: 0.0,
+                tfm_widths: Some(vec![1_000_000i64; 400]),
+            },
+        );
+        let mut tfm = |_name: &str| -> Option<Vec<u8>> { None };
+        let w = char_width_dvi(&mut fonts, 1, 10, &mut tfm);
+        assert!(
+            w > 0,
+            "huge but finite saturated advance, no overflow panic"
+        );
     }
 
     #[test]
