@@ -280,8 +280,28 @@ fn normalize_path(path: &str) -> String {
 }
 
 fn coordinate_distance_squared(record: &SyncTexRecord, x: i32, y: i32) -> i64 {
-    let dx = i64::from(record.x) - i64::from(x);
-    let dy = i64::from(record.y) - i64::from(y);
+    let rx = i64::from(record.x);
+    let ry = i64::from(record.y);
+    let cx = i64::from(x);
+    // Horizontal: distance to the record's box span `[x, x + width]` when the
+    // width is known — a click inside a box is *on* it (0), not on whichever
+    // neighbouring record has the nearest origin corner. Vertical stays corner
+    // distance (the y orientation is not resolved for containment here). With
+    // no width this reduces to the previous squared corner distance.
+    let dx = match record.width {
+        Some(width) => {
+            let x1 = rx + i64::from(width);
+            if cx < rx {
+                rx - cx
+            } else if cx > x1 {
+                cx - x1
+            } else {
+                0
+            }
+        }
+        None => (rx - cx).abs(),
+    };
+    let dy = ry - i64::from(y);
     dx * dx + dy * dy
 }
 
@@ -402,6 +422,27 @@ g1,20:400,400\n\
         assert_eq!(hit.x, 400);
         assert_eq!(hit.y, 400);
         assert!(document.reverse_search_page_point(2, 390, 410).is_none());
+    }
+
+    #[test]
+    fn reverse_search_prefers_box_containing_the_click() {
+        // Record A spans x=[100,300] (width 200) on line 10; record B has no
+        // width and sits at x=280 on line 20. A click at x=250 is INSIDE A's
+        // box, so it must resolve to A even though B's origin corner (280) is
+        // horizontally nearer — the old nearest-corner metric wrongly chose B.
+        let document = parse_text(
+            "SyncTeX Version:1\n\
+Output:main.pdf\n\
+Input:1:main.tex\n\
+Content:\n\
+{1\n\
+g1,10:100,200,200,0\n\
+g1,20:280,200\n\
+}\n",
+        )
+        .unwrap();
+        let hit = document.reverse_search_page_point(1, 250, 200).unwrap();
+        assert_eq!(hit.line, 10, "click inside a known box must resolve to it");
     }
 
     #[test]
