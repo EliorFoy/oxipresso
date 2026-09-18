@@ -65,8 +65,10 @@ impl ExternalEngine {
         fs::create_dir_all(&build_dir)?;
         materialize_snapshot_inputs(io, &build_dir)?;
         let root_bytes = read_root_bytes(root, io)?;
-        let temp_root = build_dir.join(&root.root_name);
-        fs::write(&temp_root, root_bytes)?;
+        // root_name can carry a subdirectory (e.g. "src/main.tex"), so create the
+        // parent first - matching materialize_snapshot_inputs; a bare fs::write
+        // into a missing subdir fails and aborts the whole external compile.
+        let temp_root = write_into_build_dir(&build_dir, &root.root_name, &root_bytes)?;
 
         let texinputs = texinputs_for(root, &build_dir);
         let output = Command::new(&self.config.command)
@@ -216,6 +218,14 @@ fn unique_build_dir() -> Result<PathBuf> {
     Ok(std::env::temp_dir().join(format!("oxipresso-{}-{now}", std::process::id())))
 }
 
+fn write_into_build_dir(build_dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let target = build_dir.join(name);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&target, bytes)?;
+    Ok(target)
+}
 fn read_synctex_artifact(build_dir: &Path, stem: &str) -> Result<Option<SyncTexArtifact>> {
     let gz_path = build_dir.join(format!("{stem}.synctex.gz"));
     if gz_path.exists() {
@@ -306,6 +316,18 @@ mod tests {
     use super::*;
     use oxipresso_engine_api::EngineIo;
     use std::{env, fs};
+
+    #[test]
+    fn write_into_build_dir_creates_missing_parent_dirs() {
+        // A root whose name carries a subdirectory ("sub/main.tex") used to fail
+        // the bare fs::write and abort the external compile; the helper must
+        // create the parent. build_dir itself is not pre-created here.
+        let dir = unique_build_dir().unwrap();
+        let written = write_into_build_dir(&dir, "sub/main.tex", b"hello").unwrap();
+        assert!(written.exists(), "subdir root file must be created");
+        assert_eq!(fs::read_to_string(&written).unwrap(), "hello");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     struct MemoryIo {
         bytes: Vec<u8>,
