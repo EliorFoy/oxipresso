@@ -120,6 +120,10 @@ cargo check -p oxipresso-cli --features gui
 
 # With everything
 cargo check -p oxipresso-cli --features "gui,freetype,pdfium"
+
+# Quality bar (both are expected clean)
+cargo fmt --all --check
+cargo clippy --workspace --all-targets
 ```
 
 ## Real engine setup
