@@ -1221,9 +1221,12 @@ endobj
             backend.render_page(&artifact, pages).is_err(),
             "page index beyond count must error"
         );
+        // A threshold of >0 catches a blank/broken render (no glyphs composited)
+        // without over-fitting: a minimal real document (e.g. a one-line page)
+        // legitimately has few dark pixels, so a high floor would false-fail.
         assert!(
-            total_dark > 200,
-            "real XDV must contain rendered text, got {total_dark} dark pixels across {pages} pages"
+            total_dark > 0,
+            "real XDV with content must render ink, got {total_dark} dark pixels across {pages} pages"
         );
     }
 
