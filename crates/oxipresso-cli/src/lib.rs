@@ -433,7 +433,20 @@ impl OxipressoApp {
             EditorCommand::NextPage => self.viewer.next_page(),
             EditorCommand::Crop => self.viewer.toggle_crop(),
             EditorCommand::Invert => self.viewer.toggle_invert(),
-            EditorCommand::Theme { .. } => self.viewer.themed = true,
+            EditorCommand::Theme { bg, fg } => {
+                // TeXpresso (main.c) converts the editor's bg/fg floats to an
+                // 0xRRGGBB canvas background + default ink and repaints. Apply
+                // it to the renderer; convert_color is clamp(0..1)*255.
+                self.viewer.themed = true;
+                let to_rgb = |c: &[f32; 3]| {
+                    [
+                        (c[0].clamp(0.0, 1.0) * 255.0) as u8,
+                        (c[1].clamp(0.0, 1.0) * 255.0) as u8,
+                        (c[2].clamp(0.0, 1.0) * 255.0) as u8,
+                    ]
+                };
+                self.renderer.set_theme(to_rgb(bg), to_rgb(fg));
+            }
             EditorCommand::SynctexForward { path, line } => self.apply_synctex_forward(path, *line),
             _ => {}
         }
@@ -2447,6 +2460,36 @@ endobj
         }
         // The session is still alive after the bad lines: a valid command works.
         assert!(app.handle_editor_line("(pause)").is_ok());
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn theme_command_sets_themed_and_applies_colors() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("oxi-cli-theme-{nonce}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\begin{document}x\\end{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file: root_file.clone(),
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+        // Must not panic; must mark the viewer themed (colors converted + sent
+        // to the renderer). The pixel-level effect is tested in oxipresso-render.
+        app.handle_editor_line(r"(theme (0.0 0.0 1.0) (1.0 0.0 0.0))")
+            .unwrap();
+        assert!(app.viewer_state().themed, "theme command should set themed");
         fs::remove_dir_all(temp_dir).unwrap();
     }
 }

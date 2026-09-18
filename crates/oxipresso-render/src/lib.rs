@@ -65,6 +65,19 @@ impl AutoRenderBackend {
         self.xdv_glyphs = Some(backend);
         self
     }
+
+    /// Apply an editor theme (page background + default ink) to the real-glyph
+    /// XDV renderer. A no-op without the `freetype` backend (placeholder
+    /// rendering has no configurable page background).
+    #[cfg(feature = "freetype")]
+    pub fn set_theme(&self, background: [u8; 3], foreground: [u8; 3]) {
+        if let Some(backend) = self.xdv_glyphs.as_ref() {
+            backend.set_theme(background, foreground);
+        }
+    }
+
+    #[cfg(not(feature = "freetype"))]
+    pub fn set_theme(&self, _background: [u8; 3], _foreground: [u8; 3]) {}
 }
 
 impl std::fmt::Debug for AutoRenderBackend {

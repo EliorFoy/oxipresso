@@ -62,6 +62,13 @@ pub struct XdvGlyphRenderBackend {
     /// matches a previous rebuild are reused without re-rendering, which is
     /// the renderer-side half of the incremental rebuild model.
     page_cache: RefCell<HashMap<u64, RenderedPage>>,
+    /// Page background (canvas fill) and default ink color, RGB, driven by the
+    /// editor's `(theme bg fg)` command (TeXpresso paints the canvas with
+    /// `background_color` and uses `foreground_color` as the default ink). The
+    /// defaults reproduce the previous hardcoded white-background / black-ink
+    /// rendering; `set_theme` changes them and clears the page cache.
+    background: std::cell::Cell<[u8; 3]>,
+    foreground: std::cell::Cell<[u8; 3]>,
     #[cfg(test)]
     render_misses: std::cell::Cell<usize>,
 }
@@ -120,9 +127,22 @@ impl XdvGlyphRenderBackend {
             image_cache: RefCell::new(HashMap::new()),
             parsed: RefCell::new(None),
             page_cache: RefCell::new(HashMap::new()),
+            background: std::cell::Cell::new([255, 255, 255]),
+            foreground: std::cell::Cell::new([0, 0, 0]),
             #[cfg(test)]
             render_misses: std::cell::Cell::new(0),
         }
+    }
+
+    /// Set the page background and default ink colors (editor `(theme bg fg)`),
+    /// clearing the page cache so already-rendered pages are repainted.
+    pub fn set_theme(&self, background: [u8; 3], foreground: [u8; 3]) {
+        if self.background.get() == background && self.foreground.get() == foreground {
+            return;
+        }
+        self.background.set(background);
+        self.foreground.set(foreground);
+        self.page_cache.borrow_mut().clear();
     }
 
     fn ensure_library(&self) -> Result<ft::FT_Library> {
@@ -651,7 +671,20 @@ impl RenderBackend for XdvGlyphRenderBackend {
         let scale = self.px_per_pt;
         let width = (page_data.width_pt * scale).round().max(1.0) as u32;
         let height = (page_data.height_pt * scale).round().max(1.0) as u32;
-        let mut canvas = vec![255u8; width as usize * height as usize * 4];
+        // Editor theme colors (default white background / black ink): the page
+        // is painted with the background and uncolored glyphs/rules use the
+        // foreground as their ink, matching TeXpresso's background_color /
+        // foreground_color renderer config.
+        let [bg_r, bg_g, bg_b] = self.background.get();
+        let [fg_r, fg_g, fg_b] = self.foreground.get();
+        let foreground_packed = ((fg_r as u32) << 16) | ((fg_g as u32) << 8) | (fg_b as u32);
+        let mut canvas = vec![0u8; width as usize * height as usize * 4];
+        for pixel in canvas.chunks_exact_mut(4) {
+            pixel[0] = bg_r;
+            pixel[1] = bg_g;
+            pixel[2] = bg_b;
+            pixel[3] = 255;
+        }
 
         // DVI origin: one inch from the top-left corner, y increases downward.
         let origin_px = 72.0 * scale;
@@ -677,9 +710,9 @@ impl RenderBackend for XdvGlyphRenderBackend {
                                 continue;
                             }
                             let offset = (row as usize * width as usize + column as usize) * 4;
-                            canvas[offset] = 0;
-                            canvas[offset + 1] = 0;
-                            canvas[offset + 2] = 0;
+                            canvas[offset] = fg_r;
+                            canvas[offset + 1] = fg_g;
+                            canvas[offset + 2] = fg_b;
                             canvas[offset + 3] = 255;
                         }
                     }
@@ -694,8 +727,8 @@ impl RenderBackend for XdvGlyphRenderBackend {
                     };
                     let size_px = (font.size_pt * scale).round().max(1.0) as u32;
                     // Element color (special-driven) wins over the font's own
-                    // XDV color; both default to black.
-                    let rgba = color_rgba.or(font.color_rgba).unwrap_or(0x000000ff) | 0xff;
+                    // XDV color; both default to the theme foreground (ink).
+                    let rgba = color_rgba.or(font.color_rgba).unwrap_or(foreground_packed) | 0xff;
                     for glyph in glyphs {
                         let Some(bitmap) = self.rasterize(font, glyph.code, size_px) else {
                             continue;
@@ -1038,6 +1071,78 @@ mod tests {
             "past the far edge white"
         );
         assert_eq!(at(5, 5), [255, 255, 255, 255], "corner stays white");
+    }
+
+    /// One-page XDV with a `set_rule` (50pt square at the origin pen), used to
+    /// exercise theme background (untouched corner) and foreground (the rule).
+    fn rule_xdv() -> Vec<u8> {
+        let pagesize = b"pdf:pagesize width 614.295pt height 794.96999pt";
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]); // PRE, XDV id 7
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]); // BOP
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        stream.extend_from_slice(&[239u8, pagesize.len() as u8]);
+        stream.extend_from_slice(pagesize);
+        stream.extend_from_slice(&[132u8]); // SET_RULE height width
+        stream.extend_from_slice(&(50 * 65536i32).to_be_bytes()); // height 50pt
+        stream.extend_from_slice(&(50 * 65536i32).to_be_bytes()); // width 50pt
+        stream.extend_from_slice(&[140u8]); // EOP
+        stream.extend_from_slice(&[248u8]); // POST
+        stream.extend_from_slice(&[0u8; 24]);
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&[249u8]); // POST_POST
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        stream.push(7);
+        stream.extend_from_slice(&[223u8; 8]);
+        stream
+    }
+
+    #[test]
+    fn theme_colors_paint_background_and_ink() {
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: rule_xdv(),
+            source_name: Some("theme.xdv".to_string()),
+        };
+        let backend = XdvGlyphRenderBackend::new(Box::new(NullFonts));
+        let at = |page: &RenderedPage, px: usize, py: usize| -> [u8; 4] {
+            let o = (py * page.width as usize + px) * 4;
+            [
+                page.pixels_rgba[o],
+                page.pixels_rgba[o + 1],
+                page.pixels_rgba[o + 2],
+                page.pixels_rgba[o + 3],
+            ]
+        };
+        // Default theme: white background, black ink (unchanged legacy look).
+        let page = backend.render_page(&artifact, 0).unwrap();
+        assert_eq!(at(&page, 5, 5), [255, 255, 255, 255], "default bg white");
+        assert_eq!(
+            at(&page, 120, 120),
+            [0, 0, 0, 255],
+            "default ink black rule"
+        );
+
+        // Editor theme: blue background, red ink. set_theme must repaint cached
+        // pages, so the second render reflects it without a new backend.
+        backend.set_theme([10, 20, 30], [200, 10, 10]);
+        let page = backend.render_page(&artifact, 0).unwrap();
+        assert_eq!(
+            at(&page, 5, 5),
+            [10, 20, 30, 255],
+            "background painted with theme bg"
+        );
+        assert_eq!(
+            at(&page, 120, 120),
+            [200, 10, 10, 255],
+            "rule (default ink) painted with theme fg"
+        );
     }
 
     #[test]
