@@ -690,4 +690,24 @@ mod tests {
             r#"["lookup-file","read","promised","missing.tex"]"#
         );
     }
+
+    #[test]
+    fn serializes_synctex_reverse_notification() {
+        // The engine-to-editor click-to-source notification: the exact wire
+        // string an editor parses to jump to a source location. A field-order
+        // or quoting regression here would silently break every editor.
+        let msg = EditorMessage::Synctex {
+            path: "dir/main.tex".to_string(),
+            line: 12,
+            column: 3,
+        };
+        assert_eq!(
+            serialize_message(&msg, WireProtocol::Sexp),
+            r#"(synctex "dir/main.tex" 12 3)"#
+        );
+        assert_eq!(
+            serialize_message(&msg, WireProtocol::Json),
+            r#"["synctex","dir/main.tex",12,3]"#
+        );
+    }
 }
