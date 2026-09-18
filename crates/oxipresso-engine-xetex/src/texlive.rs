@@ -304,6 +304,41 @@ mod tests {
     }
 
     #[test]
+    fn resolve_invalidates_stale_cached_hit_when_file_disappears() {
+        // A cached "hit" stores an absolute path; if a TeX update removes that
+        // file between runs, resolve must re-read, detect it's gone, drop the
+        // stale hit, and degrade gracefully — never panic or serve stale data.
+        let dir = unique_dir("oxi-kpse-stale");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("gone.sty");
+        std::fs::write(&target, b"content").unwrap();
+        let script = fake_kpsewhich(&dir, &target);
+        let cache = dir.join("cache.txt");
+        let _ = std::fs::remove_file(&cache);
+
+        let mut resolver = KpsewhichResolver::from_program(&script)
+            .unwrap()
+            .with_cache_path(&cache);
+        assert_eq!(
+            resolver.resolve("gone.sty", FileKind::Tex).unwrap(),
+            b"content"
+        );
+        assert_eq!(resolver.cache_stats(), (1, 0), "one fresh hit cached");
+
+        // Simulate the distribution updating and removing the resolved file.
+        std::fs::remove_file(&target).unwrap();
+        assert!(
+            resolver.resolve("gone.sty", FileKind::Tex).is_none(),
+            "stale hit must not be served and must not panic"
+        );
+        let (hits, misses) = resolver.cache_stats();
+        assert_eq!(hits, 0, "the vanished hit is dropped from the cache");
+        assert_eq!(misses, 1, "the re-resolution miss is recorded");
+        drop(resolver);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn negative_cache_avoids_respawning_for_missing_files() {
         let dir = unique_dir("oxi-kpse-miss");
         std::fs::create_dir_all(&dir).unwrap();
