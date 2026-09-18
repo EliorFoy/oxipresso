@@ -237,6 +237,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("oxipresso-platform-watch-test-{nonce}"))
+        std::env::temp_dir().join(format!(
+            "oxipresso-platform-watch-test-{}-{nonce}",
+            std::process::id()
+        ))
     }
 }
