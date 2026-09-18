@@ -826,6 +826,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn input_indices_are_stable_across_rebuilds() {
+        // The editor maps input-file index <-> path; indices must be assigned
+        // once and stay fixed for the VFS lifetime, so a rebuild (which reopens
+        // the same files) neither re-emits nor renumbers them, and a newly read
+        // file takes the next monotonic index.
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("main.tex", b"a".to_vec());
+        vfs.open_editor("inc.tex", b"b".to_vec());
+        let open = |vfs: &mut VirtualFileSystem, path: &str| {
+            if let OpenResult::Opened { handle, .. } = vfs.open_read(path, FileKind::Tex).unwrap() {
+                vfs.close(handle).unwrap();
+            }
+        };
+        open(&mut vfs, "main.tex");
+        open(&mut vfs, "inc.tex");
+        let initial = vfs.take_input_events();
+        assert_eq!(
+            initial,
+            vec![
+                InputEvent {
+                    index: 0,
+                    path: "main.tex".to_string()
+                },
+                InputEvent {
+                    index: 1,
+                    path: "inc.tex".to_string()
+                },
+            ]
+        );
+        // Rebuild: reopening existing inputs emits nothing and renumbers nothing.
+        open(&mut vfs, "main.tex");
+        open(&mut vfs, "inc.tex");
+        assert!(
+            vfs.take_input_events().is_empty(),
+            "reopening existing input files must not re-emit or renumber indices"
+        );
+        // A newly read file continues the monotonic sequence; existing stay.
+        vfs.open_editor("new.tex", b"c".to_vec());
+        open(&mut vfs, "new.tex");
+        assert_eq!(
+            vfs.take_input_events(),
+            vec![InputEvent {
+                index: 2,
+                path: "new.tex".to_string()
+            }]
+        );
+    }
+
     fn unique_temp_dir() -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
