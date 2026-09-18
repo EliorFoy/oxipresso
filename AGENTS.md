@@ -65,6 +65,7 @@ Implemented crates:
   - Implements editor-backed virtual file system.
   - Supports path normalization using forward slashes.
   - Supports `open`, `open-base64`, `close`, `change`, `change-lines`, `change-range`.
+  - `open-base64` decodes with the base64 `STANDARD` engine (canonical alphabet **with required `=` padding**); malformed or unpadded payloads are rejected with an error, never a panic or a silent mis-decode (tested by `open_base64_command_decodes_payload_or_errors`).
   - Implements UTF-16 code unit to UTF-8 byte offset conversion for `change-range`.
   - Tracks promised files.
   - Opening a promised file through the editor now reports a change at offset 0 so promised-file fulfillment can trigger a rebuild.
