@@ -491,21 +491,29 @@ fn apply_slant(bitmap: GrayBitmap, slant: f64) -> GrayBitmap {
     if slant.abs() < 0.01 || bitmap.width == 0 || bitmap.height == 0 {
         return bitmap;
     }
-    let shift_per_row = slant; // positive slant shifts top rows to the right
-    let max_shift = (shift_per_row * (bitmap.height as f64 - 1.0)).ceil() as i64;
-    let extra = max_shift.max(0);
-    let new_width = bitmap.width + extra as u32;
-    let mut pixels = vec![0u8; (new_width * bitmap.height) as usize];
+    // x' = x + slant*y, y growing upward from the baseline (bottom row). The
+    // extreme shift is at the top row; the baseline row has shift 0. Allocate a
+    // canvas spanning [min_shift, max_shift] so neither the right overhang of a
+    // positive slant nor the left overhang of a negative slant is clipped.
+    let extreme = slant * (bitmap.height as f64 - 1.0);
+    let (shift_min, shift_max) = if extreme >= 0.0 {
+        (0i64, extreme.ceil() as i64)
+    } else {
+        (extreme.floor() as i64, 0i64)
+    };
+    let pad_left = -shift_min; // room on the left for negative slant
+    let new_width = (bitmap.width as i64 + (shift_max - shift_min)) as u32;
+    let mut pixels = vec![0u8; (new_width as usize) * (bitmap.height as usize)];
     for row_from_top in 0..bitmap.height {
         let baseline_distance = (bitmap.height - 1 - row_from_top) as f64;
-        let shift = (shift_per_row * baseline_distance).round() as i64;
-        let dest_x = shift + extra; // extra shifts everything right for positive slant
+        let shift = (slant * baseline_distance).round() as i64;
+        let dest_base = shift + pad_left; // in [0, shift_max - shift_min]
         for col in 0..bitmap.width {
             let source = bitmap.pixels[(row_from_top * bitmap.width + col) as usize];
             if source == 0 {
                 continue;
             }
-            let dest = dest_x + col as i64;
+            let dest = dest_base + col as i64;
             if dest >= 0 && (dest as u32) < new_width {
                 let index = row_from_top as usize * new_width as usize + dest as usize;
                 pixels[index] = source;
@@ -513,7 +521,9 @@ fn apply_slant(bitmap: GrayBitmap, slant: f64) -> GrayBitmap {
         }
     }
     GrayBitmap {
-        left: bitmap.left - extra,
+        // Baseline (shift 0) content sits at dest_base = pad_left; offset the
+        // bearing by -pad_left so the glyph's baseline stays at its original x.
+        left: bitmap.left - pad_left,
         top: bitmap.top,
         width: new_width,
         height: bitmap.height,
@@ -1159,5 +1169,79 @@ mod tests {
             [255, 128, 128],
             "transparent pixel must not darken the color (premultiplied downscale)"
         );
+    }
+
+    #[test]
+    fn extend_widens_and_scales_left() {
+        let bm = GrayBitmap {
+            left: 3,
+            top: 7,
+            width: 2,
+            height: 1,
+            pixels: vec![200, 100],
+        };
+        let out = apply_extend(bm, 2.0);
+        assert_eq!(out.width, 4);
+        assert_eq!(out.pixels, vec![200, 200, 100, 100]);
+        assert_eq!(out.left, 6); // left bearing scaled by the extend factor
+        assert_eq!(out.top, 7);
+    }
+
+    #[test]
+    fn embolden_dilates_to_square_footprint() {
+        // strength 0.125 => radius round(0.125*8) = 1 => 1px grows to a 3x3 block.
+        let bm = GrayBitmap {
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![255],
+        };
+        let out = apply_embolden(bm, 0.125);
+        assert_eq!(out.width, 3);
+        assert_eq!(out.height, 3);
+        assert!(out.pixels.iter().all(|&v| v == 255));
+        assert_eq!(out.left, -1);
+        assert_eq!(out.top, 1);
+    }
+
+    #[test]
+    fn slant_shears_right_without_dropping_ink() {
+        // A solid 2x3 glyph sheared with slant 1.0: the top rows shift right.
+        // A correct shear preserves all ink (a wider canvas accommodates it).
+        let bm = GrayBitmap {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 3,
+            pixels: vec![200, 200, 200, 200, 200, 200],
+        };
+        let out = apply_slant(bm, 1.0);
+        let sum: u32 = out.pixels.iter().map(|&v| v as u32).sum();
+        assert_eq!(
+            sum,
+            6 * 200,
+            "positive slant must not clip away slanted-overhang pixels (got width {})",
+            out.width
+        );
+    }
+
+    #[test]
+    fn slant_negative_preserves_ink() {
+        let bm = GrayBitmap {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 3,
+            pixels: vec![200, 200, 200, 200, 200, 200],
+        };
+        let out = apply_slant(bm, -1.0);
+        let sum: u32 = out.pixels.iter().map(|&v| v as u32).sum();
+        assert_eq!(
+            sum,
+            6 * 200,
+            "negative slant must not clip the left overhang"
+        );
+        assert_eq!(out.left, -2); // canvas grows 2px to the left, baseline kept at original x
     }
 }
