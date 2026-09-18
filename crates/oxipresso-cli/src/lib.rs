@@ -400,7 +400,17 @@ impl OxipressoApp {
     }
 
     pub fn handle_editor_line(&mut self, line: &str) -> Result<Vec<EditorMessage>, String> {
-        let command = parse_command(line, self.options.protocol).map_err(|e| e.to_string())?;
+        // Match TeXpresso (src/frontend/editor.c): a malformed or unknown
+        // command is reported to stderr and skipped -- the editor session keeps
+        // running rather than aborting on a single bad line. Only genuine
+        // engine/VFS faults from `handle_command` remain fatal to the run.
+        let command = match parse_command(line, self.options.protocol) {
+            Ok(command) => command,
+            Err(error) => {
+                eprintln!("[command] {error}");
+                return Ok(Vec::new());
+            }
+        };
         self.handle_command(command)
     }
 
@@ -2394,6 +2404,49 @@ endobj
             ),
             "[\"truncate\",\"log\",0]"
         );
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_or_malformed_editor_command_is_skipped_not_fatal() {
+        // TeXpresso (src/frontend/editor.c) reports bad commands to stderr and
+        // keeps running. The replica must tolerate them too, not abort the
+        // editor session on a single unparseable line.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("oxi-cli-tolerate-{nonce}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\begin{document}x\\end{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file: root_file.clone(),
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+        for bad in [
+            "(frobnicate 1 2)",
+            "(open)",
+            "(open \"a\" \"b\" \"c\")",
+            "not a command",
+            "(((",
+            "(change \"a\" x y z)",
+        ] {
+            let messages = app
+                .handle_editor_line(bad)
+                .unwrap_or_else(|e| panic!("session aborted on {bad:?}: {e}"));
+            assert!(messages.is_empty(), "bad input {bad:?} produced messages");
+        }
+        // The session is still alive after the bad lines: a valid command works.
+        assert!(app.handle_editor_line("(pause)").is_ok());
         fs::remove_dir_all(temp_dir).unwrap();
     }
 }
