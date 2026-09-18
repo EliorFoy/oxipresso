@@ -618,6 +618,80 @@ mod tests {
     }
 
     #[test]
+    fn change_lines_matches_texpresso_line_semantics() {
+        // Source-verified against TeXpresso main.c (BASE_LINE): line offsets are
+        // 0-based newline counts; `remove` consumes that many newlines
+        // inclusive; dropping past an unterminated final line is tolerated
+        // (clamps to EOF) but two or more short is an error.
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("m.tex", b"a\nb\nc\n".to_vec());
+        vfs.apply_change(
+            "m.tex",
+            &Change::Lines {
+                offset: 0,
+                remove: 2,
+                data: b"X\n".to_vec(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vfs.lookup("m.tex").unwrap().edit_data.as_deref(),
+            Some(&b"X\nc\n"[..]),
+            "multi-line replace consumes each line's newline"
+        );
+
+        let mut unterminated = VirtualFileSystem::new();
+        unterminated.open_editor("m.tex", b"a\nb".to_vec());
+        unterminated
+            .apply_change(
+                "m.tex",
+                &Change::Lines {
+                    offset: 1,
+                    remove: 1,
+                    data: b"B".to_vec(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            unterminated.lookup("m.tex").unwrap().edit_data.as_deref(),
+            Some(&b"a\nB"[..]),
+            "removing 1 unterminated final line clamps to EOF (tolerated)"
+        );
+
+        let mut too_many = VirtualFileSystem::new();
+        too_many.open_editor("m.tex", b"a\nb".to_vec());
+        assert!(
+            too_many
+                .apply_change(
+                    "m.tex",
+                    &Change::Lines {
+                        offset: 1,
+                        remove: 2,
+                        data: b"B".to_vec(),
+                    },
+                )
+                .is_err(),
+            "remove two short of an unterminated tail is an error"
+        );
+
+        let mut bad_offset = VirtualFileSystem::new();
+        bad_offset.open_editor("m.tex", b"a\n".to_vec());
+        assert!(
+            bad_offset
+                .apply_change(
+                    "m.tex",
+                    &Change::Lines {
+                        offset: 5,
+                        remove: 1,
+                        data: b"x".to_vec(),
+                    },
+                )
+                .is_err(),
+            "line offset past the last line is an error"
+        );
+    }
+
+    #[test]
     fn applies_utf16_range_change() {
         let mut vfs = VirtualFileSystem::new();
         vfs.open_editor("main.tex", "a\n😀b\n".as_bytes().to_vec());
