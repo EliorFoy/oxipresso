@@ -147,12 +147,16 @@ impl KpsewhichResolver {
         )
     }
 
-    /// Runs one `kpsewhich` invocation for `path`.
+    /// Runs one `kpsewhich` invocation for `path`. Each resolution is flushed
+    /// to the on-disk cache immediately, so a cold build interrupted by a
+    /// crash or Ctrl-C still preserves everything resolved up to that point
+    /// (the next warm run skips those process spawns).
     fn run_kpsewhich(&mut self, path: &str) -> Option<Vec<u8>> {
         let output = Command::new(&self.program).arg(path).output().ok()?;
         if !output.status.success() {
             self.misses.insert(path.to_string());
             self.cache_dirty = true;
+            self.save_cache();
             return None;
         }
         let resolved = String::from_utf8_lossy(&output.stdout)
@@ -164,11 +168,13 @@ impl KpsewhichResolver {
             Ok(bytes) => {
                 self.hits.insert(path.to_string(), resolved);
                 self.cache_dirty = true;
+                self.save_cache();
                 Some(bytes)
             }
             Err(_) => {
                 self.misses.insert(path.to_string());
                 self.cache_dirty = true;
+                self.save_cache();
                 None
             }
         }
@@ -258,6 +264,31 @@ mod tests {
         assert_eq!(hits, 1);
         drop(resolver);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cache_flushes_during_run_before_drop() {
+        let dir = std::env::temp_dir().join(format!("oxi-kpse-flush-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("flushme.sty");
+        std::fs::write(&target, b"content").unwrap();
+        let script = fake_kpsewhich(&dir, &target);
+        let cache = dir.join("cache.txt");
+        let _ = std::fs::remove_file(&cache);
+
+        let mut resolver = KpsewhichResolver::from_program(&script)
+            .unwrap()
+            .with_cache_path(&cache);
+        resolver.resolve("flushme.sty", FileKind::Tex).unwrap();
+        // Without dropping, the cache must already be on disk so an interrupted
+        // run still keeps resolved entries.
+        assert!(cache.is_file(), "cache must be flushed during the run");
+        let text = std::fs::read_to_string(&cache).unwrap();
+        assert!(
+            text.contains("flushme.sty"),
+            "flushed cache should include the just-resolved file, got {text:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
