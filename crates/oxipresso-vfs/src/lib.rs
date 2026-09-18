@@ -646,6 +646,25 @@ mod tests {
     }
 
     #[test]
+    fn utf16_column_mapping_handles_surrogate_boundaries() {
+        // "a😀b": UTF-16 columns map to byte offsets, counting the astral char
+        // as its 2 surrogate units. A column landing INSIDE the surrogate pair
+        // (col 2) is rejected, not silently snapped to a byte boundary — the
+        // existing range test only exercises the valid (non-splitting) path.
+        let data = "a😀b".as_bytes(); // a@0, emoji@1..4 (4 bytes), b@5, len 6
+        assert_eq!(utf16_to_utf8_offset(data, 0), Some(0));
+        assert_eq!(utf16_to_utf8_offset(data, 1), Some(1), "start of emoji");
+        assert_eq!(
+            utf16_to_utf8_offset(data, 2),
+            None,
+            "mid-surrogate rejected"
+        );
+        assert_eq!(utf16_to_utf8_offset(data, 3), Some(5), "start of b");
+        assert_eq!(utf16_to_utf8_offset(data, 4), Some(6), "end of string");
+        assert_eq!(utf16_to_utf8_offset(data, 5), None, "beyond end");
+    }
+
+    #[test]
     fn promised_open_reports_promised() {
         let mut vfs = VirtualFileSystem::new();
         vfs.ensure_file("missing.tex").promised = true;
