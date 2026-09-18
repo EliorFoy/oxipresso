@@ -1286,6 +1286,38 @@ g1,20:65536000,65536000\n\
     }
 
     #[test]
+    fn stream_line_mode_joins_line_split_across_chunks() {
+        // A line split across two stdout events (engine flushed mid-line) must
+        // accumulate into one logical line before splitting; per-chunk splitting
+        // would wrongly emit "c" and fragment "abc".
+        let events = vec![
+            OutputEvent {
+                path: "stdout".to_string(),
+                offset: 0,
+                data: b"ab".to_vec(),
+            },
+            OutputEvent {
+                path: "stdout".to_string(),
+                offset: 2,
+                data: b"c\nde".to_vec(), // completes "abc", starts partial "de"
+            },
+        ];
+        let messages = stream_messages_from_events(events, true);
+        let out_lines = messages.iter().find_map(|message| match message {
+            EditorMessage::AppendLines {
+                buffer: InfoBuffer::Out,
+                lines,
+            } => Some(lines.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            out_lines,
+            Some(vec!["abc".to_string()]),
+            "chunked line must rejoin to 'abc' and withhold trailing 'de'"
+        );
+    }
+
+    #[test]
     fn line_output_diagnostics_use_line_messages() {
         let temp_dir = unique_temp_dir();
         fs::create_dir_all(&temp_dir).unwrap();
