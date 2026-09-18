@@ -326,8 +326,9 @@ fn stream_messages_from_events(events: Vec<OutputEvent>, line_output: bool) -> V
             } else {
                 continue;
             };
+            let pos = event.offset;
             if let Ok(text) = String::from_utf8(event.data) {
-                messages.push(EditorMessage::Append { buffer, text });
+                messages.push(EditorMessage::Append { buffer, pos, text });
             }
         }
     }
@@ -695,6 +696,7 @@ impl OxipressoApp {
                 },
                 EditorMessage::Append {
                     buffer: InfoBuffer::Out,
+                    pos: 0,
                     text,
                 },
                 EditorMessage::Flush,
@@ -723,6 +725,7 @@ impl OxipressoApp {
                 },
                 EditorMessage::Append {
                     buffer: InfoBuffer::Out,
+                    pos: 0,
                     text: error,
                 },
                 EditorMessage::Flush,
@@ -2349,6 +2352,7 @@ endobj
                 EditorMessage::Append {
                     buffer: InfoBuffer::Out,
                     text,
+                    ..
                 } => Some(text.clone()),
                 _ => None,
             })
@@ -2363,6 +2367,7 @@ endobj
                 EditorMessage::Append {
                     buffer: InfoBuffer::Log,
                     text,
+                    ..
                 } => Some(text.clone()),
                 _ => None,
             })
@@ -2437,6 +2442,7 @@ endobj
                 EditorMessage::Append {
                     buffer: InfoBuffer::Out,
                     text,
+                    ..
                 } => Some(text.clone()),
                 _ => None,
             })

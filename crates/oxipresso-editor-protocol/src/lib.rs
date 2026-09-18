@@ -125,6 +125,10 @@ pub enum EditorMessage {
     },
     Append {
         buffer: InfoBuffer,
+        /// Byte offset within the info buffer where this chunk starts, matching
+        /// TeXpresso `editor_append`'s `(append <buffer> <pos> "<text>")` arity
+        /// (0 after a fresh truncate; the stream cursor for partial chunks).
+        pos: usize,
         text: String,
     },
     TruncateLines {
@@ -228,10 +232,11 @@ fn message_fields(message: &EditorMessage) -> Vec<Field> {
                 Field::Number(*size),
             ]
         }
-        EditorMessage::Append { buffer, text } => {
+        EditorMessage::Append { buffer, pos, text } => {
             vec![
                 Field::Symbol("append"),
                 Field::Symbol(buffer_name(*buffer)),
+                Field::Number(*pos),
                 Field::String(text.clone()),
             ]
         }
@@ -737,6 +742,26 @@ mod tests {
     }
 
     #[test]
+    fn serializes_append_with_buffer_offset_in_both_protocols() {
+        // TeXpresso's byte-mode append carries the buffer write offset:
+        // `(append <buffer> <pos> "<text>")`. A non-zero pos (partial streamed
+        // log chunks) must be serialized in both protocols.
+        let msg = EditorMessage::Append {
+            buffer: InfoBuffer::Log,
+            pos: 128,
+            text: "rude output".to_string(),
+        };
+        assert_eq!(
+            serialize_message(&msg, WireProtocol::Sexp),
+            r#"(append log 128 "rude output")"#
+        );
+        assert_eq!(
+            serialize_message(&msg, WireProtocol::Json),
+            r#"["append","log",128,"rude output"]"#
+        );
+    }
+
+    #[test]
     fn serializes_synctex_reverse_notification() {
         // The engine-to-editor click-to-source notification: the exact wire
         // string an editor parses to jump to a source location. A field-order
@@ -782,11 +807,12 @@ mod tests {
         // leaving parens literal (they are harmless inside a quoted string).
         let msg = EditorMessage::Append {
             buffer: InfoBuffer::Out,
+            pos: 0,
             text: "x\ty(z)\"w\\v\n".to_string(),
         };
         assert_eq!(
             serialize_message(&msg, WireProtocol::Sexp),
-            r#"(append out "x\ty(z)\"w\\v\n")"#
+            r#"(append out 0 "x\ty(z)\"w\\v\n")"#
         );
     }
 
