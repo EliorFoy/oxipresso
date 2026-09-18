@@ -33,8 +33,10 @@ real time.
   responsive across edits.
 - **Cross-platform architecture**: Rust owns the protocol, VFS, engine
   abstraction, platform layer, and rendering; the C engine is isolated behind
-  a stable FFI shim. Windows is the primary target; Linux and macOS seams are
-  preserved (core crates cross-check for `x86_64-unknown-linux-musl`).
+  a stable FFI shim. Windows is the primary tested target; Linux and macOS
+  seams are preserved, and the pure-Rust core crates fully build (codegen to
+  rlibs, not just type-check) for both `x86_64-unknown-linux-musl` and
+  `x86_64-unknown-linux-gnu`.
 
 ## Quick start
 
