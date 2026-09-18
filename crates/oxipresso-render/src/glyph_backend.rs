@@ -418,21 +418,31 @@ fn blit_image(
             }
             let x0 = (column * iw / dest_w).clamp(0, iw - 1);
             let x1 = (((column + 1) * iw / dest_w).max(x0 + 1)).min(iw);
-            let mut sum = [0u64; 4];
+            // Average in PREMULTIPLIED space: transparent pixels must not drag
+            // the color toward black. `sum_pa` accumulates coverage; the shown
+            // colour is the alpha-weighted mean, and the region's coverage alpha
+            // is the mean alpha. For fully-opaque sources this reduces to the
+            // straight mean, so solid images are unchanged.
+            let (mut sum_pa, mut sum_pr, mut sum_pg, mut sum_pb) = (0u64, 0u64, 0u64, 0u64);
             let mut count = 0u64;
             for sy in y0..y1 {
                 for sx in x0..x1 {
                     let s = (sy * iw + sx) as usize * 4;
-                    for c in 0..4 {
-                        sum[c] += image.pixels[s + c] as u64;
-                    }
+                    let a = image.pixels[s + 3] as u64;
+                    sum_pa += a;
+                    sum_pr += image.pixels[s] as u64 * a;
+                    sum_pg += image.pixels[s + 1] as u64 * a;
+                    sum_pb += image.pixels[s + 2] as u64 * a;
                     count += 1;
                 }
             }
-            let r = (sum[0] / count) as u32;
-            let g = (sum[1] / count) as u32;
-            let b = (sum[2] / count) as u32;
-            let a = (sum[3] / count) as u32;
+            if sum_pa == 0 {
+                continue; // fully transparent rectangle: leave the page as-is
+            }
+            let r = (sum_pr / sum_pa) as u32;
+            let g = (sum_pg / sum_pa) as u32;
+            let b = (sum_pb / sum_pa) as u32;
+            let a = (sum_pa / count).min(255) as u32;
             let dest = (page_y as usize * canvas_width as usize + page_x as usize) * 4;
             if a >= 255 {
                 canvas[dest] = r as u8;
@@ -1128,5 +1138,26 @@ mod tests {
         for px in canvas.chunks_exact(4) {
             assert_eq!(px, [255, 0, 0, 255], "upscale fills red");
         }
+    }
+
+    #[test]
+    fn blit_image_downscale_uses_premultiplied_alpha() {
+        // 2x1: opaque red next to a fully-transparent (black) pixel, scaled to
+        // 1x1. Straight averaging would pull the red channel down toward the
+        // transparent pixel's stored black (R~191); premultiplied averaging
+        // keeps R at 255 and only halves coverage, so the result stays pure red,
+        // just 50% blended over the white page: (255,128,128).
+        let image = DecodedImage {
+            width: 2,
+            height: 1,
+            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0],
+        };
+        let mut canvas = vec![255u8; 4]; // 1x1 white page
+        blit_image(&mut canvas, 1, 1, &image, 0, 0, 1, 1);
+        assert_eq!(
+            [canvas[0], canvas[1], canvas[2]],
+            [255, 128, 128],
+            "transparent pixel must not darken the color (premultiplied downscale)"
+        );
     }
 }
