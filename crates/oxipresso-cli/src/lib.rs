@@ -1194,6 +1194,54 @@ g1,20:65536000,65536000\n\
     }
 
     #[test]
+    fn change_triggering_a_failed_rebuild_does_not_abort_session() {
+        // The most important live-preview invariant: the user edits the document
+        // into a broken state (engine compile fails) and the session must keep
+        // serving with the error reported, not crash. Covers the change->rebuild
+        // path (distinct from the initialize-engine error test above).
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\documentclass{article}\n\\begin{document}\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file,
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+        app.engine = Box::new(FailingDiagnosticEngine {
+            diagnostics: vec![Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: "Undefined control sequence".to_string(),
+                path: Some("main.tex".to_string()),
+                line: Some(3),
+            }],
+        });
+        // Initialize (engine fails) is already survivable; now edit the open file.
+        let _ = app.initialize().unwrap();
+        let messages = app
+            .handle_editor_line(r#"(change "main.tex" 0 0 "\undefinedmacro")"#)
+            .expect("a change that fails the rebuild must not abort the session");
+        assert!(
+            messages.iter().any(|message| {
+                matches!(
+                    message,
+                    EditorMessage::Append { text, .. }
+                        if text.contains("Undefined control sequence")
+                )
+            }),
+            "failed rebuild reports diagnostics: {messages:?}"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
     fn stream_events_split_into_out_and_log_buffers() {
         let messages = stream_messages_from_events(
             vec![
