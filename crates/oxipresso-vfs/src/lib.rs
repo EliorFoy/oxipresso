@@ -445,7 +445,11 @@ impl EngineIo for VirtualFileSystem {
         if offset > data.len() {
             return Err(EngineError::new("read offset is outside the file"));
         }
-        Ok(data[offset..usize::min(offset + len, data.len())].to_vec())
+        // `offset + len` can overflow for a huge requested length; saturate so a
+        // large read clamps to the end of the file instead of panicking. Valid
+        // lengths are unaffected.
+        let end = offset.saturating_add(len).min(data.len());
+        Ok(data[offset..end].to_vec())
     }
 
     fn size(&mut self, handle: FileHandle) -> Result<usize> {
@@ -930,6 +934,22 @@ mod tests {
         };
         assert_eq!(vfs.read(handle, 0, 128).unwrap(), b"from editor");
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn read_with_huge_len_saturates_without_overflow_panic() {
+        // A backend requesting an enormous read length must not overflow the
+        // `offset + len` slice bound (offset > EOF is already guarded). Valid
+        // lengths are unaffected; a huge one clamps to the end of the file.
+        let mut vfs = VirtualFileSystem::new();
+        vfs.open_editor("main.tex", b"abcde".to_vec());
+        let OpenResult::Opened { handle, .. } = vfs.open_read("main.tex", FileKind::Tex).unwrap()
+        else {
+            panic!("expected editor-backed open");
+        };
+        assert_eq!(vfs.read(handle, 1, usize::MAX).unwrap(), b"bcde");
+        // offset past EOF stays a guarded Err (start never exceeds end).
+        assert!(vfs.read(handle, 999, 5).is_err());
     }
 
     #[test]
