@@ -774,6 +774,24 @@ mod tests {
             assert_eq!(hit.input_index, record.input_index);
         }
 
+        // Incremental layer 3 on REAL data: the engine's read-file set gates
+        // whether an edit forces a rebuild (edits to files the real engine
+        // never opened cost nothing).
+        assert_eq!(
+            rebuild_engine
+                .apply_change_hint(&PathId("simple.tex".to_string()), 0)
+                .unwrap(),
+            RestartPolicy::FullRestartRequired,
+            "editing the primary the real engine read must require a rebuild"
+        );
+        assert_eq!(
+            rebuild_engine
+                .apply_change_hint(&PathId("never-read.sty".to_string()), 0)
+                .unwrap(),
+            RestartPolicy::NoRestartNeeded,
+            "editing a file the real engine never opened must not require a rebuild"
+        );
+
         // Output streams: stdout chunks feed the `out` buffer and the .log
         // file feeds the `log` buffer, in write order.
         let events = rebuild_engine.take_output_events();
