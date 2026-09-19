@@ -447,10 +447,49 @@ struct CallbackState<'a> {
     read_files: std::collections::HashSet<String>,
 }
 
+/// Mirror state captured at a checkpoint fence so a replay can roll the
+/// Rust-side out/log mirrors back to the fence (TeXpresso's killed-child
+/// semantics; the r139 size-aware truncate protocol). stdout/log are opened
+/// ONCE before any fence and only grow — so without this rollback a replay
+/// would re-append on top of the aborted run's bytes.
+#[derive(Debug, Clone)]
+struct FenceLens {
+    bytes: HashMap<String, usize>,
+    events: usize,
+    diagnostics: usize,
+}
+
 impl CallbackState<'_> {
     fn set_error(&mut self, error: impl ToString) -> c_int {
         self.last_error = Some(error.to_string());
         -1
+    }
+
+    fn capture_fence_lens(&self) -> FenceLens {
+        FenceLens {
+            bytes: self
+                .output_bytes
+                .iter()
+                .map(|(path, buf)| (path.clone(), buf.len()))
+                .collect(),
+            events: self.output_events.len(),
+            diagnostics: self.diagnostics.len(),
+        }
+    }
+
+    fn rollback_to_fence(&mut self, lens: &FenceLens) {
+        self.output_bytes
+            .retain(|path, buf| match lens.bytes.get(path) {
+                Some(len) => {
+                    buf.truncate(*len);
+                    true
+                }
+                None => false,
+            });
+        self.output_paths
+            .retain(|_, path| lens.bytes.contains_key(path.as_str()));
+        self.output_events.truncate(lens.events);
+        self.diagnostics.truncate(lens.diagnostics);
     }
 }
 
@@ -670,6 +709,9 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     let Some(state) = callback_state(userdata) else {
         return 3;
     };
+    // Capture mirror lengths NOW (everything present is pre-fence); the
+    // replay re-appends exactly these streams after the rollback below.
+    let lens = state.capture_fence_lens();
     control
         .parked
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -694,6 +736,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     match pending.take() {
         Some((path, bytes)) => {
             if state.io.inject_editor(&path, bytes) {
+                state.rollback_to_fence(&lens);
                 2
             } else {
                 3
@@ -1484,7 +1527,18 @@ mod tests {
             include_paths: Vec::new(),
             stream_mode: false,
         };
-        let run_typeset = |doc: &[u8]| -> Vec<u8> {
+        let merge_events = |engine: &mut XetexEngine| -> Vec<(String, Vec<u8>)> {
+            let mut merged: std::collections::BTreeMap<String, Vec<u8>> =
+                std::collections::BTreeMap::new();
+            for event in engine.take_output_events() {
+                merged
+                    .entry(event.path)
+                    .or_default()
+                    .extend_from_slice(&event.data);
+            }
+            merged.into_iter().collect()
+        };
+        let run_typeset = |doc: &[u8]| -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
             let mut engine = XetexEngine::new();
             let mut vfs = VirtualFileSystem::new();
             vfs.open_editor("simple.tex", doc.to_vec());
@@ -1494,14 +1548,15 @@ mod tests {
             engine
                 .initialize(&root, &mut vfs)
                 .expect("real engine initialize");
-            engine
+            let bytes = engine
                 .output_document()
                 .expect("real run must produce an artifact")
                 .bytes
-                .clone()
+                .clone();
+            (bytes, merge_events(&mut engine))
         };
-        let baseline = run_typeset(&original);
-        let oracle = run_typeset(&edited);
+        let (baseline, _) = run_typeset(&original);
+        let (oracle, oracle_mirrors) = run_typeset(&edited);
         assert_ne!(
             baseline, oracle,
             "the same-length edit must change the typeset output"
@@ -1520,16 +1575,18 @@ mod tests {
                 engine
                     .initialize(&root, &mut vfs)
                     .expect("checkpointed initialize");
-                engine
+                let bytes = engine
                     .output_document()
                     .expect("resumed run must produce an artifact")
                     .bytes
-                    .clone()
+                    .clone();
+                (bytes, merge_events(&mut engine))
             });
             assert!(control.wait_parked(), "engine must park at the fence");
             control.submit_edit("simple.tex", edited.clone());
             worker.join().expect("engine worker must not panic")
         });
+        let (resumed, resumed_mirrors) = resumed;
         assert!(
             XetexEngine::fence_restore_fired(),
             "checkpoint resume must have replayed from the fence"
@@ -1538,7 +1595,74 @@ mod tests {
             oracle, resumed,
             "resume-with-edit must equal a fresh run of the edited document"
         );
+        assert_eq!(
+            oracle_mirrors, resumed_mirrors,
+            "the fence rollback must leave out/log mirrors identical to a fresh edited run"
+        );
         unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
+    }
+
+    /// The fence mirror rollback (r139 protocol, pure-Rust): capture at the
+    /// fence, grow the mirrors like a run past it, roll back — everything the
+    /// aborted continuation appended must be gone, everything pre-fence must
+    /// be intact, so a replay re-appends onto the exact fence state.
+    #[test]
+    fn fence_lens_rollback_restores_mirrors_events_diagnostics() {
+        let mut vfs = VirtualFileSystem::new();
+        let mut state = CallbackState {
+            io: &mut vfs,
+            read_buffer: Vec::new(),
+            last_error: None,
+            output_paths: HashMap::new(),
+            output_bytes: HashMap::new(),
+            output_events: Vec::new(),
+            diagnostics: Vec::new(),
+            read_files: std::collections::HashSet::new(),
+        };
+        state
+            .output_bytes
+            .insert("out".to_string(), b"banner".to_vec());
+        state.output_bytes.insert("log".to_string(), Vec::new());
+        state.output_paths.insert(7, "out".to_string());
+        state.output_paths.insert(8, "log".to_string());
+        state.output_events.push(OutputEvent {
+            path: "out".to_string(),
+            offset: 0,
+            data: b"banner".to_vec(),
+        });
+        let lens = state.capture_fence_lens();
+
+        // The run continues past the fence: appends, a fresh output file,
+        // more events, a diagnostic.
+        state
+            .output_bytes
+            .get_mut("out")
+            .unwrap()
+            .extend_from_slice(b" stale");
+        state
+            .output_bytes
+            .insert("simple.xdv".to_string(), vec![0xF7]);
+        state.output_paths.insert(9, "simple.xdv".to_string());
+        state.output_events.push(OutputEvent {
+            path: "out".to_string(),
+            offset: 6,
+            data: b" stale".to_vec(),
+        });
+        state.diagnostics.push(crate::Diagnostic {
+            severity: DiagnosticSeverity::Info,
+            message: "after fence".to_string(),
+            path: None,
+            line: None,
+        });
+
+        state.rollback_to_fence(&lens);
+        assert_eq!(state.output_bytes["out"], b"banner");
+        assert!(state.output_bytes.contains_key("log"));
+        assert!(!state.output_bytes.contains_key("simple.xdv"));
+        assert!(!state.output_paths.values().any(|v| v == "simple.xdv"));
+        assert_eq!(state.output_events.len(), 1);
+        assert_eq!(state.output_events[0].data, b"banner");
+        assert!(state.diagnostics.is_empty());
     }
 
     #[test]
