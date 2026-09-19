@@ -259,116 +259,15 @@ Test totals currently: **142 passing in the default stub workspace** across 11 c
 
 **Test-mode contract:** the default `cargo test --workspace` builds the **stub** engine (no `OXIPRESSO_USE_REAL_XETEX`), and that is the supported/verified invocation. A few CLI tests (e.g. the `run_with_io` stream/json tests) assert the *stub* engine's fixed output and are NOT guarded by `real_mode()`; running the whole workspace as a real-engine build (setting `OXIPRESSO_USE_REAL_XETEX=1` at build time) makes ~3 of them fail spuriously — that is a harness mis-invocation, not a regression. Real-engine behavior is covered by the dedicated env-gated tests (`real_xetex_bootstrap...`, `real_engine_protocol_snapshot`), which self-skip unless real mode is active.
 
-Earlier snapshot (all modes, round 12):
+Historical: the round-12 snapshot (73 stub / 20 freetype / 5 real / 8 GUI-compiles) is superseded by the numbers above; details live in git history.
 
-- Stub mode: 73 tests green across 9 crates (cli 24, render 17, vfs 10, engine-external 8, viewer 3, synctex 6, editor-protocol 3, platform 2, engine-api 0).
-- Freetype mode: 20/20 render tests (including real-XDV smoke and system-font rasterization).
-- GUI feature: compiles for cli gui, cli gui+freetype, cli gui+pdfium.
-- Real engine mode: 5/5 engine-xetex tests (bootstrap + typeset + SyncTeX + output events).
-- Real-XDV render smoke: 2/2 (parse + glyph render with page digest).
-- Real protocol snapshot: 1/1 (init + rebuild message sequences).
-- Reverse SyncTeX: 1/1 (real sidecar → source location).
-- Formatting: `cargo fmt --all --check` passes.
+Real-engine build/link diagnostic (opt-in env `OXIPRESSO_USE_REAL_XETEX=1` + `TEXPRESSO_SRC` + `VCPKG_ROOT`, then `cargo check -p oxipresso-engine-xetex-sys` / `cargo test -p oxipresso-engine-xetex --no-run`): the full real engine compiles and LINKS into the test binary (triplet `x64-windows-static-md`; `advapi32` emitted for ICU time-zone; abort returns cleanly through the shim's `setjmp`/`longjmp`; stub-behavior tests self-skip via `real_mode()`). Machine note: `VCPKG_ROOT=F:\code\vcpkg` is required for real-mode builds, and its tree needed manual `meson`/`harfbuzz`/`icu` tarball downloads into `F:\code\vcpkg\downloads` because vcpkg's bundled curl fails TLS through the local SOCKS5 proxy (`127.0.0.1:10808`) while direct `curl.exe` works; cached tarballs were hash-verified. Default stub builds are unaffected.
 
-Additional opt-in real XeTeX build diagnostic:
+Real XeTeX format bootstrap + typesetting verified (the defining milestone; same env as the build diagnostic, `cargo test -p oxipresso-engine-xetex` + CLI `-test-initialize`): the first `initialize` bootstraps `texpresso.fmt` (22.3 MB) from `xelatex.ini` spotless, then typesets a real XDV through `EngineIo` (CLI run captured a real 1011-byte `F7 07`-magic XDV, with the full `(lookup-file read failed "cmmi6")`→`read successful "cmmi6.tfm"` extension-guess→kpsewhich flow on stdout); a second initialize reuses the persisted format. Known runtime noise: fontconfig `Cannot load default config file` was printed before the `FONTCONFIG_PATH` auto-config landed.
 
-```powershell
-$env:OXIPRESSO_USE_REAL_XETEX='1'
-$env:TEXPRESSO_SRC='F:\code\texpresso-src'
-$env:VCPKG_ROOT='F:\code\vcpkg'
-cargo check -p oxipresso-engine-xetex-sys
-cargo test -p oxipresso-engine-xetex --no-run
-```
+Protocol snapshots (real engine, gated `real_engine_protocol_snapshot`): re-run at round 156 → **13/13, 0 ignored, 35.66s** (real tests executed, not self-skipped) — init emits `(truncate out/log 0)` then streamed stdout/log appends (XeTeX banner + TeX's per-char file-open echo) then `(flush)`/`input-file`/root `lookup-file successful`, parses+attaches the SyncTeX doc, and the change-rebuild re-truncates/re-echoes/flushes; S-expression and JSON wire forms both checked; asserts `/<tag>` extension records + reverse-sync on the real sidecar + include/includegraphics/missing-input fixtures (confirms r132/133/141/142/145 cohere end-to-end).
 
-Result (current machine state):
-
-- The build script enters real mode, finds `F:\code\texpresso-src`, and discovers every vcpkg dependency from `F:\code\vcpkg` (triplet `x64-windows-static-md`).
-- The full real engine (engine C, engine/layout C++, dpx C, real shim C) compiles cleanly with warnings disabled.
-- `cargo test -p oxipresso-engine-xetex --no-run` LINKS the whole real engine into the Rust test binary; the only extra link input needed was `advapi32.lib` for ICU's Windows time-zone detection, now emitted by `build.rs`.
-- Running the real-mode test binary confirms `oxipresso_xetex_run` reaches the real engine and returns control cleanly through the shim's `setjmp`/`longjmp` abort capture when no format file is available (no crash, no hang).
-- In real mode the two stub-behavior tests (`ffi_stub_initializes`, `ffi_stub_uses_engine_io_callbacks`) now self-skip via `XetexEngine::real_mode()` instead of failing; the file-kind mapping test and the opt-in smoke test pass.
-- vcpkg environment notes for this machine: `VCPKG_ROOT=F:\code\vcpkg` must be set for real-mode builds; the vcpkg tree needed manual source downloads for `meson`, `harfbuzz`, and `icu` tarballs into `F:\code\vcpkg\downloads` because vcpkg's bundled curl fails TLS through the local proxy (SOCKS5 `127.0.0.1:10808`); direct `curl.exe` to `codeload.github.com` and `github.com` release assets works and cached tarballs were hash-verified.
-- This does not affect default stub builds, which remain dependency-free.
-
-Historical note: before the vcpkg setup, real mode failed early with a `freetype2` vcpkg discovery error; that blocker is now resolved.
-
-Additional real XeTeX format bootstrap + typesetting verified (the defining milestone):
-
-```powershell
-$env:OXIPRESSO_USE_REAL_XETEX='1'; $env:TEXPRESSO_SRC='F:\code\texpresso-src'; $env:VCPKG_ROOT='F:\code\vcpkg'
-cargo test -p oxipresso-engine-xetex -- --nocapture --test-threads=1
-cargo run -q -p oxipresso-cli --bin oxipresso -- -test-initialize <temp>\oxi-real-smoke.tex
-```
-Result:
-
-- `real_xetex_bootstrap_builds_format_and_typesets_simple` passes: with `KpsewhichResolver` installed, the first `initialize` bootstraps the format from `xelatex.ini` (spotless), persists `texpresso.fmt` to `OXIPRESSO_XETEX_FORMAT`, typesets `test/simple.tex`, and returns a nonempty real XDV `DocumentArtifact`; a second `initialize` reuses the persisted format and produces an artifact again.
-- All 5 tests in the crate pass in real mode; stub-behavior tests self-skip via `XetexEngine::real_mode()`.
-- CLI end-to-end: `OXIPRESSO_ARTIFACT_OUT` captured a real 1011-byte XDV (first bytes `F7 07` XDV magic) and `texpresso.fmt` was 22.3 MB; stdout showed the full lookup flow with extension guessing feeding kpsewhich (`lookup-file read failed "cmmi6"` -> `read successful "cmmi6.tfm"`), the XDV write, and the `.aux` read.
-- Known runtime noise: fontconfig prints `Cannot load default config file` (non-fatal; see Not Done Yet).
-
-Additional protocol snapshots verified (real engine, gated CLI test `real_engine_protocol_snapshot`):
-- Re-run against real XeTeX at round 156 (all engine-side + parser fixes accumulated since r132 present): `cargo test -p oxipresso-engine-xetex` in real mode → **13/13, 0 ignored** in 35.66s (real tests actually executed, not self-skipped), including `real_xetex_bootstrap_builds_format_and_typesets_simple` (real format bootstrap → real XDV + asserts `/<tag>` synctex-extension records present + reverse_sync on the real sidecar + include/includegraphics/missing-input fixtures) and `real_engine_protocol_snapshot` (reverse-sync over the wire). Confirms r132/133/141/142/145 cohere end-to-end on the actual engine.
-- Initialization sequence: `(truncate out 0)` + `(truncate log 0)` first, then the engine's stdout/log appends — including the XeTeX banner and TeX's per-character file-open echo (`(`, `m`, `a`, `i`...) — then `(flush)`, `input-file`, and a successful `lookup-file` for the root.
-- The SyncTeX document is parsed and attached after initialization.
-- Change-rebuild sequence: both channels re-truncate, the file open is re-echoed (`(main.tex`), and a flush closes the run.
-- Wire formats verified: `(truncate out 0)` in S-expression and `["truncate","log",0]` in JSON.
-
-Additional XDV real-glyph rendering verified (freetype feature):
-
-```powershell
-$env:VCPKG_ROOT='F:\code\vcpkg'; $env:OXIPRESSO_XDV_SMOKE='F:\code\oxipresso\target\simple-real.xdv'
-cargo test -p oxipresso-render --features freetype
-cargo check -p oxipresso-cli --features freetype
-```
-
-Result:
-
-- 17/17 render tests pass with the `freetype` feature (15 without it, keeping default builds dependency-free).
-- `freetype_rasterizes_glyph_from_system_font` rasterizes a real glyph from `C:\Windows\Fonts\times.ttf` (12x11 bitmap, top bearing 11) through a synthetic XDV.
-- `xdv_glyph_render_smoke_renders_real_xdv` renders page 1 of the real engine's `simple-real.xdv` end to end — native LM OTF fonts + classic Type1 math fonts resolved through kpsewhich — and asserts substantial dark-pixel coverage.
-- FreeType is 2.14.3 on this machine, whose `FT_FaceRec`/`FT_GlyphSlotRec` layouts differ from the hand-written assumptions; the bindings therefore locate the glyph slot by back-reference scan and the bitmap by field-signature scan, both validated at runtime. `FT_LOAD_NO_BITMAP|FT_LOAD_NO_HINTING` crashed this build; `FT_LOAD_DEFAULT` is used instead.
-
-Additional PDFium smoke verified on Windows:
-
-```powershell
-$env:OXIPRESSO_PDFIUM_SMOKE_PDF='<temp>\main.pdf'
-cargo test -p oxipresso-render --features pdfium pdfium_smoke_renders_real_pdf_when_requested
-```
-
-Result:
-
-- generated a real PDF with `xelatex`;
-- `PdfiumRenderBackend` rendered page 0;
-- output dimensions were larger than the placeholder dimensions;
-- RGBA buffer size matched `width * height * 4`.
-
-Additional smoke verified:
-
-```powershell
-$env:OXIPRESSO_ENGINE='external'
-$env:OXIPRESSO_ARTIFACT_OUT='<temp>\out.pdf'
-cargo run -q -p oxipresso-cli -- -test-initialize <temp>\main.tex
-```
-
-Result:
-
-- command exited successfully;
-- `out.pdf` existed and had nonzero size;
-- stdout was emitted as `(truncate out 0)`, `(append out "...")`, `(flush)`;
-- root lookup emitted `(lookup-file read successful "main.tex")`.
-
-Additional external compile-failure path verified (real `xelatex`, round 56):
-
-```powershell
-$env:OXIPRESSO_ENGINE='external'
-cargo run -q -p oxipresso-cli --bin oxipresso -- -test-initialize <temp>\broken.tex   # \undefinedmacroxyz
-```
-
-Result: exit **0** (the CLI session survives a failed compile rather than crashing), and the editor wire carried `(append out "…")` including TeX's actual error text (`broken.tex:3: Undefined control sequence.` and the `l.3 …` context line). This is the external backend reading the `.log` and emitting an `Error` diagnostic, confirming the "report engine errors to the editor without failing the session" invariant for a real syntax error.
-
-Additional shipped-binary runtime verification (stub `target/debug/oxipresso.exe`, rounds 69/75/76/130): the compiled `oxipresso.exe` binary runs and emits the correct protocol on the real stdin/stdout wire — sexp mode yields `(truncate out 0)`/`(append out 0 "Oxipresso XeTeX FFI stub\n")`/`(input-file 0 "main.tex")`/`(lookup-file read successful "main.tex")` (proving the FFI-callback→mirror→info-buffer chain reaches the wire, and — as of round 130 — that the byte-mode `append` carries the `(append <buf> <pos> "<text>")` offset arity end-to-end through the shipped binary, not just in-process `run_with_io`), and `-json` mode yields the JSON-array equivalents `["truncate","out",0]` / `["append","out",0,"…"]` / `["input-file",0,"main.tex"]` (proving the shipped exe honors both protocol formats). Exit 0 and a persisted artifact in both cases.
-
-Additional shipped-binary × real-engine end-to-end (round 157): built `oxipresso.exe` with the real XeTeX engine linked in (`OXIPRESSO_USE_REAL_XETEX=1`) and ran `oxipresso.exe -test-initialize <doc>` with `OXIPRESSO_ARTIFACT_OUT`/`OXIPRESSO_SYNCTEX_OUT` set → exit 0, wrote a real 625-byte XDV (`F7 07` v7 magic) and a real `SyncTeX Version:1` sidecar with 5 `Input:` lines, 4 box records, and 5 `/<tag>` closed-input extension records (independently confirming the r132 `synctex_texpresso_extension` emerges through the full compiled-binary + env-artifact-persistence path, not only the lib test harness).
+Shipped-binary runtime: the compiled `oxipresso.exe` (stub) speaks the full protocol on the real stdin/stdout wire in both sexp and `-json` modes with the `(append <buf> <pos> "<text>")` offset arity (rounds 69/75/76/130); built with the REAL engine linked in, `oxipresso.exe -test-initialize` with `OXIPRESSO_ARTIFACT_OUT`/`OXIPRESSO_SYNCTEX_OUT` set writes a real 625-byte `F7 07` XDV + a `SyncTeX Version:1` sidecar carrying 5 `Input:` / 4 box / 5 `/<tag>` extension records (round 157) — the whole build.rs-link + engine + CLI + artifact-persistence chain works as one shipped program.
 
 ## Not Done Yet
 
@@ -399,23 +298,9 @@ Additional shipped-binary × real-engine end-to-end (round 157): built `oxipress
 
 ## Suggested Next Steps
 
-1. Implement the TeXpresso-defining incremental checkpoint/restart model so editor changes stop requiring a full engine restart.
-2. Polish XDV glyph rendering: XDV specials, `pic_file` images, color/extend/slant/embolden transforms, and decide whether Windows builds should enable `freetype` by default.
-3. Replace the portable polling watcher with native Windows/Linux watchers where useful, or add a proper live CLI/engine-to-viewer event path.
-4. Expand original TeXpresso fixture integration tests:
-   - async register lookup and lookup-file restart scenarios through the real engine.
-   - fixture runs (`include.tex`, `includegraphics.tex`) through the FFI XeTeX backend.
-5. Verify Linux builds of the real mode via pkg-config, and keep macOS as the later placeholder.
+1. Implement the TeXpresso-defining incremental checkpoint/restart model so editor changes stop requiring a full engine restart. The design map is complete (see Not Done Yet, rounds 139/160/168/169/170/172): POD-pool dump + name/size re-derivation for both handle classes + the `fmt_load()`/`typeset_run()` engine-entry split as first structural edit + size-aware `editor_truncate` on the rollback path; validate every step with resume-XDV == fresh-XDV.
+2. Polish XDV glyph rendering: sub-pixel glyph positioning, and routing the egui viewer's zoom/crop through the glyph backend.
+3. Wire the native `ReadDirectoryChangesW` watcher (Win32 gotchas documented in Not Done Yet).
+4. Linux: build/test verification on a real runner (targets already codegen-verified); macOS pass last.
+5. Optional: Tectonic provider behind `-tectonic` (currently a clean rejection).
 
-## Current Git State Expectation
-
-Expected untracked project files:
-
-- `.gitignore`
-- `Cargo.lock`
-- `Cargo.toml`
-- `README.md`
-- `AGENTS.md`
-- `crates/`
-
-`target/` should remain ignored.
