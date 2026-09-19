@@ -14,7 +14,10 @@ use oxipresso_engine_api::{
     RootDocument, SyncTexArtifact, TypesettingEngine,
 };
 use oxipresso_engine_xetex_sys::{
-    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_is_real, oxipresso_xetex_run,
+    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_fence_snapshot_copy,
+    oxipresso_xetex_fence_snapshot_len, oxipresso_xetex_is_real,
+    oxipresso_xetex_request_fence_snapshot, oxipresso_xetex_run, oxipresso_xetex_snapshot_bytes,
+    oxipresso_xetex_snapshot_capture,
 };
 
 /// The C shim keeps global engine state (`active_session`) and is strictly
@@ -53,6 +56,70 @@ impl XetexEngine {
     /// (opt-in `OXIPRESSO_USE_REAL_XETEX=1` build) or the portable stub.
     pub fn real_mode() -> bool {
         unsafe { oxipresso_xetex_is_real() == 1 }
+    }
+
+    /// Read-only snapshot of the engine's POD memory pools plus the key
+    /// cursors (checkpoint increment (a): the capture side of the
+    /// setjmp-at-fence design). Header is 12 little-endian u64 words (sizes
+    /// and cursors; the two eqtb slots are fixed 0 — eqtb is a segment-pointer
+    /// graph, not a POD pool, see the shim comment), then the pool blocks in
+    /// fixed order (mem, str_start, str_pool, save_stack, font_info).
+    /// The engine frees every pool at run exit, so this only returns data
+    /// while a run is active; post-run and stub builds return `None`.
+    pub fn pool_snapshot() -> Option<Vec<u8>> {
+        if !Self::real_mode() {
+            return None;
+        }
+        let _guard = ENGINE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            let need = oxipresso_xetex_snapshot_bytes();
+            if need == 0 {
+                return None;
+            }
+            let mut buf = vec![0u8; need as usize];
+            let wrote = oxipresso_xetex_snapshot_capture(buf.as_mut_ptr().cast(), need);
+            if wrote < 0 {
+                return None;
+            }
+            buf.truncate(wrote as usize);
+            Some(buf)
+        }
+    }
+
+    /// Arm a one-shot at-fence pool capture for the next run (real mode).
+    /// The shim captures the live pools the first time the engine reads a
+    /// non-format file — its fork-equivalent fence — so the capture happens
+    /// while the pools are allocated. Retrieve with [`Self::take_fence_snapshot`].
+    pub fn arm_fence_snapshot() {
+        if Self::real_mode() {
+            unsafe { oxipresso_xetex_request_fence_snapshot() };
+        }
+    }
+
+    /// Copy out the bytes captured by the last armed fence snapshot, if any
+    /// (real mode). Returns `None` in stub builds or when no capture ran.
+    pub fn take_fence_snapshot() -> Option<Vec<u8>> {
+        if !Self::real_mode() {
+            return None;
+        }
+        let _guard = ENGINE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            let len = oxipresso_xetex_fence_snapshot_len();
+            if len == 0 {
+                return None;
+            }
+            let mut buf = vec![0u8; len as usize];
+            let copied = oxipresso_xetex_fence_snapshot_copy(buf.as_mut_ptr().cast(), len);
+            if copied == 0 {
+                return None;
+            }
+            buf.truncate(copied as usize);
+            Some(buf)
+        }
     }
 
     fn format_path_text() -> String {
@@ -1102,6 +1169,77 @@ mod tests {
                 ArtifactKind::Unknown => panic!("real XeTeX smoke produced unknown artifact kind"),
             }
         }
+    }
+
+    /// Checkpoint increment (a): the shim captures the live POD pools at the
+    /// read fence (mid-run, where TeXpresso forks). Because the engine frees
+    /// every pool at run exit, the capture MUST happen during the run — so the
+    /// only way to observe it is via the at-fence hook. This proves two things:
+    /// (1) the fence capture runs and yields the multi-MB pools, and (2) it is
+    /// a pure read — the fence-captured run's XDV is byte-identical to a
+    /// control run (build date pinned via `SOURCE_DATE_EPOCH`, so the capture
+    /// itself is the only possible perturbation).
+    #[test]
+    fn real_engine_fence_snapshot_is_readonly_and_output_identical() {
+        if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
+            || env::var_os("TEXPRESSO_SRC").is_none()
+            || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
+        {
+            return;
+        }
+        let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
+            return;
+        };
+        // Deterministic engine build date so two identical runs differ only
+        // if something (e.g. an at-fence capture) perturbed the engine.
+        unsafe { env::set_var("SOURCE_DATE_EPOCH", "1700000000") };
+
+        let root = RootDocument {
+            root_dir: fixture.parent().unwrap().to_path_buf(),
+            root_name: "simple.tex".to_string(),
+            include_paths: Vec::new(),
+            stream_mode: false,
+        };
+        let run_and_typeset = |arm: bool| -> Vec<u8> {
+            let mut engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("simple.tex", fs::read(&fixture).unwrap());
+            // Fonts/TFMs come from the TeX distribution.
+            vfs.set_resolver(Box::new(
+                texlive::KpsewhichResolver::auto().expect("kpsewhich resolver for real-mode test"),
+            ));
+            if arm {
+                XetexEngine::arm_fence_snapshot();
+            }
+            engine
+                .initialize(&root, &mut vfs)
+                .expect("real engine initialize");
+            engine
+                .output_document()
+                .expect("real run must produce an artifact")
+                .bytes
+                .clone()
+        };
+
+        let control = run_and_typeset(false);
+        let fenced = run_and_typeset(true);
+        assert_eq!(
+            control, fenced,
+            "an at-fence pool capture must not perturb typesetting output"
+        );
+
+        let snap = XetexEngine::take_fence_snapshot().expect("fence capture must have run");
+        assert!(
+            snap.len() > 12 * 8 + (1 << 20),
+            "fence snapshot should carry multi-MB engine pools, got {}",
+            snap.len()
+        );
+        let word = |i: usize| u64::from_le_bytes(snap[i * 8..i * 8 + 8].try_into().unwrap());
+        assert!(word(0) > 0, "mem block size recorded");
+        assert!(word(6) > 0, "mem_end cursor after format load");
+        assert!(word(9) > 0, "pool_ptr cursor after format load");
+        assert!(word(11) > 0, "fmem_ptr cursor after font load");
+        unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
     }
 
     #[test]

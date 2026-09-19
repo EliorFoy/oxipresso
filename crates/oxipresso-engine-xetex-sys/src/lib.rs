@@ -79,4 +79,9 @@ unsafe extern "C" {
         result: *mut OxiXetexResult,
     ) -> c_int;
     pub fn oxipresso_xetex_is_real() -> c_int;
+    pub fn oxipresso_xetex_snapshot_bytes() -> u64;
+    pub fn oxipresso_xetex_snapshot_capture(dst: *mut c_void, dst_len: u64) -> i64;
+    pub fn oxipresso_xetex_request_fence_snapshot();
+    pub fn oxipresso_xetex_fence_snapshot_len() -> u64;
+    pub fn oxipresso_xetex_fence_snapshot_copy(dst: *mut c_void, dst_len: u64) -> u64;
 }

@@ -39,6 +39,26 @@ int oxipresso_xetex_is_real(void) {
   return 0;
 }
 
+/* Pool snapshot is a real-engine capability; the stub exposes the same ABI
+ * with no pools to read. */
+uint64_t oxipresso_xetex_snapshot_bytes(void) { return 0; }
+
+int64_t oxipresso_xetex_snapshot_capture(void *dst, uint64_t dst_len) {
+  (void)dst;
+  (void)dst_len;
+  return -1;
+}
+
+void oxipresso_xetex_request_fence_snapshot(void) {}
+
+uint64_t oxipresso_xetex_fence_snapshot_len(void) { return 0; }
+
+uint64_t oxipresso_xetex_fence_snapshot_copy(void *dst, uint64_t dst_len) {
+  (void)dst;
+  (void)dst_len;
+  return 0;
+}
+
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,
                         oxi_xetex_result *result) {

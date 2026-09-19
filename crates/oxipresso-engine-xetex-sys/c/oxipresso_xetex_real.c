@@ -106,6 +106,44 @@ static const char **format_extensions(ttbc_file_format format) {
 }
 
 static oxi_session *active_session = NULL;
+
+/* ---- At-fence read-only pool capture (checkpoint increment (a)) ----------
+ * The engine frees ALL pool arrays at run exit (xetex-ini.c load_fmt cleanup),
+ * so a snapshot is only valid *during* a run. TeXpresso forks at its input
+ * read "fences"; our equivalent capture point is the first read of a
+ * non-format file (post `.fmt` load, so `mem`/`str_pool`/`font_info` are
+ * allocated and live). A test arms a one-shot capture; the read bridge runs
+ * it into a static buffer. This exercises the capture path mid-run; paired
+ * with the XDV identity oracle it proves the memcpy capture does not perturb
+ * typesetting (the read-only property increment (a) must establish before
+ * increment (b) adds restore+longjmp). */
+static int g_fence_request = 0;
+static int g_fence_done = 0;
+static uint8_t *g_fence_buf = NULL;
+static uint64_t g_fence_len = 0;
+
+static void oxi_fence_capture(void); /* defined with the snapshot helpers */
+
+void oxipresso_xetex_request_fence_snapshot(void) {
+  g_fence_request = 1;
+  g_fence_done = 0;
+  free(g_fence_buf);
+  g_fence_buf = NULL;
+  g_fence_len = 0;
+}
+
+uint64_t oxipresso_xetex_fence_snapshot_len(void) { return g_fence_len; }
+
+/* Copy the fence-captured bytes into dst (up to dst_len). Returns bytes
+ * copied, or 0 if no capture happened. */
+uint64_t oxipresso_xetex_fence_snapshot_copy(void *dst, uint64_t dst_len) {
+  if (!g_fence_buf || dst == NULL || dst_len == 0) {
+    return 0;
+  }
+  uint64_t n = g_fence_len < dst_len ? g_fence_len : dst_len;
+  memcpy(dst, g_fence_buf, n);
+  return n;
+}
 static const char *last_error_message = "";
 
 static char *copy_slice(const char *bytes, size_t len) {
@@ -528,6 +566,13 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
     return -1;
   }
   size_t copied = 0;
+  /* At-fence one-shot capture: a non-format read means the `.fmt` has loaded
+   * and the pools are live (this is our fork-equivalent fence). */
+  if (g_fence_request && !g_fence_done && handle->path &&
+      !(active_session->format_path &&
+        strcmp(handle->path, active_session->format_path) == 0)) {
+    oxi_fence_capture();
+  }
   if (handle->ungot >= 0 && len > 0) {
     data[0] = (char)handle->ungot;
     handle->ungot = -1;
@@ -669,6 +714,123 @@ int ttbc_shell_escape(const uint16_t *cmd, size_t len) {
 int oxipresso_xetex_is_real(void) {
   return 1;
 }
+
+/* ---- Read-only engine pool snapshot (checkpoint increment (a)) ----------
+ * Header: 12 little-endian u64 words -- five pool byte-sizes, five reserved/
+ * zero slots kept for header stability, then five cursors interleaved in the
+ * original slots -- followed by the pool data blocks in fixed order:
+ *   mem, str_start, str_pool, save_stack, font_info.
+ * NOT included: `eqtb`. TeXpresso's eqtb array is indexed to the VIRTUAL
+ * `eqtb_top` (~9.5M here) while only ~`eqtb_size` (300K) base entries are
+ * allocated and every eqtb[i] is a pointer to its own equivalent segment on
+ * the heap -- a pointer graph, not a POD arena. (An earlier draft memcpy'd
+ * `eqtb_top+1` entries and walked straight off the allocation: the access
+ * violation this comment documents.) eqtb state belongs to the later
+ * global-state layer of the checkpoint design, never to this pool capture.
+ * Pure reads of the engine's globals. Valid ONLY during a run: the engine
+ * frees every pool array at run exit, so the capture must happen at a fence
+ * (see oxi_fence_capture / the read bridge), never between runs. NULL pools /
+ * non-positive cursors yield zero-sized blocks. */
+#include "xetex-xetexd.h"
+#include <string.h>
+#include <stdlib.h>
+
+static uint64_t oxi_snap_sizes(uint64_t sizes[5], const void *bases[5]) {
+  const long long entries[5] = {
+    (long long)mem_end + 1,
+    (long long)str_ptr + 2,
+    (long long)pool_ptr + 2,
+    (long long)save_ptr + 2,
+    (long long)fmem_ptr + 2,
+  };
+  const size_t elem[5] = {
+    sizeof(memory_word), sizeof(pool_pointer), sizeof(packed_UTF16_code),
+    sizeof(memory_word), sizeof(memory_word),
+  };
+  bases[0] = mem;
+  bases[1] = str_start;
+  bases[2] = str_pool;
+  bases[3] = save_stack;
+  bases[4] = font_info;
+  uint64_t total = 12 * (uint64_t)sizeof(uint64_t);
+  for (int i = 0; i < 5; i++) {
+    uint64_t s = (entries[i] <= 0 || !bases[i])
+                     ? 0
+                     : (uint64_t)entries[i] * (uint64_t)elem[i];
+    sizes[i] = s;
+    total += s;
+  }
+  return total;
+}
+
+/* Fill `dst` (>= need bytes) with the header + pool blocks. Caller has
+ * already computed sizes/bases via oxi_snap_sizes. */
+static void oxi_fill_snapshot(uint8_t *dst, uint64_t sizes[5],
+                              const void *bases[5]) {
+  uint64_t *hdr = (uint64_t *)dst;
+  for (int i = 0; i < 5; i++) {
+    hdr[i] = sizes[i];
+  }
+  /* Slots 5 and 7 are a fixed 0 (the former eqtb size/cursor pair) so the
+   * 12-word header layout never shifts. */
+  hdr[5] = 0;
+  hdr[6] = (uint64_t)(int64_t)mem_end;
+  hdr[7] = 0;
+  hdr[8] = (uint64_t)(int64_t)str_ptr;
+  hdr[9] = (uint64_t)(int64_t)pool_ptr;
+  hdr[10] = (uint64_t)(int64_t)save_ptr;
+  hdr[11] = (uint64_t)(int64_t)fmem_ptr;
+  uint8_t *p = dst + 12 * (uint64_t)sizeof(uint64_t);
+  for (int i = 0; i < 5; i++) {
+    if (sizes[i] != 0) {
+      memcpy(p, bases[i], sizes[i]);
+      p += sizes[i];
+    }
+  }
+}
+
+uint64_t oxipresso_xetex_snapshot_bytes(void) {
+  if (!active_session) {
+    return 0; /* pools are freed outside a run */
+  }
+  uint64_t sizes[5];
+  const void *bases[5];
+  return oxi_snap_sizes(sizes, bases);
+}
+
+int64_t oxipresso_xetex_snapshot_capture(void *dst, uint64_t dst_len) {
+  if (!active_session || dst == NULL) {
+    return -1;
+  }
+  uint64_t sizes[5];
+  const void *bases[5];
+  uint64_t need = oxi_snap_sizes(sizes, bases);
+  if (dst_len < need) {
+    return -1;
+  }
+  oxi_fill_snapshot((uint8_t *)dst, sizes, bases);
+  return (int64_t)need;
+}
+
+/* One-shot capture of the live pools into a static buffer, run from the
+ * read bridge at the fence (active_session is non-NULL here). */
+static void oxi_fence_capture(void) {
+  if (g_fence_done) {
+    return;
+  }
+  g_fence_done = 1; /* at most one attempt per run */
+  uint64_t sizes[5];
+  const void *bases[5];
+  uint64_t need = oxi_snap_sizes(sizes, bases);
+  uint8_t *buf = (uint8_t *)malloc((size_t)need);
+  if (buf == NULL) {
+    return;
+  }
+  oxi_fill_snapshot(buf, sizes, bases);
+  g_fence_buf = buf;
+  g_fence_len = need;
+}
+
 
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,
