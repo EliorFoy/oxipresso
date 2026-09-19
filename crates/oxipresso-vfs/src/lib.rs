@@ -589,6 +589,88 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    struct Fuzzer(u64);
+    impl Fuzzer {
+        fn n(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6F_DD1D)
+        }
+    }
+    fn huge_idx(f: &mut Fuzzer, len: usize) -> usize {
+        match f.n() % 6 {
+            0 => (f.n() % (len as u64 + 2)) as usize,
+            1 => usize::MAX,
+            2 => usize::MAX / 2,
+            3 => len,
+            4 => len.saturating_add(1),
+            _ => (f.n() % 8) as usize,
+        }
+    }
+
+    #[test]
+    fn fuzz_apply_change_never_panics() {
+        // Editor offsets/line counts/UTF-16 columns arrive as f64->usize casts and
+        // can be arbitrarily large; and VFS bytes may be non-UTF-8. apply_change
+        // must reject every bad change with Err, never panic (splice/index/
+        // offset-underflow/UTF-16-column conversion). Fresh VFS per case.
+        let mut f = Fuzzer(0x2545_F491_4F6F_DD1D ^ 0xC0FFEE);
+        for _case in 0..8000usize {
+            let clen = (f.n() % 40) as usize;
+            let mut content = Vec::with_capacity(clen);
+            for _ in 0..clen {
+                content.push(match f.n() % 4 {
+                    0 => b'\n',
+                    1 => b'a',
+                    2 => 0xE4,
+                    _ => b' ',
+                });
+            }
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("m.tex", content);
+            let ilen = (f.n() % 6) as usize;
+            let mut ins = vec![0u8; ilen];
+            for b in &mut ins {
+                *b = (f.n() % 256) as u8;
+            }
+            let change = match f.n() % 3 {
+                0 => Change::Bytes {
+                    offset: huge_idx(&mut f, clen),
+                    remove: huge_idx(&mut f, clen),
+                    data: ins,
+                },
+                1 => Change::Lines {
+                    offset: huge_idx(&mut f, clen),
+                    remove: huge_idx(&mut f, clen),
+                    data: ins,
+                },
+                _ => Change::Range {
+                    start_line: huge_idx(&mut f, clen),
+                    start_char: huge_idx(&mut f, clen),
+                    end_line: huge_idx(&mut f, clen),
+                    end_char: huge_idx(&mut f, clen),
+                    data: ins,
+                },
+            };
+            let _ = vfs.apply_change("m.tex", &change);
+        }
+        // Control: a valid change still applies (guards a blanket-reject parser).
+        let mut v = VirtualFileSystem::new();
+        v.open_editor("m.tex", b"hello world".to_vec());
+        assert!(
+            v.apply_change(
+                "m.tex",
+                &Change::Bytes {
+                    offset: 6,
+                    remove: 5,
+                    data: b"tex".to_vec()
+                },
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn applies_byte_change() {
         let mut vfs = VirtualFileSystem::new();
