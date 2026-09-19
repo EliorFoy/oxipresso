@@ -690,6 +690,57 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_parse_command_never_panics() {
+        // The CLI feeds raw editor bytes here; fuzz both wire dialects with
+        // seeded-random strings over a protocol-relevant alphabet plus a
+        // truncation sweep of valid commands (every early-EOF boundary). Err or
+        // Ok are both fine; a panic fails the test.
+        let alphabet: &[u8] =
+            b"()[]{}\",: \n0123456789abcdefghijklmnopqrstuvwxyz-openchange-resume-page-synctextrue.";
+        let mut state: u64 = 0xCAFE_BABE_1234_5678;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_F491_4F6F_DD1D) >> 33) as u8
+        };
+        for _case in 0..30_000usize {
+            let len = (next() as usize % 48) + 1;
+            let mut buf = Vec::with_capacity(len);
+            for _ in 0..len {
+                buf.push(alphabet[next() as usize % alphabet.len()]);
+            }
+            let s = String::from_utf8_lossy(&buf).into_owned();
+            let _ = parse_command(&s, WireProtocol::Sexp);
+            let _ = parse_command(&s, WireProtocol::Json);
+        }
+        // Truncation sweep (all-ASCII examples, so every byte cut is a char
+        // boundary) of valid commands under each protocol.
+        for valid in [
+            r#"(open "a.tex" "hi")"#,
+            r#"(change "m.tex" 0 "x")"#,
+            r#"(synctex-forward "m.tex" 10 0)"#,
+            r#"(theme 0.1 0.2 0.3 0.4 0.5)"#,
+        ] {
+            for cut in 0..=valid.len() {
+                let _ = parse_command(&valid[..cut], WireProtocol::Sexp);
+            }
+        }
+        for valid in [
+            r#"["open","a.tex","hi"]"#,
+            r#"["change","m.tex",0,"x"]"#,
+            r#"["theme",0.1,0.2,0.3,0.4,0.5]"#,
+        ] {
+            for cut in 0..=valid.len() {
+                let _ = parse_command(&valid[..cut], WireProtocol::Json);
+            }
+        }
+        // Control: valid commands still parse (guards a blanket-error parser).
+        assert!(parse_command(r#"(open "a.tex" "hi")"#, WireProtocol::Sexp).is_ok());
+        assert!(parse_command(r#"["open","a.tex","hi"]"#, WireProtocol::Json).is_ok());
+    }
+
+    #[test]
     fn parses_sexp_change_range() {
         let cmd = parse_command(
             r#"(change-range "main.tex" 1 2 3 4 "hello")"#,
