@@ -654,4 +654,49 @@ g2,20:200,200\n\
     fn rejects_invalid_input_index() {
         assert!(parse_text("Input:not-number:main.tex\n").is_err());
     }
+
+    #[test]
+    fn fuzz_parse_and_search_never_panics() {
+        // Executed fuzz over untrusted .synctex bytes: drives parse_text /
+        // parse_bytes branches AND the forward/reverse coordinate math on
+        // whatever documents the garbage yields. Nothing may panic; Err / None
+        // / empty are all acceptable outcomes.
+        let alphabet: &[u8] = b"SyncTeXVersion:1OutputpdfContent\n{}[(hvgk$0123456789,/-Ix.\t ";
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_B0BA;
+        let mut next_byte = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_F491_4F6F_DD1D) >> 33) as u8
+        };
+        for _case in 0..4000usize {
+            let len = (next_byte() as usize % 120) + 1;
+            let mut buf = Vec::with_capacity(len);
+            for _ in 0..len {
+                buf.push(alphabet[next_byte() as usize % alphabet.len()]);
+            }
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            let doc = parse_text(&text).ok();
+            let _ = parse_bytes(&buf, false);
+            let _ = parse_bytes(&buf, true);
+            if let Some(doc) = doc {
+                for _ in 0..4 {
+                    let page = (next_byte() % 4) as usize;
+                    let c = (next_byte() as i32) ^ ((next_byte() as i32) << 8);
+                    let _ = doc.reverse_search_page_point(page, c, c);
+                    let _ = doc.forward_search_index(page, c as usize);
+                    let _ = doc.forward_search_path(&text, page);
+                }
+                let _ = doc.reverse_search_page_point(0, i32::MIN, i32::MAX);
+                let _ = doc.reverse_search_page_point(usize::MAX, i32::MAX, i32::MIN);
+            }
+        }
+        // Truncation sweep of a realistic sidecar at every byte boundary.
+        let sample = "SyncTeX Version:1\nInput:1:main.tex\nInput:2:inc.tex\nOutput:main.pdf\nMagnification:1000\nUnit:1\n{1\n[1,2:1234:5678:0:100:10\n(2,3:99:88:0:50:40\n}\n";
+        for cut in 0..=sample.len() {
+            let _ = parse_text(&sample[..cut]);
+        }
+        // The full sample still parses (guards a silently-disabling bug).
+        assert!(parse_text(sample).is_ok());
+    }
 }
