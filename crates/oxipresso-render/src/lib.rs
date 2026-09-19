@@ -1019,6 +1019,40 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_pdf_and_dvi_page_counters_never_panics() {
+        // count_pdf_pages and the dvi-like bop walker run on arbitrary on-disk
+        // PDF/DVI bytes; a crafted or truncated buffer must never panic. Seeded
+        // random buffers biased with the scanners' own keywords, plus a
+        // truncation sweep of a real multi-page PDF body.
+        let keywords: [&[u8]; 5] = [b"/Type", b"/Page", b"/Pages", b" ", b"\n"];
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut nxt = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6F_DD1D)
+        };
+        for _case in 0..8000usize {
+            let parts = (nxt() % 24) as usize;
+            let mut buf = Vec::new();
+            for _ in 0..parts {
+                if nxt() % 3 == 0 {
+                    buf.push((nxt() % 256) as u8);
+                } else {
+                    buf.extend_from_slice(keywords[(nxt() % 5) as usize]);
+                }
+            }
+            let _ = PdfMetadataRenderBackend::count_pdf_pages(&buf);
+            let _ = page_count_for_dvi_like(&buf);
+        }
+        let body = b"%PDF-1.7\n<< /Type /Pages /Count 2 >>\n<< /Type /Page >>\n<< /Type /Page >>\n";
+        for cut in 0..=body.len() {
+            let _ = PdfMetadataRenderBackend::count_pdf_pages(&body[..cut]);
+            let _ = page_count_for_dvi_like(&body[..cut]);
+        }
+    }
+
+    #[test]
     fn counts_page_objects_without_counting_pages_tree() {
         let bytes = br#"%PDF-1.7
 1 0 obj
