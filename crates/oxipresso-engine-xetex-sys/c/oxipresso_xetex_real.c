@@ -145,6 +145,25 @@ uint64_t oxipresso_xetex_fence_roundtrip_fired(void) {
   return (uint64_t)g_fence_roundtrip_fired;
 }
 
+/* Increment (b2-mech): restore the captured pools over the live ones and
+ * longjmp back to the fence, so the engine REPLAYS from the checkpoint.
+ * Done inside the fence callback, which already blocks the engine — the
+ * worker-thread park is only needed for an interactive controller, not to
+ * validate the restore+replay mechanism itself. */
+static int g_fence_restore_request = 0;
+static int g_fence_restore_fired = 0;
+
+static int oxi_fence_restore(void); /* defined with the snapshot helpers */
+
+void oxipresso_xetex_request_fence_restore(void) {
+  g_fence_restore_request = 1;
+  g_fence_restore_fired = 0;
+}
+
+uint64_t oxipresso_xetex_fence_restore_fired(void) {
+  return (uint64_t)g_fence_restore_fired;
+}
+
 void oxipresso_xetex_request_fence_snapshot(void) {
   g_fence_request = 1;
   g_fence_done = 0;
@@ -595,14 +614,22 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
   if (g_fence_request && !g_fence_done && handle->path &&
       !(active_session->format_path &&
         strcmp(handle->path, active_session->format_path) == 0)) {
-    if (setjmp(g_fence_jmp) == 0) {
+    int jr = setjmp(g_fence_jmp);
+    if (jr == 0) {
       oxi_fence_capture();
-      if (g_fence_roundtrip_request) {
+      if (g_fence_restore_request) {
+        g_fence_restore_request = 0;
+        if (oxi_fence_restore() == 0) {
+          longjmp(g_fence_jmp, 2); /* replay the fence from the snapshot */
+        }
+      } else if (g_fence_roundtrip_request) {
         g_fence_roundtrip_request = 0;
         longjmp(g_fence_jmp, 1);
       }
+    } else if (jr == 2) {
+      g_fence_restore_fired = 1; /* re-entered after a state restore */
     } else {
-      g_fence_roundtrip_fired = 1; /* re-entered via a live-frame longjmp */
+      g_fence_roundtrip_fired = 1; /* re-entered via a live-frame round-trip */
     }
   }
   if (handle->ungot >= 0 && len > 0) {
@@ -861,6 +888,33 @@ static void oxi_fence_capture(void) {
   oxi_fill_snapshot(buf, sizes, bases);
   g_fence_buf = buf;
   g_fence_len = need;
+}
+
+/* Copy the captured bytes back over the pools they were captured from.
+ * The engine is frozen inside the fence callback, so the live pool sizes
+ * must match the snapshot header exactly; any mismatch refuses the write
+ * (a stale/foreign buffer must never touch a live engine). */
+static int oxi_fence_restore(void) {
+  uint64_t sizes[5];
+  const void *bases[5];
+  uint64_t need = oxi_snap_sizes(sizes, bases);
+  if (!g_fence_buf || g_fence_len != need) {
+    return -1;
+  }
+  const uint64_t *hdr = (const uint64_t *)g_fence_buf;
+  for (int i = 0; i < 5; i++) {
+    if (hdr[i] != sizes[i]) {
+      return -1;
+    }
+  }
+  const uint8_t *p = g_fence_buf + 12 * (uint64_t)sizeof(uint64_t);
+  for (int i = 0; i < 5; i++) {
+    if (sizes[i] != 0) {
+      memcpy((void *)bases[i], p, sizes[i]);
+      p += sizes[i];
+    }
+  }
+  return 0;
 }
 
 

@@ -86,4 +86,6 @@ unsafe extern "C" {
     pub fn oxipresso_xetex_fence_snapshot_copy(dst: *mut c_void, dst_len: u64) -> u64;
     pub fn oxipresso_xetex_request_fence_roundtrip();
     pub fn oxipresso_xetex_fence_roundtrip_fired() -> u64;
+    pub fn oxipresso_xetex_request_fence_restore();
+    pub fn oxipresso_xetex_fence_restore_fired() -> u64;
 }

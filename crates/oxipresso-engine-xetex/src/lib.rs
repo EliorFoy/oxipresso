@@ -14,9 +14,10 @@ use oxipresso_engine_api::{
     RootDocument, SyncTexArtifact, TypesettingEngine,
 };
 use oxipresso_engine_xetex_sys::{
-    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_fence_roundtrip_fired,
-    oxipresso_xetex_fence_snapshot_copy, oxipresso_xetex_fence_snapshot_len,
-    oxipresso_xetex_is_real, oxipresso_xetex_request_fence_roundtrip,
+    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_fence_restore_fired,
+    oxipresso_xetex_fence_roundtrip_fired, oxipresso_xetex_fence_snapshot_copy,
+    oxipresso_xetex_fence_snapshot_len, oxipresso_xetex_is_real,
+    oxipresso_xetex_request_fence_restore, oxipresso_xetex_request_fence_roundtrip,
     oxipresso_xetex_request_fence_snapshot, oxipresso_xetex_run, oxipresso_xetex_snapshot_bytes,
     oxipresso_xetex_snapshot_capture,
 };
@@ -144,6 +145,29 @@ impl XetexEngine {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe { oxipresso_xetex_fence_roundtrip_fired() != 0 }
+    }
+
+    /// Arm an identity restore+replay at the next fence (checkpoint
+    /// increment b2-mech): the fence captures the pools, writes them back
+    /// over the live ones (refusing on any size/header mismatch), and
+    /// longjmps so the engine REPLAYS its typesetting from the checkpoint.
+    /// Takes precedence over an armed round-trip.
+    pub fn arm_fence_restore() {
+        if Self::real_mode() {
+            unsafe { oxipresso_xetex_request_fence_restore() };
+        }
+    }
+
+    /// Whether the armed fence restore actually replayed during the last run
+    /// (real mode; `false` in stubs or if the path never fired).
+    pub fn fence_restore_fired() -> bool {
+        if !Self::real_mode() {
+            return false;
+        }
+        let _guard = ENGINE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe { oxipresso_xetex_fence_restore_fired() != 0 }
     }
 
     fn format_path_text() -> String {
@@ -1283,6 +1307,21 @@ mod tests {
         assert_eq!(
             control, roundtrip,
             "a live-frame longjmp at the fence must not perturb typesetting output"
+        );
+
+        // Increment (b2-mech): identity restore + replay. The fence captures,
+        // memcpy's the snapshot back over the live pools, and longjmps — the
+        // engine replays its run from the checkpoint. The completed XDV must
+        // be byte-identical to the control, and the restore must have fired.
+        XetexEngine::arm_fence_restore();
+        let replay = run_and_typeset(true);
+        assert!(
+            XetexEngine::fence_restore_fired(),
+            "fence restore must have replayed the engine from the snapshot"
+        );
+        assert_eq!(
+            control, replay,
+            "restore+longjmp replay at the fence must not perturb typesetting output"
         );
         unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
     }
