@@ -70,6 +70,8 @@ uint64_t oxipresso_xetex_fence_restore_fired(void) { return 0; }
 
 void oxipresso_xetex_request_fence_park(void) {}
 
+void oxipresso_xetex_arm_fence_replay(void) {}
+
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,
                         oxi_xetex_result *result) {

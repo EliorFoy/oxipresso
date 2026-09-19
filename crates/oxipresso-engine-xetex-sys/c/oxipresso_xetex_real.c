@@ -119,7 +119,7 @@ static oxi_session *active_session = NULL;
  * typesetting (the read-only property increment (a) must establish before
  * increment (b) adds restore+longjmp). */
 static int g_fence_request = 0;
-static int g_fence_done = 0;
+static int g_fence_park_mode = 0; /* sticky: park at every armed fence */
 static uint8_t *g_fence_buf = NULL;
 static uint64_t g_fence_len = 0;
 
@@ -140,6 +140,8 @@ static int g_fence_roundtrip_fired = 0;
 void oxipresso_xetex_request_fence_roundtrip(void) {
   g_fence_roundtrip_request = 1;
   g_fence_roundtrip_fired = 0;
+  g_fence_park_mode = 0;
+  g_fence_request = 1;
 }
 
 uint64_t oxipresso_xetex_fence_roundtrip_fired(void) {
@@ -159,6 +161,8 @@ static int oxi_fence_restore(void); /* defined with the snapshot helpers */
 void oxipresso_xetex_request_fence_restore(void) {
   g_fence_restore_request = 1;
   g_fence_restore_fired = 0;
+  g_fence_park_mode = 0;
+  g_fence_request = 1;
 }
 
 uint64_t oxipresso_xetex_fence_restore_fired(void) {
@@ -171,20 +175,22 @@ uint64_t oxipresso_xetex_fence_restore_fired(void) {
  * buffer (which it injects through its own &mut EngineIo borrow), and
  * returns 2 to restore+replay, 3 to continue unmodified (or a refused
  * restore also continues). */
-static int g_fence_park_request = 0;
-
 void oxipresso_xetex_request_fence_park(void) {
-  g_fence_park_request = 1;
+  g_fence_park_mode = 1;
   g_fence_request = 1; /* the park path replays from a fresh capture */
-  g_fence_done = 0;
   free(g_fence_buf);
   g_fence_buf = NULL;
   g_fence_len = 0;
 }
 
+/* Multi-cycle chaining: re-arm the (park-mode) fence so the CURRENT run
+ * checkpoints+replays again at its next non-format read. One arm = one
+ * park; call again to chain further edits into the same run. */
+void oxipresso_xetex_arm_fence_replay(void) { g_fence_request = 1; }
+
 void oxipresso_xetex_request_fence_snapshot(void) {
   g_fence_request = 1;
-  g_fence_done = 0;
+  g_fence_park_mode = 0;
   free(g_fence_buf);
   g_fence_buf = NULL;
   g_fence_len = 0;
@@ -624,24 +630,27 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
     return -1;
   }
   size_t copied = 0;
-  /* At-fence one-shot capture: a non-format read means the `.fmt` has loaded
-   * and the pools are live (this is our fork-equivalent fence). With the
-   * round-trip armed (increment b1): setjmp, capture, longjmp back into this
-   * same live frame, and fall through to the read. The cursor has not
-   * advanced when longjmp fires, so no bytes are skipped or doubled. */
-  if (g_fence_request && !g_fence_done && handle->path &&
+  /* Re-armable checkpoint fence (multi-cycle): every non-format read may park
+   * while g_fence_request is armed (the .fmt has loaded, pools are live). One
+   * arm consumes into exactly one capture+park+replay; the controller re-arms
+   * (arm_fence_replay) to chain further checkpoints LATER in the same run —
+   * the in-process equivalent of TeXpresso's per-fence fork tree. With the
+   * round-trip armed (b1): setjmp, capture, longjmp back into this same live
+   * frame, fall through to the read. The cursor has not advanced when
+   * longjmp fires, so no bytes are skipped or doubled. */
+  if (g_fence_request && handle->path &&
       !(active_session->format_path &&
         strcmp(handle->path, active_session->format_path) == 0)) {
     int jr = setjmp(g_fence_jmp);
     if (jr == 0) {
+      /* Consume the arm BEFORE the (blocking) controller callback, so a
+       * concurrent re-arm can never be overwritten here. */
+      g_fence_request = 0;
       oxi_fence_capture();
       int cmd = 0;
-      if (g_fence_park_request) {
-        g_fence_park_request = 0;
-        if (active_session->callbacks->fence) {
-          cmd = active_session->callbacks->fence(
-              active_session->callbacks->userdata);
-        }
+      if (g_fence_park_mode && active_session->callbacks->fence) {
+        cmd = active_session->callbacks->fence(
+            active_session->callbacks->userdata);
       } else if (g_fence_restore_request) {
         g_fence_restore_request = 0;
         cmd = 2;
@@ -658,9 +667,9 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
       }
       /* cmd == 3 (park "continue") or a refused restore: fall through. */
     } else if (jr == 2) {
-      g_fence_restore_fired = 1; /* re-entered after a state restore */
+      g_fence_restore_fired++; /* re-entered after a state restore */
     } else {
-      g_fence_roundtrip_fired = 1; /* re-entered via a live-frame round-trip */
+      g_fence_roundtrip_fired++; /* re-entered via a live-frame round-trip */
     }
   }
   if (handle->ungot >= 0 && len > 0) {
@@ -905,10 +914,10 @@ int64_t oxipresso_xetex_snapshot_capture(void *dst, uint64_t dst_len) {
 /* One-shot capture of the live pools into a static buffer, run from the
  * read bridge at the fence (active_session is non-NULL here). */
 static void oxi_fence_capture(void) {
-  if (g_fence_done) {
-    return;
-  }
-  g_fence_done = 1; /* at most one attempt per run */
+  /* Fresh capture per arm: the previous checkpoint buffer is superseded. */
+  free(g_fence_buf);
+  g_fence_buf = NULL;
+  g_fence_len = 0;
   uint64_t sizes[5];
   const void *bases[5];
   uint64_t need = oxi_snap_sizes(sizes, bases);

@@ -90,4 +90,7 @@ unsafe extern "C" {
     pub fn oxipresso_xetex_request_fence_restore();
     pub fn oxipresso_xetex_fence_restore_fired() -> u64;
     pub fn oxipresso_xetex_request_fence_park();
+    /// Re-arm the sticky park-mode fence so the current run checkpoints and
+    /// replays again at its next non-format read (multi-cycle chaining).
+    pub fn oxipresso_xetex_arm_fence_replay();
 }

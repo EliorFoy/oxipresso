@@ -35,6 +35,7 @@ static ENGINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[derive(Debug, Default)]
 pub struct FenceControl {
     parked: std::sync::atomic::AtomicBool,
+    parks: std::sync::atomic::AtomicUsize,
     edit: std::sync::Mutex<Option<(String, Vec<u8>)>>,
     condvar: std::sync::Condvar,
 }
@@ -43,6 +44,31 @@ impl FenceControl {
     /// Whether the engine thread is currently parked at the fence.
     pub fn is_parked(&self) -> bool {
         self.parked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Total number of fence parks so far (multi-cycle chaining).
+    pub fn park_count(&self) -> usize {
+        self.parks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Spin until the engine has parked at least `at_least` times, or ~30s
+    /// elapse; returns whether the count was reached.
+    pub fn wait_parks(&self, at_least: usize) -> bool {
+        for _ in 0..3000 {
+            if self.park_count() >= at_least {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.park_count() >= at_least
+    }
+
+    /// Re-arm the sticky park-mode fence: the (possibly replaying) run parks
+    /// again at its NEXT non-format read, where it captures a fresh
+    /// checkpoint. Chain `submit_edit` + `replay_again` to fold multiple
+    /// edits into one run; stop re-arming to let the run complete.
+    pub fn replay_again(&self) {
+        unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_arm_fence_replay() };
     }
 
     /// Spin until the engine parks (or ~30s elapse); returns the parked state.
@@ -712,6 +738,9 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     // Capture mirror lengths NOW (everything present is pre-fence); the
     // replay re-appends exactly these streams after the rollback below.
     let lens = state.capture_fence_lens();
+    control
+        .parks
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     control
         .parked
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1598,6 +1627,103 @@ mod tests {
         assert_eq!(
             oracle_mirrors, resumed_mirrors,
             "the fence rollback must leave out/log mirrors identical to a fresh edited run"
+        );
+        unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
+    }
+
+    /// Checkpoint increment (multi-cycle): ONE run chained through several
+    /// checkpoint->edit->replay cycles. The controller re-arms the sticky
+    /// park fence after a submit, so the replaying run parks again at its
+    /// NEXT non-format read with a fresh capture and replays once more; the
+    /// final submit (no re-arm) lets the run complete. The completed artifact
+    /// must equal a fresh full run of the final document — the multi-fence
+    /// form of TeXpresso's per-fence fork tree, in-process.
+    #[test]
+    fn real_engine_fence_multi_replay_chain_matches_fresh_run() {
+        if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
+            || env::var_os("TEXPRESSO_SRC").is_none()
+            || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
+        {
+            return;
+        }
+        let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
+            return;
+        };
+        unsafe { env::set_var("SOURCE_DATE_EPOCH", "1700000000") };
+        let original = fs::read(&fixture).unwrap();
+        let mut edited = original.clone();
+        let pos = edited
+            .windows(6)
+            .position(|w| w == b"simple")
+            .expect("fixture contains 'simple'");
+        edited[pos] = b'S';
+        let marker = edited
+            .windows(14)
+            .rposition(|w| w == b"\\end{document}")
+            .expect("fixture ends the document env");
+        let mut final_doc = Vec::with_capacity(edited.len() + 40);
+        final_doc.extend_from_slice(&edited[..marker]);
+        final_doc.extend_from_slice(b"An appended checkpoint probe sentence.\n\n");
+        final_doc.extend_from_slice(&edited[marker..]);
+        let root = RootDocument {
+            root_dir: fixture.parent().unwrap().to_path_buf(),
+            root_name: "simple.tex".to_string(),
+            include_paths: Vec::new(),
+            stream_mode: false,
+        };
+        let oracle = {
+            let mut engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("simple.tex", final_doc.clone());
+            vfs.set_resolver(Box::new(
+                texlive::KpsewhichResolver::auto().expect("kpsewhich resolver for real-mode test"),
+            ));
+            engine
+                .initialize(&root, &mut vfs)
+                .expect("oracle initialize");
+            engine
+                .output_document()
+                .expect("oracle artifact")
+                .bytes
+                .clone()
+        };
+        let control = XetexEngine::arm_fence_park().expect("fence control (real mode)");
+        let resumed = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut engine = XetexEngine::new();
+                let mut vfs = VirtualFileSystem::new();
+                vfs.open_editor("simple.tex", original.clone());
+                vfs.set_resolver(Box::new(
+                    texlive::KpsewhichResolver::auto()
+                        .expect("kpsewhich resolver for real-mode test"),
+                ));
+                engine
+                    .initialize(&root, &mut vfs)
+                    .expect("multi-cycle initialize");
+                engine
+                    .output_document()
+                    .expect("multi-cycle artifact")
+                    .bytes
+                    .clone()
+            });
+            // Cycle 1: park at the first non-format read; submit; replay.
+            assert!(control.wait_parks(1), "engine must park at fence #1");
+            control.submit_edit("simple.tex", final_doc.clone());
+            control.replay_again();
+            // Cycle 2: the replaying run parks at its next read.
+            assert!(control.wait_parks(2), "engine must park at fence #2");
+            control.submit_edit("simple.tex", final_doc.clone());
+            // No re-arm: the run completes from checkpoint #2.
+            worker.join().expect("engine worker must not panic")
+        });
+        assert!(
+            XetexEngine::fence_restore_fired(),
+            "the chain must have replayed from checkpoints"
+        );
+        assert!(control.park_count() >= 2, "chain must park at least twice");
+        assert_eq!(
+            oracle, resumed,
+            "a multi-cycle checkpoint chain must equal a fresh run of the final document"
         );
         unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
     }
