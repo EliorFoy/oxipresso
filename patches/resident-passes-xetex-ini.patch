@@ -1,0 +1,34 @@
+diff --git a/src/engine/engine/xetex-ini.c b/src/engine/engine/xetex-ini.c
+index 092777c..f85a32a 100644
+--- a/src/engine/engine/xetex-ini.c
++++ b/src/engine/engine/xetex-ini.c
+@@ -3871,9 +3871,29 @@ tt_run_engine(const char *dump_name, const char *input_file_name, time_t build_d
+ 
+     pdf_files_init();
+     synctex_init_command();
++    /* OXIPRESSO (resident passes, DESIGN-resume.md option b): S0 is
++     * captured right before the FIRST start_input, i.e. post-format-load,
++     * pre-document. The pass loop below re-runs start_input + main_control
++     * from that same S0 whenever the controller commands a replay, and only
++     * falls through to the cleanup when it commands completion. Both hooks
++     * are no-ops unless resident mode was enabled by the embedding shim, so
++     * every non-resident run is byte-identical to upstream behavior. */
++    {
++        extern void oxipresso_resident_capture(void);
++        oxipresso_resident_capture();
++    }
+     start_input(input_file_name);
+     history = HISTORY_SPOTLESS;
+     main_control();
++    /* OXIPRESSO: resident pass loop. */
++    {
++        extern int oxipresso_resident_park(void);
++        while (oxipresso_resident_park() == 1) {
++            start_input(input_file_name);
++            history = HISTORY_SPOTLESS;
++            main_control();
++        }
++    }
+     final_cleanup();
+     close_files_and_terminate();
+ 

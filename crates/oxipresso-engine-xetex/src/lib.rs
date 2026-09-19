@@ -36,8 +36,18 @@ static ENGINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub struct FenceControl {
     parked: std::sync::atomic::AtomicBool,
     parks: std::sync::atomic::AtomicUsize,
-    edit: std::sync::Mutex<Option<(String, Vec<u8>)>>,
+    msg: std::sync::Mutex<Option<FenceMsg>>,
     condvar: std::sync::Condvar,
+    /// Mirror lengths at the FIRST park of a resident session (pre-pass-1):
+    /// pass-boundary replays restore pools to S0, so output streams must
+    /// roll back to the same moment, not to the per-park capture.
+    base_lens: std::sync::Mutex<Option<FenceLens>>,
+}
+
+#[derive(Debug)]
+enum FenceMsg {
+    Edit(String, Vec<u8>),
+    Finish,
 }
 
 impl FenceControl {
@@ -71,6 +81,18 @@ impl FenceControl {
         unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_arm_fence_replay() };
     }
 
+    /// Command the resident pass loop to finish: the engine runs its normal
+    /// cleanup (final_cleanup + close_files) and the initialize call returns
+    /// with the last completed pass's artifact.
+    pub fn finish(&self) {
+        let mut msg = self
+            .msg
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *msg = Some(FenceMsg::Finish);
+        self.condvar.notify_all();
+    }
+
     /// Spin until the engine parks (or ~30s elapse); returns the parked state.
     pub fn wait_parked(&self) -> bool {
         for _ in 0..3000 {
@@ -85,11 +107,11 @@ impl FenceControl {
     /// Hand edited bytes to the parked engine (it applies them and asks the
     /// shim to restore the checkpoint and replay the run).
     pub fn submit_edit(&self, path: &str, bytes: Vec<u8>) {
-        let mut pending = self
-            .edit
+        let mut msg = self
+            .msg
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *pending = Some((path.to_string(), bytes));
+        *msg = Some(FenceMsg::Edit(path.to_string(), bytes));
         self.condvar.notify_all();
     }
 }
@@ -255,6 +277,25 @@ impl XetexEngine {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(control.clone());
         unsafe { oxipresso_xetex_request_fence_park() };
+        Some(control)
+    }
+
+    /// Resident passes (DESIGN-resume.md): enable the patched host's pass
+    /// loop. The engine parks BEFORE pass 1 (S0 captured pre-document) and
+    /// after EVERY completed pass; each `submit_edit` restores S0 and re-runs
+    /// start_input + main_control with the current editor buffers - a fresh
+    /// typesetting pass without reloading the format. `finish()` lets the
+    /// engine run its normal cleanup and `initialize` return with the last
+    /// pass's artifact. Real mode only.
+    pub fn arm_resident_passes() -> Option<std::sync::Arc<FenceControl>> {
+        if !Self::real_mode() {
+            return None;
+        }
+        let control = std::sync::Arc::new(FenceControl::default());
+        *FENCE_CONTROL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(control.clone());
+        unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_enable_resident_passes() };
         Some(control)
     }
 
@@ -738,6 +779,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     // Capture mirror lengths NOW (everything present is pre-fence); the
     // replay re-appends exactly these streams after the rollback below.
     let lens = state.capture_fence_lens();
+    let kind = unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_fence_park_kind() };
     control
         .parks
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -745,7 +787,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
         .parked
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let mut pending = control
-        .edit
+        .msg
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -763,14 +805,27 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
         .parked
         .store(false, std::sync::atomic::Ordering::SeqCst);
     match pending.take() {
-        Some((path, bytes)) => {
+        Some(FenceMsg::Edit(path, bytes)) => {
             if state.io.inject_editor(&path, bytes) {
-                state.rollback_to_fence(&lens);
+                // Resident pass-boundary parks restore S0 (pre-pass-1), so
+                // the mirrors must roll back to that same moment; mid-run
+                // fence parks restore their own capture point.
+                let target = if kind == 1 {
+                    let mut base = control
+                        .base_lens
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    base.get_or_insert_with(|| lens.clone()).clone()
+                } else {
+                    lens
+                };
+                state.rollback_to_fence(&target);
                 2
             } else {
                 3
             }
         }
+        Some(FenceMsg::Finish) => 3,
         None => 3,
     }
 }
@@ -1724,6 +1779,104 @@ mod tests {
         assert_eq!(
             oracle, resumed,
             "a multi-cycle checkpoint chain must equal a fresh run of the final document"
+        );
+        unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
+    }
+
+    /// Checkpoint increment (resident passes): the patched host parks BEFORE
+    /// pass 1 (S0 captured post-format-load, pre-document) and after EVERY
+    /// completed pass; a pass-boundary `submit_edit` restores S0 and re-runs
+    /// start_input + main_control against the current editor buffers.
+    /// STATUS (r208): WIP, ignored on purpose. Pool+cursor rewind lands and
+    /// the second pass now truly RUNS - but it hangs, because scalar engine
+    /// globals outside the five pools (eqtb_top, the hash array, counters…)
+    /// are not rewound and disagree with the rewound pools. The pass loop,
+    /// grown-prefix restore and park-kind channel below are verified
+    /// infrastructure; this test flips to active once the scalar-rewind set
+    /// lands (see DESIGN-resume.md "scalar rewind").
+    #[ignore = "resident passes await the scalar-global rewind set (DESIGN-resume.md)"]
+    #[test]
+    fn real_engine_resident_pass_rebuild_matches_fresh_run() {
+        if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
+            || env::var_os("TEXPRESSO_SRC").is_none()
+            || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
+        {
+            return;
+        }
+        let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
+            return;
+        };
+        unsafe { env::set_var("SOURCE_DATE_EPOCH", "1700000000") };
+        let original = fs::read(&fixture).unwrap();
+        let mut edit1 = original.clone();
+        let pos = edit1
+            .windows(6)
+            .position(|w| w == b"simple")
+            .expect("fixture contains 'simple'");
+        edit1[pos] = b'S';
+        let marker = edit1
+            .windows(14)
+            .rposition(|w| w == b"\\end{document}")
+            .expect("document env ends the fixture");
+        let mut edit2 = Vec::with_capacity(edit1.len() + 40);
+        edit2.extend_from_slice(&edit1[..marker]);
+        edit2.extend_from_slice(b"A resident second-pass probe sentence.\n\n");
+        edit2.extend_from_slice(&edit1[marker..]);
+        let root = RootDocument {
+            root_dir: fixture.parent().unwrap().to_path_buf(),
+            root_name: "simple.tex".to_string(),
+            include_paths: Vec::new(),
+            stream_mode: false,
+        };
+        let oracle = {
+            let mut engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("simple.tex", edit2.clone());
+            vfs.set_resolver(Box::new(
+                texlive::KpsewhichResolver::auto().expect("kpsewhich resolver for real-mode test"),
+            ));
+            engine
+                .initialize(&root, &mut vfs)
+                .expect("oracle initialize");
+            engine
+                .output_document()
+                .expect("oracle artifact")
+                .bytes
+                .clone()
+        };
+        let control = XetexEngine::arm_resident_passes().expect("resident control (real mode)");
+        let done = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut engine = XetexEngine::new();
+                let mut vfs = VirtualFileSystem::new();
+                vfs.open_editor("simple.tex", original.clone());
+                vfs.set_resolver(Box::new(
+                    texlive::KpsewhichResolver::auto()
+                        .expect("kpsewhich resolver for real-mode test"),
+                ));
+                engine
+                    .initialize(&root, &mut vfs)
+                    .expect("resident initialize drives the pass loop");
+                engine
+                    .output_document()
+                    .expect("resident artifact")
+                    .bytes
+                    .clone()
+            });
+            // Park 1: before pass 1 (S0). Submit edit1 - pass 1 typesets it.
+            assert!(control.wait_parks(1), "must park before pass 1");
+            control.submit_edit("simple.tex", edit1.clone());
+            // Park 2: pass 1 done. Submit edit2 - S0 restore + fresh pass 2.
+            assert!(control.wait_parks(2), "must park after pass 1");
+            control.submit_edit("simple.tex", edit2.clone());
+            // Park 3: pass 2 done. Finish: normal cleanup, initialize returns.
+            assert!(control.wait_parks(3), "must park after pass 2");
+            control.finish();
+            worker.join().expect("resident worker must not panic")
+        });
+        assert_eq!(
+            oracle, done,
+            "a resident second pass from S0 must equal a fresh full run of the final document"
         );
         unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
     }

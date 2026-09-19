@@ -98,3 +98,40 @@ Cost: fork-local refactor (≈ dozens of lines), one C pass-loop, Rust drive
 API, and the idempotence audit above. NOT required: eqtb graph (in-process
 heap pointers stay valid across passes exactly as across replays — proven by
 r204 chains).
+
+## Round-208 status — loop landed, one missing layer identified (precise)
+
+Implemented and COMMITTED as verified infrastructure:
+- host patch `patches/resident-passes-xetex-ini.patch` (against
+  `tt_run_engine`, the real host name; `input_file_name` is a parameter —
+  the loop's re-`start_input(input_file_name)` is well-scoped).
+- Shim: `oxipresso_resident_capture/park` + park-kind channel (0 = mid-run
+  fence, 1 = pass boundary) + `enable_resident_passes` (stub no-op mirrored);
+  finish/timeout/disabled automatically falls back to single-run mode.
+- Restore upgrade: grown-prefix acceptance (bump pools + realloc keep the
+  prefix; captured-size copy + cursor rewind) with shrink always refused;
+  AND the previously-missing CURSOR WRITE-BACK (`mem_end/str_ptr/pool_ptr/
+  save_ptr/fmem_ptr`, hdr slots 6,8..11) — mid-run fences never needed it
+  (capture→restore window is frozen), pass rewinds are impossible without.
+- Rust: `arm_resident_passes`, `FenceControl::finish()`, `base_lens`
+  (pass-boundary mirrors roll back to the PRE-PASS-1 capture, per-park lens
+  only for mid-run fences). Park-1 (inside `resident_capture`) must NOT
+  restore — it sits exactly AT S0 and a write-back double-patches.
+- All existing suites green (real 17/17 + 1 ignored; stub 146/0).
+
+Discovered requirement — THE SCALAR REWIND SET. With pools+cursors rewound,
+pass 2 now truly starts from S0 — and HANGS: engine scalar globals OUTSIDE
+the five pools advanced during pass 1 and now disagree with the rewound
+pools. Prime suspects (r160 inventory's "dozens of scalar globals", never
+captured because frozen-window replays didn't need them): `eqtb_top` + the
+`hash[]` array (pass-1 font entries point at str numbers the rewound string
+pool no longer holds), run-total counters (`pages_total` etc.),
+`param_type`/font-loading bookkeeping. Next increment: enumerate the
+mutated-scalar set (diff globals across a completed pass in a debug build,
+or start from the web2c `@<globals@>` list minus const-ish ones), extend
+the capture header/blocks, and flip the ignored test
+`real_engine_resident_pass_rebuild_matches_fresh_run` back to active.
+This is the true, in-process form of what AGENTS called the "eqtb pointer
+graph" item — and per the r204 finding it is RAW BYTES only in-process
+(no pointer re-derivation; segments/faces stay live).
+

@@ -120,6 +120,7 @@ static oxi_session *active_session = NULL;
  * increment (b) adds restore+longjmp). */
 static int g_fence_request = 0;
 static int g_fence_park_mode = 0; /* sticky: park at every armed fence */
+static int g_fence_park_kind = 0; /* 0=mid-run fence, 1=resident pass boundary */
 static uint8_t *g_fence_buf = NULL;
 static uint64_t g_fence_len = 0;
 
@@ -156,7 +157,7 @@ uint64_t oxipresso_xetex_fence_roundtrip_fired(void) {
 static int g_fence_restore_request = 0;
 static int g_fence_restore_fired = 0;
 
-static int oxi_fence_restore(void); /* defined with the snapshot helpers */
+static int oxi_fence_restore(int allow_grow); /* defined with the snapshot helpers */
 
 void oxipresso_xetex_request_fence_restore(void) {
   g_fence_restore_request = 1;
@@ -646,6 +647,7 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
       /* Consume the arm BEFORE the (blocking) controller callback, so a
        * concurrent re-arm can never be overwritten here. */
       g_fence_request = 0;
+      g_fence_park_kind = 0; /* mid-run fence semantics */
       oxi_fence_capture();
       int cmd = 0;
       if (g_fence_park_mode && active_session->callbacks->fence) {
@@ -659,7 +661,7 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
         cmd = 1;
       }
       if (cmd == 2) {
-        if (oxi_fence_restore() == 0) {
+        if (oxi_fence_restore(0) == 0) {
           longjmp(g_fence_jmp, 2); /* replay the fence from the snapshot */
         }
       } else if (cmd == 1) {
@@ -931,32 +933,105 @@ static void oxi_fence_capture(void) {
 }
 
 /* Copy the captured bytes back over the pools they were captured from.
- * The engine is frozen inside the fence callback, so the live pool sizes
- * must match the snapshot header exactly; any mismatch refuses the write
- * (a stale/foreign buffer must never touch a live engine). */
-static int oxi_fence_restore(void) {
+ * The engine is frozen inside the fence callback, so the live pool bases
+ * must be non-NULL and no pool may have SHRUNK below its captured size;
+ * any such mismatch refuses the write (a stale/foreign buffer must never
+ * touch a live engine). With allow_grow (resident pass boundaries only),
+ * pools that GREW during a completed pass are accepted: the web2c pools
+ * are bump-allocated, the realloc keeps old contents, and restoring the
+ * captured prefix plus the header cursors reproduces the exact captured
+ * state - unreachable later bytes simply stay dead. */
+static int oxi_fence_restore(int allow_grow) {
   uint64_t sizes[5];
   const void *bases[5];
   uint64_t need = oxi_snap_sizes(sizes, bases);
-  if (!g_fence_buf || g_fence_len != need) {
+  if (!g_fence_buf) {
     return -1;
   }
   const uint64_t *hdr = (const uint64_t *)g_fence_buf;
+  uint64_t total = 12 * (uint64_t)sizeof(uint64_t);
   for (int i = 0; i < 5; i++) {
-    if (hdr[i] != sizes[i]) {
+    if (allow_grow) {
+      if (hdr[i] > sizes[i]) {
+        return -1; /* pools never legitimately shrink */
+      }
+    } else if (hdr[i] != sizes[i]) {
       return -1;
     }
+    total += hdr[i];
   }
+  if (g_fence_len != total) {
+    return -1; /* buffer must be exactly header + captured blocks */
+  }
+  /* Restore the bump cursors (hdr slots 6 and 8..11; slots 5/7 are the
+   * retired eqtb pair). Inside a frozen mid-run window these are already
+   * the captured values; across a completed pass they are far ahead and
+   * MUST rewind, or the restored prefixes would be shadowed by live junk. */
+  mem_end = (int32_t)hdr[6];
+  str_ptr = (str_number)hdr[8];
+  pool_ptr = (pool_pointer)hdr[9];
+  save_ptr = (int32_t)hdr[10];
+  fmem_ptr = (font_index)hdr[11];
   const uint8_t *p = g_fence_buf + 12 * (uint64_t)sizeof(uint64_t);
   for (int i = 0; i < 5; i++) {
-    if (sizes[i] != 0) {
-      memcpy((void *)bases[i], p, sizes[i]);
-      p += sizes[i];
+    if (hdr[i] != 0) {
+      memcpy((void *)bases[i], p, hdr[i]);
+      p += hdr[i];
     }
   }
   return 0;
 }
 
+/* ---- Resident passes (DESIGN-resume.md option b) ------------------------
+ * The patched host (xetex-ini.c) calls these around its typesetting pass.
+ * S0 = the checkpoint captured right BEFORE the first start_input: a
+ * post-format-load, pre-document state. Each commanded replay restores S0
+ * and re-runs start_input + main_control - the in-process analogue of
+ * TeXpresso forking a fresh child from the parked parent per rebuild.
+ * The 0/1 park-kind channel below tells the Rust fence callback which
+ * checkpoint semantics apply (mid-run fence vs pass boundary), so the
+ * mirror rollback targets the right capture. */
+static int g_resident_enabled = 0;
+
+void oxipresso_xetex_enable_resident_passes(void) { g_resident_enabled = 1; }
+
+uint64_t oxipresso_xetex_fence_park_kind(void) {
+  return (uint64_t)g_fence_park_kind;
+}
+
+void oxipresso_resident_capture(void) {
+  if (!g_resident_enabled || !active_session || !active_session->callbacks) {
+    return;
+  }
+  oxi_fence_capture();
+  g_fence_park_kind = 1;
+  if (active_session->callbacks->fence) {
+    int cmd = active_session->callbacks->fence(
+        active_session->callbacks->userdata);
+    /* NO restore here: we sit exactly AT S0, so writing the buffer back
+     * onto the live pools would double-patch (and corrupt) them. A
+     * controller edit applied during this park takes effect through the
+     * VFS on pass 1's very first read; the buffer stays for the loop. */
+    (void)cmd;
+  }
+  g_fence_park_kind = 0;
+}
+
+int oxipresso_resident_park(void) {
+  if (!g_resident_enabled || !active_session || !active_session->callbacks ||
+      !active_session->callbacks->fence) {
+    return 0;
+  }
+  g_fence_park_kind = 1;
+  int cmd = active_session->callbacks->fence(
+      active_session->callbacks->userdata);
+  g_fence_park_kind = 0;
+  if (cmd == 2 && oxi_fence_restore(1) == 0) {
+    return 1;
+  }
+  g_resident_enabled = 0; /* finish/timeout/mismatch: normal single-run mode */
+  return 0;
+}
 
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,
