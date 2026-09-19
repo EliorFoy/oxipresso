@@ -1445,9 +1445,10 @@ mod tests {
     /// restores pool state, REPLAYS from the fence, and now reads the edited
     /// bytes. The result must be byte-identical to a fresh full run over the
     /// edited document — TeXpresso's checkpoint correctness theorem, proven
-    /// in-process. Scope: the edit is same-LENGTH because the restored pool
-    /// carries the file size captured at open (general grow/shrink edits need
-    /// an engine-side size refresh, documented follow-up).
+    /// in-process. The edit both mutates a word and GROWS the file: input EOF
+    /// flows through the read bridge (the engine keeps no cached file size —
+    /// `ttstub_input_size` has zero call sites in it), so grow/shrink edits
+    /// stream through the replay without any size refresh.
     #[test]
     fn real_engine_fence_checkpoint_resume_matches_fresh_edited_run() {
         if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
@@ -1467,6 +1468,16 @@ mod tests {
             .position(|w| w == b"simple")
             .expect("fixture contains 'simple'");
         edited[pos] = b'S';
+        // And grow: append a sentence before the document end.
+        let marker = edited
+            .windows(14)
+            .rposition(|w| w == b"\\end{document}")
+            .expect("fixture ends the document env");
+        let mut grown = Vec::with_capacity(edited.len() + 40);
+        grown.extend_from_slice(&edited[..marker]);
+        grown.extend_from_slice(b"An appended checkpoint probe sentence.\n\n");
+        grown.extend_from_slice(&edited[marker..]);
+        edited = grown;
         let root = RootDocument {
             root_dir: fixture.parent().unwrap().to_path_buf(),
             root_name: "simple.tex".to_string(),
