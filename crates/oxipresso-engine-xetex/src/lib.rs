@@ -14,8 +14,9 @@ use oxipresso_engine_api::{
     RootDocument, SyncTexArtifact, TypesettingEngine,
 };
 use oxipresso_engine_xetex_sys::{
-    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_fence_snapshot_copy,
-    oxipresso_xetex_fence_snapshot_len, oxipresso_xetex_is_real,
+    OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_fence_roundtrip_fired,
+    oxipresso_xetex_fence_snapshot_copy, oxipresso_xetex_fence_snapshot_len,
+    oxipresso_xetex_is_real, oxipresso_xetex_request_fence_roundtrip,
     oxipresso_xetex_request_fence_snapshot, oxipresso_xetex_run, oxipresso_xetex_snapshot_bytes,
     oxipresso_xetex_snapshot_capture,
 };
@@ -120,6 +121,29 @@ impl XetexEngine {
             buf.truncate(copied as usize);
             Some(buf)
         }
+    }
+
+    /// Arm a live-frame `setjmp`/`longjmp` round-trip at the next fence
+    /// (checkpoint increment b1). Like [`Self::arm_fence_snapshot`] it must
+    /// be called before the run; the fence captures, then longjmps back into
+    /// the same still-live read callback, proving the suspension point works
+    /// before increment (b2) ever restores state there.
+    pub fn arm_fence_roundtrip() {
+        if Self::real_mode() {
+            unsafe { oxipresso_xetex_request_fence_roundtrip() };
+        }
+    }
+
+    /// Whether the armed fence round-trip actually longjmped during the last
+    /// run (real mode; `false` in stubs or if the hook never fired).
+    pub fn fence_roundtrip_fired() -> bool {
+        if !Self::real_mode() {
+            return false;
+        }
+        let _guard = ENGINE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe { oxipresso_xetex_fence_roundtrip_fired() != 0 }
     }
 
     fn format_path_text() -> String {
@@ -1178,7 +1202,9 @@ mod tests {
     /// (1) the fence capture runs and yields the multi-MB pools, and (2) it is
     /// a pure read — the fence-captured run's XDV is byte-identical to a
     /// control run (build date pinned via `SOURCE_DATE_EPOCH`, so the capture
-    /// itself is the only possible perturbation).
+    /// itself is the only possible perturbation). Increment (b1) adds a third
+    /// run: a live-frame `setjmp`/`longjmp` round-trip at the fence, which
+    /// must also leave the XDV byte-identical while provably having fired.
     #[test]
     fn real_engine_fence_snapshot_is_readonly_and_output_identical() {
         if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
@@ -1239,6 +1265,25 @@ mod tests {
         assert!(word(6) > 0, "mem_end cursor after format load");
         assert!(word(9) > 0, "pool_ptr cursor after format load");
         assert!(word(11) > 0, "fmem_ptr cursor after font load");
+
+        // Increment (b1): arm the live-frame setjmp/longjmp round-trip and
+        // re-run. Output must stay byte-identical, AND the round-trip must
+        // actually have fired — proving the fence frame survives a longjmp
+        // back into it (the mechanism increment (b2) restore will use).
+        XetexEngine::arm_fence_roundtrip();
+        let roundtrip = run_and_typeset(true);
+        assert!(
+            XetexEngine::fence_roundtrip_fired(),
+            "fence round-trip must have longjmped through the live frame"
+        );
+        assert!(
+            XetexEngine::take_fence_snapshot().is_some(),
+            "the round-trip run must also have captured the pools"
+        );
+        assert_eq!(
+            control, roundtrip,
+            "a live-frame longjmp at the fence must not perturb typesetting output"
+        );
         unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
     }
 

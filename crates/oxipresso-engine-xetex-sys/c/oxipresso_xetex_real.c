@@ -124,6 +124,27 @@ static uint64_t g_fence_len = 0;
 
 static void oxi_fence_capture(void); /* defined with the snapshot helpers */
 
+/* Increment (b1): a live-frame setjmp/longjmp round-trip at the fence. The
+ * engine suspends exactly inside this read callback in TeXpresso's fork
+ * model; proving we can setjmp here, longjmp back INTO THE SAME LIVE FRAME,
+ * and the run still completes byte-identically is the prerequisite for (b2)
+ * restore+longjmp. Note the frame-lifetime constraint this also pins: the
+ * jmp_buf is only valid while the fence callback is parked, so (b2) will
+ * additionally need the engine on a worker thread paused AT the fence
+ * (an event loop), not merely captured-and-returned. */
+static jmp_buf g_fence_jmp;
+static int g_fence_roundtrip_request = 0;
+static int g_fence_roundtrip_fired = 0;
+
+void oxipresso_xetex_request_fence_roundtrip(void) {
+  g_fence_roundtrip_request = 1;
+  g_fence_roundtrip_fired = 0;
+}
+
+uint64_t oxipresso_xetex_fence_roundtrip_fired(void) {
+  return (uint64_t)g_fence_roundtrip_fired;
+}
+
 void oxipresso_xetex_request_fence_snapshot(void) {
   g_fence_request = 1;
   g_fence_done = 0;
@@ -567,11 +588,22 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
   }
   size_t copied = 0;
   /* At-fence one-shot capture: a non-format read means the `.fmt` has loaded
-   * and the pools are live (this is our fork-equivalent fence). */
+   * and the pools are live (this is our fork-equivalent fence). With the
+   * round-trip armed (increment b1): setjmp, capture, longjmp back into this
+   * same live frame, and fall through to the read. The cursor has not
+   * advanced when longjmp fires, so no bytes are skipped or doubled. */
   if (g_fence_request && !g_fence_done && handle->path &&
       !(active_session->format_path &&
         strcmp(handle->path, active_session->format_path) == 0)) {
-    oxi_fence_capture();
+    if (setjmp(g_fence_jmp) == 0) {
+      oxi_fence_capture();
+      if (g_fence_roundtrip_request) {
+        g_fence_roundtrip_request = 0;
+        longjmp(g_fence_jmp, 1);
+      }
+    } else {
+      g_fence_roundtrip_fired = 1; /* re-entered via a live-frame longjmp */
+    }
   }
   if (handle->ungot >= 0 && len > 0) {
     data[0] = (char)handle->ungot;

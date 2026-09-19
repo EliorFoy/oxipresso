@@ -59,6 +59,10 @@ uint64_t oxipresso_xetex_fence_snapshot_copy(void *dst, uint64_t dst_len) {
   return 0;
 }
 
+void oxipresso_xetex_request_fence_roundtrip(void) {}
+
+uint64_t oxipresso_xetex_fence_roundtrip_fired(void) { return 0; }
+
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,
                         oxi_xetex_result *result) {
