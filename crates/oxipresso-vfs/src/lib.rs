@@ -527,6 +527,13 @@ impl EngineIo for VirtualFileSystem {
             })
             .collect())
     }
+
+    fn inject_editor(&mut self, path: &str, bytes: Vec<u8>) -> bool {
+        // Editor-channel injection used by the checkpoint fence: identical to
+        // an `open` command arriving while the engine is parked.
+        let _outcome = self.open_editor(path, bytes);
+        true
+    }
 }
 
 fn first_diff(old: &[u8], new: &[u8]) -> Option<usize> {

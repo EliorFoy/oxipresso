@@ -17,14 +17,59 @@ use oxipresso_engine_xetex_sys::{
     OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_fence_restore_fired,
     oxipresso_xetex_fence_roundtrip_fired, oxipresso_xetex_fence_snapshot_copy,
     oxipresso_xetex_fence_snapshot_len, oxipresso_xetex_is_real,
-    oxipresso_xetex_request_fence_restore, oxipresso_xetex_request_fence_roundtrip,
-    oxipresso_xetex_request_fence_snapshot, oxipresso_xetex_run, oxipresso_xetex_snapshot_bytes,
-    oxipresso_xetex_snapshot_capture,
+    oxipresso_xetex_request_fence_park, oxipresso_xetex_request_fence_restore,
+    oxipresso_xetex_request_fence_roundtrip, oxipresso_xetex_request_fence_snapshot,
+    oxipresso_xetex_run, oxipresso_xetex_snapshot_bytes, oxipresso_xetex_snapshot_capture,
 };
 
 /// The C shim keeps global engine state (`active_session`) and is strictly
 /// single-instance, so every engine invocation is serialized process-wide.
 static ENGINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Controller handle for a parked checkpoint fence (increment b2-loop).
+/// The engine thread parks inside its read callback at the fence and blocks
+/// on `condvar`; the controller thread observes `parked`, then `submit_edit`s
+/// the new bytes for a path, which the parked engine thread applies to its own
+/// VFS borrow and answers with restore+replay. One live fence per process
+/// (runs are serialized under [`ENGINE_LOCK`]).
+#[derive(Debug, Default)]
+pub struct FenceControl {
+    parked: std::sync::atomic::AtomicBool,
+    edit: std::sync::Mutex<Option<(String, Vec<u8>)>>,
+    condvar: std::sync::Condvar,
+}
+
+impl FenceControl {
+    /// Whether the engine thread is currently parked at the fence.
+    pub fn is_parked(&self) -> bool {
+        self.parked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Spin until the engine parks (or ~30s elapse); returns the parked state.
+    pub fn wait_parked(&self) -> bool {
+        for _ in 0..3000 {
+            if self.is_parked() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.is_parked()
+    }
+
+    /// Hand edited bytes to the parked engine (it applies them and asks the
+    /// shim to restore the checkpoint and replay the run).
+    pub fn submit_edit(&self, path: &str, bytes: Vec<u8>) {
+        let mut pending = self
+            .edit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *pending = Some((path.to_string(), bytes));
+        self.condvar.notify_all();
+    }
+}
+
+static FENCE_CONTROL: std::sync::Mutex<Option<std::sync::Arc<FenceControl>>> =
+    std::sync::Mutex::new(None);
 
 /// How the engine should be driven for one `oxipresso_xetex_run` invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +215,23 @@ impl XetexEngine {
         unsafe { oxipresso_xetex_fence_restore_fired() != 0 }
     }
 
+    /// Arm a parkable checkpoint fence for the next run (real mode): the
+    /// engine's read callback will park at the fence and call the Rust
+    /// controller; run the engine on your worker thread and drive it with the
+    /// returned [`FenceControl`] (wait_parked / submit_edit). The replay reads
+    /// the edited buffer from the restored checkpoint state.
+    pub fn arm_fence_park() -> Option<std::sync::Arc<FenceControl>> {
+        if !Self::real_mode() {
+            return None;
+        }
+        let control = std::sync::Arc::new(FenceControl::default());
+        *FENCE_CONTROL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(control.clone());
+        unsafe { oxipresso_xetex_request_fence_park() };
+        Some(control)
+    }
+
     fn format_path_text() -> String {
         env::var("OXIPRESSO_XETEX_FORMAT").unwrap_or_else(|_| "texpresso.fmt".to_string())
     }
@@ -274,6 +336,7 @@ impl XetexEngine {
             flush: Some(callback_flush),
             close: Some(callback_close),
             diagnostic: Some(callback_diagnostic),
+            fence: Some(callback_fence),
         };
         let mut result = OxiXetexResult::default();
         let status = unsafe { oxipresso_xetex_run(&config, &callbacks, &mut result) };
@@ -588,6 +651,56 @@ unsafe extern "C" fn callback_diagnostic(
         path: None,
         line: None,
     });
+}
+
+/// Checkpoint fence controller callback (increment b2-loop). Runs ON the
+/// engine thread while its read is parked: signals `parked`, blocks until the
+/// controller submits an edited buffer (bounded 60s so a wedged controller
+/// can never hang CI — timeout continues unmodified), applies the edit through
+/// its own `&mut EngineIo` borrow (the same legal path every other callback
+/// uses), then asks the shim to restore+replay (2) or continue (3).
+unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
+    let control = FENCE_CONTROL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let Some(control) = control else {
+        return 3;
+    };
+    let Some(state) = callback_state(userdata) else {
+        return 3;
+    };
+    control
+        .parked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut pending = control
+        .edit
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while pending.is_none() {
+        let (guard, wait) = control
+            .condvar
+            .wait_timeout(pending, std::time::Duration::from_millis(200))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pending = guard;
+        if wait.timed_out() && std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    control
+        .parked
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    match pending.take() {
+        Some((path, bytes)) => {
+            if state.io.inject_editor(&path, bytes) {
+                2
+            } else {
+                3
+            }
+        }
+        None => 3,
+    }
 }
 
 /// Canonical key for matching engine-read paths against VFS change-hint paths:
@@ -1322,6 +1435,97 @@ mod tests {
         assert_eq!(
             control, replay,
             "restore+longjmp replay at the fence must not perturb typesetting output"
+        );
+        unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
+    }
+
+    /// Checkpoint increment (b2-loop): a real rebuild via checkpoint resume.
+    /// The engine runs on a worker thread and parks inside its read callback
+    /// at the fence; the controller injects an edited root buffer; the engine
+    /// restores pool state, REPLAYS from the fence, and now reads the edited
+    /// bytes. The result must be byte-identical to a fresh full run over the
+    /// edited document — TeXpresso's checkpoint correctness theorem, proven
+    /// in-process. Scope: the edit is same-LENGTH because the restored pool
+    /// carries the file size captured at open (general grow/shrink edits need
+    /// an engine-side size refresh, documented follow-up).
+    #[test]
+    fn real_engine_fence_checkpoint_resume_matches_fresh_edited_run() {
+        if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
+            || env::var_os("TEXPRESSO_SRC").is_none()
+            || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
+        {
+            return;
+        }
+        let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
+            return;
+        };
+        unsafe { env::set_var("SOURCE_DATE_EPOCH", "1700000000") };
+        let original = fs::read(&fixture).unwrap();
+        let mut edited = original.clone();
+        let pos = edited
+            .windows(6)
+            .position(|w| w == b"simple")
+            .expect("fixture contains 'simple'");
+        edited[pos] = b'S';
+        let root = RootDocument {
+            root_dir: fixture.parent().unwrap().to_path_buf(),
+            root_name: "simple.tex".to_string(),
+            include_paths: Vec::new(),
+            stream_mode: false,
+        };
+        let run_typeset = |doc: &[u8]| -> Vec<u8> {
+            let mut engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("simple.tex", doc.to_vec());
+            vfs.set_resolver(Box::new(
+                texlive::KpsewhichResolver::auto().expect("kpsewhich resolver for real-mode test"),
+            ));
+            engine
+                .initialize(&root, &mut vfs)
+                .expect("real engine initialize");
+            engine
+                .output_document()
+                .expect("real run must produce an artifact")
+                .bytes
+                .clone()
+        };
+        let baseline = run_typeset(&original);
+        let oracle = run_typeset(&edited);
+        assert_ne!(
+            baseline, oracle,
+            "the same-length edit must change the typeset output"
+        );
+
+        let control = XetexEngine::arm_fence_park().expect("fence control (real mode)");
+        let resumed = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut engine = XetexEngine::new();
+                let mut vfs = VirtualFileSystem::new();
+                vfs.open_editor("simple.tex", original.clone());
+                vfs.set_resolver(Box::new(
+                    texlive::KpsewhichResolver::auto()
+                        .expect("kpsewhich resolver for real-mode test"),
+                ));
+                engine
+                    .initialize(&root, &mut vfs)
+                    .expect("checkpointed initialize");
+                engine
+                    .output_document()
+                    .expect("resumed run must produce an artifact")
+                    .bytes
+                    .clone()
+            });
+            assert!(control.wait_parked(), "engine must park at the fence");
+            control.submit_edit("simple.tex", edited.clone());
+            worker.join().expect("engine worker must not panic")
+        });
+        assert!(
+            XetexEngine::fence_restore_fired(),
+            "checkpoint resume must have replayed from the fence"
+        );
+        assert_eq!(
+            oracle, resumed,
+            "resume-with-edit must equal a fresh run of the edited document"
         );
         unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
     }

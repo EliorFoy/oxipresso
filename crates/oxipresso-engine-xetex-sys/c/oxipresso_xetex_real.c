@@ -34,6 +34,7 @@ typedef struct {
   int (*flush)(void *userdata, uint32_t handle);
   int (*close)(void *userdata, uint32_t handle);
   void (*diagnostic)(void *userdata, int severity, const uint8_t *bytes, size_t len);
+  int (*fence)(void *userdata);
 } oxi_xetex_callbacks;
 
 typedef struct {
@@ -162,6 +163,23 @@ void oxipresso_xetex_request_fence_restore(void) {
 
 uint64_t oxipresso_xetex_fence_restore_fired(void) {
   return (uint64_t)g_fence_restore_fired;
+}
+
+/* Increment (b2-loop): instead of restoring inside the callback directly,
+ * ask Rust's fence callback what to do. It runs ON the engine thread while
+ * the read is parked, may block until the controller submits an edited
+ * buffer (which it injects through its own &mut EngineIo borrow), and
+ * returns 2 to restore+replay, 3 to continue unmodified (or a refused
+ * restore also continues). */
+static int g_fence_park_request = 0;
+
+void oxipresso_xetex_request_fence_park(void) {
+  g_fence_park_request = 1;
+  g_fence_request = 1; /* the park path replays from a fresh capture */
+  g_fence_done = 0;
+  free(g_fence_buf);
+  g_fence_buf = NULL;
+  g_fence_len = 0;
 }
 
 void oxipresso_xetex_request_fence_snapshot(void) {
@@ -617,15 +635,28 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
     int jr = setjmp(g_fence_jmp);
     if (jr == 0) {
       oxi_fence_capture();
-      if (g_fence_restore_request) {
+      int cmd = 0;
+      if (g_fence_park_request) {
+        g_fence_park_request = 0;
+        if (active_session->callbacks->fence) {
+          cmd = active_session->callbacks->fence(
+              active_session->callbacks->userdata);
+        }
+      } else if (g_fence_restore_request) {
         g_fence_restore_request = 0;
+        cmd = 2;
+      } else if (g_fence_roundtrip_request) {
+        g_fence_roundtrip_request = 0;
+        cmd = 1;
+      }
+      if (cmd == 2) {
         if (oxi_fence_restore() == 0) {
           longjmp(g_fence_jmp, 2); /* replay the fence from the snapshot */
         }
-      } else if (g_fence_roundtrip_request) {
-        g_fence_roundtrip_request = 0;
+      } else if (cmd == 1) {
         longjmp(g_fence_jmp, 1);
       }
+      /* cmd == 3 (park "continue") or a refused restore: fall through. */
     } else if (jr == 2) {
       g_fence_restore_fired = 1; /* re-entered after a state restore */
     } else {

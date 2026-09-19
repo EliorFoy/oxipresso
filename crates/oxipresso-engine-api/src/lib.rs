@@ -166,6 +166,12 @@ pub trait EngineIo {
     fn snapshot_inputs(&mut self) -> Result<Vec<(String, Vec<u8>)>> {
         Ok(Vec::new())
     }
+    /// Inject editor-provided bytes for `path` while the engine is parked at
+    /// a checkpoint fence (the replay then reads the edited content). Backends
+    /// without editor-backed storage report `false` and the fence continues.
+    fn inject_editor(&mut self, _path: &str, _bytes: Vec<u8>) -> bool {
+        false
+    }
 }
 
 /// One incremental write an engine made to an output stream (stdout, log

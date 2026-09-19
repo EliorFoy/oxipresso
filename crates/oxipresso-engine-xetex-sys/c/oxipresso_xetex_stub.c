@@ -33,6 +33,7 @@ typedef struct {
   int (*flush)(void *userdata, uint32_t handle);
   int (*close)(void *userdata, uint32_t handle);
   void (*diagnostic)(void *userdata, int severity, const uint8_t *bytes, size_t len);
+  int (*fence)(void *userdata);
 } oxi_xetex_callbacks;
 
 int oxipresso_xetex_is_real(void) {
@@ -66,6 +67,8 @@ uint64_t oxipresso_xetex_fence_roundtrip_fired(void) { return 0; }
 void oxipresso_xetex_request_fence_restore(void) {}
 
 uint64_t oxipresso_xetex_fence_restore_fired(void) { return 0; }
+
+void oxipresso_xetex_request_fence_park(void) {}
 
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,

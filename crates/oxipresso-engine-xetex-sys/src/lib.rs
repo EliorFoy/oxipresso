@@ -70,6 +70,7 @@ pub struct OxiXetexCallbacks {
     pub flush: FlushCallback,
     pub close: CloseCallback,
     pub diagnostic: DiagnosticCallback,
+    pub fence: Option<unsafe extern "C" fn(userdata: *mut c_void) -> c_int>,
 }
 
 unsafe extern "C" {
@@ -88,4 +89,5 @@ unsafe extern "C" {
     pub fn oxipresso_xetex_fence_roundtrip_fired() -> u64;
     pub fn oxipresso_xetex_request_fence_restore();
     pub fn oxipresso_xetex_fence_restore_fired() -> u64;
+    pub fn oxipresso_xetex_request_fence_park();
 }
