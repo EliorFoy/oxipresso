@@ -1,0 +1,90 @@
+diff --git a/src/engine/engine/xetex-ini.c b/src/engine/engine/xetex-ini.c
+index 092777c..2b763aa 100644
+--- a/src/engine/engine/xetex-ini.c
++++ b/src/engine/engine/xetex-ini.c
+@@ -472,6 +472,13 @@ do_dump (char *p, size_t item_size, size_t nitems, rust_output_handle_t out_file
+ static void
+ do_undump (char *p, size_t item_size, size_t nitems, rust_input_handle_t in_file)
+ {
++    /* OXIPRESSO: report the fmt-restore target so the embedding shim can
++     * record the complete scalar/array rewind surface (resident passes).
++     * No-op unless resident recording is active. */
++    {
++        extern void oxipresso_undump_record(const void *, size_t);
++        oxipresso_undump_record((const void *) p, item_size * nitems);
++    }
+     ssize_t r = ttstub_input_read (in_file, p, item_size * nitems);
+     if (r < 0 || (size_t) r != item_size * nitems)
+         _tt_abort("could not undump %"PRIuZ" %"PRIuZ"-byte item(s) from %s",
+@@ -3871,9 +3878,33 @@ tt_run_engine(const char *dump_name, const char *input_file_name, time_t build_d
+ 
+     pdf_files_init();
+     synctex_init_command();
++    /* OXIPRESSO (resident passes, DESIGN-resume.md option b): S0 is
++     * captured right before the FIRST start_input, i.e. post-format-load,
++     * pre-document. The pass loop below re-runs start_input + main_control
++     * from that same S0 whenever the controller commands a replay, and only
++     * falls through to the cleanup when it commands completion. Both hooks
++     * are no-ops unless resident mode was enabled by the embedding shim, so
++     * every non-resident run is byte-identical to upstream behavior. */
++    {
++        extern void oxipresso_resident_capture(void);
++        oxipresso_resident_capture();
++    }
+     start_input(input_file_name);
+     history = HISTORY_SPOTLESS;
+     main_control();
++    /* OXIPRESSO: resident pass loop. */
++    {
++        extern int oxipresso_resident_park(void);
++        while (oxipresso_resident_park() == 1) {
++            fprintf(stderr, "[oxi] pass body enter\n");
++            fflush(stderr);
++            start_input(input_file_name);
++            fprintf(stderr, "[oxi] start_input returned\n");
++            fflush(stderr);
++            history = HISTORY_SPOTLESS;
++            main_control();
++        }
++    }
+     final_cleanup();
+     close_files_and_terminate();
+ 
+diff --git a/src/engine/engine/xetex-xetex0.c b/src/engine/engine/xetex-xetex0.c
+index 002056f..42e96b8 100644
+--- a/src/engine/engine/xetex-xetex0.c
++++ b/src/engine/engine/xetex-xetex0.c
+@@ -16926,6 +16926,16 @@ main_control(void)
+         begin_token_list(LOCAL(every_job), EVERY_JOB_TEXT);
+ 
+ big_switch: /* big_switch */
++    {
++        /* OXIPRESSO (temporary triage probe, resident passes): heartbeat on
++         * the per-token dispatch cycle. Prints at most every 16M tokens;
++         * silent in any normal run (a full pass is ~1e5 tokens). */
++        static unsigned long long oxi_bs_iter = 0;
++        if ((++oxi_bs_iter & 0xFFFFFFULL) == 0) {
++            fprintf(stderr, "[oxi] big_switch iter=%llu\n", oxi_bs_iter);
++            fflush(stderr);
++        }
++    }
+     get_x_token();
+ 
+ reswitch:
+@@ -17498,6 +17508,16 @@ reswitch:
+     goto big_switch;
+ 
+ main_loop: /*1069: */
++    {
++        /* OXIPRESSO (temporary triage probe, resident passes): heartbeat so a
++         * hung pass can be located inside the main loop. Prints at most every
++         * 64M iterations; silent in any normal run. */
++        static unsigned long long oxi_ml_iter = 0;
++        if ((++oxi_ml_iter & 0x3FFFFFFULL) == 0) {
++            fprintf(stderr, "[oxi] main_loop iter=%llu\n", oxi_ml_iter);
++            fflush(stderr);
++        }
++    }
+     if (cur_list.head == cur_list.tail && cur_list.mode > 0) {
+         if (insert_src_special_auto)
+             append_src_special();

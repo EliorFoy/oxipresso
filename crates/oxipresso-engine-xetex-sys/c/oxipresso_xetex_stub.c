@@ -76,6 +76,11 @@ void oxipresso_xetex_enable_resident_passes(void) {}
 
 uint64_t oxipresso_xetex_fence_park_kind(void) { return 0; }
 
+void oxipresso_xetex_resident_debug_counts(uint64_t *parks, uint64_t *reads) {
+  (void) parks;
+  (void) reads;
+}
+
 int oxipresso_xetex_run(const oxi_xetex_config *config,
                         const oxi_xetex_callbacks *callbacks,
                         oxi_xetex_result *result) {

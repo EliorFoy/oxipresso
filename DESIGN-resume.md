@@ -135,3 +135,43 @@ This is the true, in-process form of what AGENTS called the "eqtb pointer
 graph" item — and per the r204 finding it is RAW BYTES only in-process
 (no pointer re-derivation; segments/faces stay live).
 
+## Round-256 status — three blockers found & fixed, one live hang
+
+Since r212 the scalar-rewind went through three MEASURED fixes (each a
+real bug, not a guess):
+1. **Silent table truncation** (r212): `OXI_SCALAR_MAX=8192` dropped the
+   fmt tail without signal (`regs=8192` exactly on the cap). Fixed: 65536
+   cap + adjacent-run coalescing in `oxipresso_undump_record` + explicit
+   `g_scalar_overflow` making `oxi_scalars_restore` REFUSE the whole
+   rewind rather than half-apply.
+2. **Stale-address writes of realloc'd pools** (r243+): the undump stream
+   records `str_pool`/`mem` at fmt-load addresses; those arrays GROW and
+   MOVE during pass 1, so replaying the recorded addresses wrote freed
+   heap (corruption → hang). Fixed: `oxi_reg_overlaps_pool` compaction at
+   capture removes regions intersecting the five live pools (the fence
+   machinery restores those via LIVE bases); S0 payload 22.0MB → 11.9MB.
+3. **Test timing** (r243): `wait_parks` window 30s → 300s (pass-1 in
+   debug takes ~40s and parks only land between passes).
+
+**LIVE HANG (current investigation).** With pools+cursors+scalars all
+rewound the flow is measurably: S0 capture (regs≈4506, 11.9MB) → park #1
+→ pass-1 completes (read counter EXACTLY the plain run's 73845+32) →
+boundary park → edit → pass-2 **body enters, `start_input` returns**, then
+a 100%-CPU, zero-read, zero-append, flat-memory spin *inside*
+`main_control` before its first `big_switch` heartbeat (16M-token
+threshold — caveat: a healthy pass only does ~1e5 tokens, so silence
+alone doesn't prove the cycle dead). Probe trail committed as temporary
+`fprintf` markers in the patched host (`[oxi] S0 capture / resident_park
+entry / pass body enter / start_input returned / big_switch iter= /
+main_loop iter= / appends=`) plus `XetexEngine::resident_debug_counts()`
+and the watchdog thread in the ignored test. The spin starts after the
+first input line's first 32 chars (read counter frozen mid-line).
+**Next hypotheses, in order:** (a) line/buffer indices (`first`/`last`,
+`buf_size`-driven state) stale at the re-read of line 1; (b) input-stack
+top marker corrupted despite `start_input` returning; (c) a silent
+error-recovery spin with no output (check `history`/`interaction`).
+**Fastest discriminator:** drop the big_switch heartbeat to 1M and print
+`history, interaction, line, buf` there + once at `start_input returned`
+— scalars cycling = loop running on bad scalars; scalars frozen = spin
+outside the token loop.
+

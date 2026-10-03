@@ -99,4 +99,7 @@ unsafe extern "C" {
     /// 0 = mid-run fence park, 1 = resident pass-boundary park (read inside
     /// the fence callback to pick the right mirror-rollback target).
     pub fn oxipresso_xetex_fence_park_kind() -> u64;
+    /// Hang-triage counters: resident pass-boundary parks and non-format
+    /// reads, cumulative while resident mode is enabled.
+    pub fn oxipresso_xetex_resident_debug_counts(parks: *mut u64, reads: *mut u64);
 }

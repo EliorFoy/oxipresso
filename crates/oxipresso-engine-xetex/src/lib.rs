@@ -61,10 +61,11 @@ impl FenceControl {
         self.parks.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Spin until the engine has parked at least `at_least` times, or ~30s
-    /// elapse; returns whether the count was reached.
+    /// Spin until the engine has parked at least `at_least` times, or ~300s
+    /// elapse (a pass typeset in debug takes ~40s, and parks land only
+    /// between passes); returns whether the count was reached.
     pub fn wait_parks(&self, at_least: usize) -> bool {
-        for _ in 0..3000 {
+        for _ in 0..30000 {
             if self.park_count() >= at_least {
                 return true;
             }
@@ -297,6 +298,19 @@ impl XetexEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(control.clone());
         unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_enable_resident_passes() };
         Some(control)
+    }
+
+    /// Resident-loop counters (pass-boundary parks, non-format reads) for
+    /// hang triage. Zeroes in stub builds.
+    pub fn resident_debug_counts() -> (u64, u64) {
+        let mut parks = 0u64;
+        let mut reads = 0u64;
+        unsafe {
+            oxipresso_engine_xetex_sys::oxipresso_xetex_resident_debug_counts(
+                &mut parks, &mut reads,
+            );
+        }
+        (parks, reads)
     }
 
     fn format_path_text() -> String {
@@ -1787,14 +1801,17 @@ mod tests {
     /// pass 1 (S0 captured post-format-load, pre-document) and after EVERY
     /// completed pass; a pass-boundary `submit_edit` restores S0 and re-runs
     /// start_input + main_control against the current editor buffers.
-    /// STATUS (r208): WIP, ignored on purpose. Pool+cursor rewind lands and
-    /// the second pass now truly RUNS - but it hangs, because scalar engine
-    /// globals outside the five pools (eqtb_top, the hash array, counters…)
-    /// are not rewound and disagree with the rewound pools. The pass loop,
-    /// grown-prefix restore and park-kind channel below are verified
-    /// infrastructure; this test flips to active once the scalar-rewind set
-    /// lands (see DESIGN-resume.md "scalar rewind").
-    #[ignore = "resident passes await the scalar-global rewind set (DESIGN-resume.md)"]
+    /// STATUS (r256): WIP, ignored on purpose. The rewind set auto-derives
+    /// from the format itself (host reports every `do_undump` target; S0
+    /// compacts out pool-overlapping regions, whose arrays realloc/MOVE
+    /// during a pass - stale addresses would write freed heap; host-stack
+    /// temporaries are filtered too). With pools+cursors+scalars rewound,
+    /// pass 1 completes (reads==plain-run count) and parks at the boundary;
+    /// pass 2 enters its body, start_input returns, then spins at 100% CPU
+    /// INSIDE main_control before its first big_switch heartbeat (first
+    /// input line's 32 chars never advance the read counter, no output).
+    /// Probe trail + next hypothesis: `DESIGN-resume.md` r256 section.
+    #[ignore = "resident pass 2 spins inside main_control (DESIGN-resume.md r256)"]
     #[test]
     fn real_engine_resident_pass_rebuild_matches_fresh_run() {
         if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
@@ -1863,12 +1880,23 @@ mod tests {
                     .bytes
                     .clone()
             });
-            // Park 1: before pass 1 (S0). Submit edit1 - pass 1 typesets it.
+            // Park 1: before pass 1 (S0). Inject edit1 - pass 1 typesets it.
             assert!(control.wait_parks(1), "must park before pass 1");
             control.submit_edit("simple.tex", edit1.clone());
             // Park 2: pass 1 done. Submit edit2 - S0 restore + fresh pass 2.
             assert!(control.wait_parks(2), "must park after pass 1");
             control.submit_edit("simple.tex", edit2.clone());
+            // TEMP triage: sample loop counters while pass 2 runs.
+            let _wd = scope.spawn(|| {
+                for k in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(5000));
+                    let (parks, reads) = XetexEngine::resident_debug_counts();
+                    eprintln!("[resident-wd {k}] parks={parks} reads={reads}");
+                    if parks >= 3 {
+                        break;
+                    }
+                }
+            });
             // Park 3: pass 2 done. Finish: normal cleanup, initialize returns.
             assert!(control.wait_parks(3), "must park after pass 2");
             control.finish();

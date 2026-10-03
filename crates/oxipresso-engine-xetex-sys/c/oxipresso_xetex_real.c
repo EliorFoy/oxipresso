@@ -121,6 +121,13 @@ static oxi_session *active_session = NULL;
 static int g_fence_request = 0;
 static int g_fence_park_mode = 0; /* sticky: park at every armed fence */
 static int g_fence_park_kind = 0; /* 0=mid-run fence, 1=resident pass boundary */
+static int g_resident_enabled = 0;
+/* Observability for the pass loop (hang triage): parks completed and
+ * non-format reads performed, cumulative while resident mode is on. */
+static volatile uint64_t g_res_parks = 0;
+static volatile uint64_t g_res_reads = 0;
+static volatile uint64_t g_res_appends = 0;
+static volatile unsigned char g_res_last_out = 0;
 static uint8_t *g_fence_buf = NULL;
 static uint64_t g_fence_len = 0;
 
@@ -409,6 +416,18 @@ size_t ttstub_output_write(rust_output_handle_t handle, const char *data, size_t
       !handle || (!data && len > 0)) {
     return 0;
   }
+  if (g_resident_enabled) {
+    g_res_appends += (uint64_t)len;
+    if (len > 0 && data) {
+      g_res_last_out = data[len - 1];
+    }
+    if ((g_res_appends & 0xFFFFFu) < (uint64_t)len) {
+      fprintf(stderr, "[oxi] appends=%llu last=%02X\n",
+              (unsigned long long)g_res_appends,
+              (unsigned)g_res_last_out);
+      fflush(stderr);
+    }
+  }
   if (active_session->callbacks->append(active_session->callbacks->userdata,
                                         handle->handle,
                                         (const uint8_t *)data,
@@ -631,6 +650,11 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
     return -1;
   }
   size_t copied = 0;
+  if (g_resident_enabled && handle->path &&
+      !(active_session->format_path &&
+        strcmp(handle->path, active_session->format_path) == 0)) {
+    g_res_reads++;
+  }
   /* Re-armable checkpoint fence (multi-cycle): every non-format read may park
    * while g_fence_request is armed (the .fmt has loaded, pools are live). One
    * arm consumes into exactly one capture+park+replay; the controller re-arms
@@ -991,7 +1015,138 @@ static int oxi_fence_restore(int allow_grow) {
  * The 0/1 park-kind channel below tells the Rust fence callback which
  * checkpoint semantics apply (mid-run fence vs pass boundary), so the
  * mirror rollback targets the right capture. */
-static int g_resident_enabled = 0;
+void oxipresso_xetex_resident_debug_counts(uint64_t *parks, uint64_t *reads) {
+  if (parks) {
+    *parks = g_res_parks;
+  }
+  if (reads) {
+    *reads = g_res_reads;
+  }
+}
+
+/* ---- Scalar-global rewind set (the state web2c itself calls "the format")
+ * The patched host reports every do_undump target while the .fmt loads;
+ * that address/size stream IS the complete rewindable surface (eqtb_top,
+ * hash[], the fixed arrays, every scalar - by the format's own definition,
+ * no hand list to maintain). Recording runs from fmt-load start until the
+ * S0 capture; the regions stay allocated until the deferred cleanup, so
+ * replaying the recorded bytes at each pass boundary rewinds exactly what
+ * the five pools + cursors do not cover. */
+#define OXI_SCALAR_MAX 65536
+typedef struct {
+  const unsigned char *p;
+  uint64_t n;
+} oxi_scalar_reg;
+static oxi_scalar_reg g_scalar_regs[OXI_SCALAR_MAX];
+static int g_scalar_count = 0;
+static int g_scalar_overflow = 0;
+static int g_scalars_recording = 0;
+static uintptr_t g_stack_lo = 0, g_stack_hi = 0; /* engine-thread window */
+static uint8_t *g_scalar_buf = NULL;
+static uint64_t g_scalar_data = 0; /* payload bytes behind an 2-word header */
+
+void oxipresso_undump_record(const void *p, size_t n) {
+  if (!g_scalars_recording || n == 0) {
+    return;
+  }
+  /* Many undumps are host-STACK temporaries (sentinel probes like
+   * `undump_int(x); if (x != MEM_TOP) ...`). Rewinding those into a dead
+   * frame would corrupt the stack; real globals, fmt arrays and the pools
+   * all live far from the engine thread's stack window captured at run
+   * start. Temporaries are re-derived by the replay anyway. */
+  uintptr_t a = (uintptr_t) p;
+  if (a >= g_stack_lo && a < g_stack_hi) {
+    return;
+  }
+  /* Coalesce adjacent runs (the web2c undump stream is largely sequential
+   * over global arrays) to keep the table small. */
+  if (g_scalar_count > 0) {
+    oxi_scalar_reg *last = &g_scalar_regs[g_scalar_count - 1];
+    if (last->p + last->n == (const unsigned char *)p) {
+      last->n += (uint64_t)n;
+      return;
+    }
+  }
+  if (g_scalar_count >= OXI_SCALAR_MAX) {
+    g_scalar_overflow = 1; /* refuse the whole rewind rather than half-apply */
+    return;
+  }
+  g_scalar_regs[g_scalar_count].p = (const unsigned char *)p;
+  g_scalar_regs[g_scalar_count].n = (uint64_t)n;
+  g_scalar_count++;
+}
+
+/* True when [r->p, r->p + r->n) intersects one of the five live pool
+ * arrays. Those blocks are captured/restored by the fence machinery using
+ * LIVE bases (the arrays realloc - and therefore MOVE - during a pass),
+ * so replaying their recorded stale addresses would write freed memory
+ * and corrupt the heap. They are compacted out at capture time. */
+static int oxi_reg_overlaps_pool(const oxi_scalar_reg *r, uint64_t sizes[5],
+                                 const void *bases[5]) {
+  for (int i = 0; i < 5; i++) {
+    if (sizes[i] == 0) {
+      continue;
+    }
+    const unsigned char *b = (const unsigned char *)bases[i];
+    if (r->p < b + sizes[i] && b < r->p + r->n) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void oxi_scalars_capture(void) {
+  /* Compact out pool-overlapping regions first (fence restore owns those
+   * bytes via live bases); the rest are static globals and never-realloc'd
+   * fmt arrays, whose addresses stay valid until the deferred cleanup. */
+  uint64_t pool_sizes[5];
+  const void *pool_bases[5];
+  oxi_snap_sizes(pool_sizes, pool_bases);
+  int kept = 0;
+  for (int i = 0; i < g_scalar_count; i++) {
+    if (!oxi_reg_overlaps_pool(&g_scalar_regs[i], pool_sizes, pool_bases)) {
+      g_scalar_regs[kept++] = g_scalar_regs[i];
+    }
+  }
+  g_scalar_count = kept;
+  uint64_t total = 0;
+  for (int i = 0; i < g_scalar_count; i++) {
+    total += g_scalar_regs[i].n;
+  }
+  free(g_scalar_buf);
+  g_scalar_buf = NULL;
+  g_scalar_data = 0;
+  uint8_t *buf = (uint8_t *)malloc((size_t)total);
+  if (buf == NULL) {
+    return;
+  }
+  uint8_t *p = buf;
+  for (int i = 0; i < g_scalar_count; i++) {
+    memcpy(p, g_scalar_regs[i].p, (size_t)g_scalar_regs[i].n);
+    p += g_scalar_regs[i].n;
+  }
+  g_scalar_buf = buf;
+  g_scalar_data = total;
+  g_scalars_recording = 0; /* the fmt is fully loaded past this point */
+  fprintf(stderr, "[oxi] S0 capture: regs=%d bytes=%llu\n", g_scalar_count,
+          (unsigned long long) total);
+  fflush(stderr);
+}
+
+static int oxi_scalars_restore(void) {
+  if (!g_scalar_buf || g_scalar_overflow) {
+    return -1; /* never half-apply a truncated rewind set */
+  }
+  const uint8_t *p = g_scalar_buf;
+  for (int i = 0; i < g_scalar_count; i++) {
+    if (g_scalar_regs[i].n > g_scalar_data - (uint64_t)(p - g_scalar_buf)) {
+      return -1;
+    }
+    memcpy((void *)g_scalar_regs[i].p, p, (size_t)g_scalar_regs[i].n);
+    p += g_scalar_regs[i].n;
+  }
+  return 0;
+}
 
 void oxipresso_xetex_enable_resident_passes(void) { g_resident_enabled = 1; }
 
@@ -1003,6 +1158,7 @@ void oxipresso_resident_capture(void) {
   if (!g_resident_enabled || !active_session || !active_session->callbacks) {
     return;
   }
+  oxi_scalars_capture();
   oxi_fence_capture();
   g_fence_park_kind = 1;
   if (active_session->callbacks->fence) {
@@ -1022,11 +1178,15 @@ int oxipresso_resident_park(void) {
       !active_session->callbacks->fence) {
     return 0;
   }
+  g_res_parks++;
+  fprintf(stderr, "[oxi] resident_park entry #%llu reads=%llu\n",
+          (unsigned long long) g_res_parks, (unsigned long long) g_res_reads);
+  fflush(stderr);
   g_fence_park_kind = 1;
   int cmd = active_session->callbacks->fence(
       active_session->callbacks->userdata);
   g_fence_park_kind = 0;
-  if (cmd == 2 && oxi_fence_restore(1) == 0) {
+  if (cmd == 2 && oxi_fence_restore(1) == 0 && oxi_scalars_restore() == 0) {
     return 1;
   }
   g_resident_enabled = 0; /* finish/timeout/mismatch: normal single-run mode */
@@ -1059,6 +1219,17 @@ int oxipresso_xetex_run(const oxi_xetex_config *config,
 
   active_session = &session;
   session.abort_active = 1;
+  /* Resident mode: start recording the do_undump target stream so the fmt
+   * load's complete scalar/array surface is captured at S0 (see
+   * oxipresso_undump_record). Cleared by oxi_scalars_capture at S0. */
+  if (g_resident_enabled) {
+    uintptr_t frame = (uintptr_t) &session;
+    g_stack_lo = frame - (8u << 20); /* below: engine frames + guard */
+    g_stack_hi = frame + (64u << 10); /* above: only our own callers */
+    g_scalar_count = 0;
+    g_scalar_overflow = 0;
+    g_scalars_recording = 1;
+  }
   int status = 3;
   if (setjmp(session.abort_jump) == 0) {
     tt_xetex_set_int_variable("in_initex_mode", config->in_initex_mode ? 1 : 0);
