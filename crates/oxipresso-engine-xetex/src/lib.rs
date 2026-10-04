@@ -2006,6 +2006,130 @@ mod tests {
         unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
     }
 
+    /// Hot-reload measurement (P0.4): one resident session serves several
+    /// successive edits in the same process; each pass restores S0 and
+    /// re-typesets WITHOUT reloading the 22 MB format. Records per-pass
+    /// latency next to a fresh full run in the test log (the number AGENTS.md
+    /// quotes) and asserts the chain correctness: the final pass's snapshot
+    /// XDV is a byte prefix of the fresh-run oracle. Timing thresholds are
+    /// deliberately not asserted (CI machines vary); the printed numbers are
+    /// the deliverable.
+    #[test]
+    fn real_engine_resident_hot_reload_chain_measurement() {
+        if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
+            || env::var_os("TEXPRESSO_SRC").is_none()
+            || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
+        {
+            return;
+        }
+        let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
+            return;
+        };
+        unsafe { env::set_var("SOURCE_DATE_EPOCH", "1700000000") };
+        let original = fs::read(&fixture).unwrap();
+        // Four successive edits, each appending one sentence before
+        // \end{document}: a clean LaTeX chain that only grows.
+        let mut edits: Vec<Vec<u8>> = Vec::new();
+        for k in 1..=4 {
+            let marker = original
+                .windows(14)
+                .rposition(|w| w == b"\\end{document}")
+                .expect("document env ends the fixture");
+            let mut doc = Vec::with_capacity(original.len() + 48);
+            doc.extend_from_slice(&original[..marker]);
+            doc.extend_from_slice(format!("A resident hot-reload sentence {}.\n\n", k).as_bytes());
+            doc.extend_from_slice(&original[marker..]);
+            edits.push(doc);
+        }
+        let final_doc = edits.last().unwrap().clone();
+
+        let root = RootDocument {
+            root_dir: fixture.parent().unwrap().to_path_buf(),
+            root_name: "simple.tex".to_string(),
+            include_paths: Vec::new(),
+            stream_mode: false,
+        };
+        // Oracle: one fresh full run of the final document (format load
+        // included) - the cold-rebuild baseline.
+        let oracle = {
+            let started = std::time::Instant::now();
+            let mut engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("simple.tex", final_doc.clone());
+            vfs.set_resolver(Box::new(
+                texlive::KpsewhichResolver::auto().expect("kpsewhich resolver"),
+            ));
+            engine
+                .initialize(&root, &mut vfs)
+                .expect("oracle initialize");
+            let full_run = started.elapsed();
+            let bytes = engine
+                .output_document()
+                .expect("oracle artifact")
+                .bytes
+                .clone();
+            eprintln!(
+                "[hot-reload] full rebuild (format load + typeset): {full_run:?}, {} XDV bytes",
+                bytes.len()
+            );
+            bytes
+        };
+
+        let control = XetexEngine::arm_resident_passes().expect("resident control");
+        let (snap_tx, snap_rx) = std::sync::mpsc::channel::<ResidentSnapshot>();
+        let done = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut engine = XetexEngine::new();
+                let mut vfs = VirtualFileSystem::new();
+                vfs.open_editor("simple.tex", original.clone());
+                vfs.set_resolver(Box::new(
+                    texlive::KpsewhichResolver::auto().expect("kpsewhich resolver"),
+                ));
+                engine.set_resident_snapshot_sender(Some(snap_tx));
+                engine
+                    .initialize(&root, &mut vfs)
+                    .expect("resident initialize drives the pass loop");
+                engine
+                    .output_document()
+                    .map(|doc| doc.bytes)
+                    .expect("resident artifact after the chain")
+            });
+            let session_started = std::time::Instant::now();
+            let mut last_mark = session_started;
+            // Park 1: the S0 capture. Pass 1 typesets the first edited
+            // document (the inject happens at the capture park). Then each
+            // further edit is one hot pass; the delta is the per-pass cost.
+            assert!(control.wait_parks(1), "park before pass 1");
+            for (k, edit) in edits.iter().enumerate() {
+                control.submit_edit("simple.tex", edit.clone());
+                assert!(control.wait_parks(k + 2), "park after hot pass {k}");
+                let snap = snap_rx
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("snapshot per hot pass");
+                let xdv = snap
+                    .output_bytes
+                    .get("simple.xdv")
+                    .expect("hot pass snapshot carries the XDV");
+                let now = std::time::Instant::now();
+                eprintln!(
+                    "[hot-reload] pass {}: {:?} (delta {:?}), {} XDV bytes",
+                    k + 1,
+                    now.duration_since(session_started),
+                    now.duration_since(last_mark),
+                    xdv.len()
+                );
+                last_mark = now;
+            }
+            control.finish();
+            worker.join().expect("resident worker must not panic")
+        });
+        assert_eq!(
+            oracle, done,
+            "the final resident artifact must equal the fresh-run oracle after the whole chain"
+        );
+        unsafe { env::remove_var("SOURCE_DATE_EPOCH") };
+    }
+
     /// The fence mirror rollback (r139 protocol, pure-Rust): capture at the
     /// fence, grow the mirrors like a run past it, roll back — everything the
     /// aborted continuation appended must be gone, everything pre-fence must
