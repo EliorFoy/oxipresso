@@ -1494,6 +1494,38 @@ void oxipresso_resident_capture(void) {
     oxipresso_undump_record(if_stack,
                             sizeof(int32_t) * (size_t)max_in_open);
   }
+  /* Remaining heap-allocated arrays: buffer (line input), nest (nesting
+   * state), line/source stacks, and explicit full-coverage eqtb/hash.
+   * These are fmt-load-time allocations with stable addresses; their
+   * content is mutated during each pass but never recorded by do_undump
+   * (buffer/nest/line_stack are runtime-only, eqtb/hash undump only
+   * covers a subrange). */
+  if (buffer != NULL && buf_size > 0) {
+    oxipresso_undump_record(buffer, sizeof(UTF16_code) * (size_t)buf_size);
+  }
+  if (nest != NULL && nest_size > 0) {
+    oxipresso_undump_record(nest,
+                            sizeof(list_state_record) * (size_t)nest_size);
+  }
+  if (line_stack != NULL && max_in_open > 0) {
+    oxipresso_undump_record(line_stack,
+                            sizeof(int32_t) * (size_t)max_in_open);
+  }
+  if (source_filename_stack != NULL && max_in_open > 0) {
+    oxipresso_undump_record(source_filename_stack,
+                            sizeof(str_number) * (size_t)max_in_open);
+  }
+  if (full_source_filename_stack != NULL && max_in_open > 0) {
+    oxipresso_undump_record(full_source_filename_stack,
+                            sizeof(str_number) * (size_t)max_in_open);
+  }
+  if (eqtb != NULL) {
+    oxipresso_undump_record(eqtb, sizeof(memory_word) * (size_t)(eqtb_top + 1));
+  }
+  if (yhash != NULL) {
+    oxipresso_undump_record(yhash,
+                            sizeof(b32x2) * (size_t)(1 + hash_top - hash_offset));
+  }
   fprintf(stderr,
           "[oxi] istack probe: regs=%d cur@%p loc=%d limit=%d st=%d "
           "in_open@%p val=%d stack@%p lo=%p hi=%p\n",
