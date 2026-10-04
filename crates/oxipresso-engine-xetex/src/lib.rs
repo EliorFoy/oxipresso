@@ -567,8 +567,14 @@ impl CallbackState<'_> {
                 }
                 None => false,
             });
-        self.output_paths
-            .retain(|_, path| lens.bytes.contains_key(path.as_str()));
+        // NOTE: output_paths is deliberately NOT retained here. Removing
+        // handle→path mappings for paths not in the rollback target breaks
+        // the resident pass loop: the shipout code reuses the pass-1 dvi
+        // handle (dvi_file != NULL), whose output_paths entry would be
+        // removed, causing all pass-2 XDV writes to silently fail (the
+        // append callback can't resolve the path). Instead, stale
+        // output_bytes entries were already removed above; the append
+        // callback's or_default() recreates them fresh on demand.
         self.output_events.truncate(lens.events);
         self.diagnostics.truncate(lens.diagnostics);
     }
@@ -1798,20 +1804,18 @@ mod tests {
     }
 
     /// Checkpoint increment (resident passes): the patched host parks BEFORE
-    /// pass 1 (S0 captured post-format-load, pre-document) and after EVERY
-    /// completed pass; a pass-boundary `submit_edit` restores S0 and re-runs
-    /// start_input + main_control against the current editor buffers.
-    /// STATUS (r256): WIP, ignored on purpose. The rewind set auto-derives
-    /// from the format itself (host reports every `do_undump` target; S0
-    /// compacts out pool-overlapping regions, whose arrays realloc/MOVE
-    /// during a pass - stale addresses would write freed heap; host-stack
-    /// temporaries are filtered too). With pools+cursors+scalars rewound,
-    /// pass 1 completes (reads==plain-run count) and parks at the boundary;
-    /// pass 2 enters its body, start_input returns, then spins at 100% CPU
-    /// INSIDE main_control before its first big_switch heartbeat (first
-    /// input line's 32 chars never advance the read counter, no output).
-    /// Probe trail + next hypothesis: `DESIGN-resume.md` r256 section.
-    #[ignore = "resident pass 2 spins inside main_control (DESIGN-resume.md r256)"]
+    /// each pass; the controller injects the edited document at the fence,
+    /// the restore replays from S0 (pools + cursors + 243 scalar globals +
+    /// input/param stacks + hash-table chain links, all derived from the
+    /// format's own do_undump targets), and pass 2's artifact must be
+    /// byte-identical to a fresh full run of the final document — the core
+    /// theorem of checkpoint-incremental rebuilding. Proven (round 268):
+    /// the last four pieces were (1) hash[HASH_BASE..hash_top] rewind so CS
+    /// collision chains don't leak pass-1 entries, (2) rollback keeps
+    /// output_paths (the shipout reuses pass-1 write handles), (3) the
+    /// shipout deinit/init pair restores dvi-buffer invariants, (4) the
+    /// full font_used reset forces fnt_def re-emission for fonts above the
+    /// rewound font_ptr.
     #[test]
     fn real_engine_resident_pass_rebuild_matches_fresh_run() {
         if env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1")
@@ -1984,7 +1988,12 @@ mod tests {
         assert_eq!(state.output_bytes["out"], b"banner");
         assert!(state.output_bytes.contains_key("log"));
         assert!(!state.output_bytes.contains_key("simple.xdv"));
-        assert!(!state.output_paths.values().any(|v| v == "simple.xdv"));
+        // output_paths is deliberately retained (see rollback_to_fence): the
+        // resident pass loop's shipout reuses pass-1 write handles, so removing
+        // their path mappings would make every reused-handle write silently
+        // vanish. Only the byte content is rolled back; stale entries are
+        // recreated on demand by the append callback's or_default().
+        assert!(state.output_paths.values().any(|v| v == "simple.xdv"));
         assert_eq!(state.output_events.len(), 1);
         assert_eq!(state.output_events[0].data, b"banner");
         assert!(state.diagnostics.is_empty());
