@@ -60,7 +60,7 @@ index 092777c..4723382 100644
      close_files_and_terminate();
  
 diff --git a/src/engine/engine/xetex-xetex0.c b/src/engine/engine/xetex-xetex0.c
-index 002056f..89c359c 100644
+index 002056f..16327e5 100644
 --- a/src/engine/engine/xetex-xetex0.c
 +++ b/src/engine/engine/xetex-xetex0.c
 @@ -5155,9 +5155,33 @@ check_outer_validity(void)
@@ -237,27 +237,34 @@ index 002056f..89c359c 100644
  }
  
  
-@@ -5664,6 +5786,19 @@ void get_token(void)
+@@ -5664,6 +5786,26 @@ void get_token(void)
  void
  macro_call(void)
  {
-+    /* OXIPRESSO triage probe: macro-call entry counter (resident hangs). */
-+    static unsigned long long oxi_mc = 0;
-+    if (oxi_debug_pass2 && oxi_debug_pass2 < 100) {
-+        fprintf(stderr, "[oxi2] macro_call #%llu cmd=%d\n",
-+                oxi_mc, (int)cur_cmd);
-+        fflush(stderr);
-+        oxi_debug_pass2++;
-+    }
-+    if ((++oxi_mc & 0x3FFULL) == 0) {
-+        fprintf(stderr, "[oxi] macro_call n=%llu cur_cmd=%d\n",
-+                oxi_mc, (int)cur_cmd);
++    /* OXIPRESSO triage probe: macro-call entry, dual channel (oracle count
++     * + pass-2 gated) with CS name. */
++    static unsigned long long oxi_mc0 = 0;
++    if (oxi_mc0 < 50000) {
++        fprintf(stderr, "[oxi] macro_call0 n=%llu cs=%d name=%s\n",
++                oxi_mc0, (int)cur_cs,
++                (cur_cs >= HASH_BASE)
++                    ? gettexstring(hash[cur_cs].s1) : "?prim");
 +        fflush(stderr);
 +    }
++    if (oxi_debug_pass2) {
++        static unsigned long long oxi_mc2 = 0;
++        oxi_mc2++;
++        fprintf(stderr, "[oxi] macro_call2 n=%llu cs=%d name=%s\n",
++                oxi_mc2, (int)cur_cs,
++                (cur_cs >= HASH_BASE)
++                    ? gettexstring(hash[cur_cs].s1) : "?prim");
++        fflush(stderr);
++    }
++    oxi_mc0++;
      int32_t r;
      int32_t p = TEX_NULL;
      int32_t q;
-@@ -6164,6 +6299,19 @@ void find_sa_element(small_number t, int32_t n, bool w)
+@@ -6164,6 +6306,19 @@ void find_sa_element(small_number t, int32_t n, bool w)
  void
  expand(void)
  {
@@ -277,7 +284,7 @@ index 002056f..89c359c 100644
      int32_t t;
      bool b;
      int32_t p, q, r;
-@@ -6184,6 +6332,15 @@ expand(void)
+@@ -6184,6 +6339,15 @@ expand(void)
      backup_backup = mem[BACKUP_HEAD].b32.s1;
  
  reswitch:
@@ -293,7 +300,7 @@ index 002056f..89c359c 100644
      if (cur_cmd < CALL) { /*384:*/
          if (INTPAR(tracing_commands) > 1)
              show_cur_cmd_chr();
-@@ -6437,9 +6594,24 @@ reswitch:
+@@ -6437,9 +6601,24 @@ reswitch:
  }
  
  
@@ -318,7 +325,7 @@ index 002056f..89c359c 100644
      get_next();
  
      if (cur_cmd <= MAX_COMMAND)
-@@ -16926,10 +17098,55 @@ main_control(void)
+@@ -16926,10 +17105,55 @@ main_control(void)
          begin_token_list(LOCAL(every_job), EVERY_JOB_TEXT);
  
  big_switch: /* big_switch */
@@ -374,7 +381,7 @@ index 002056f..89c359c 100644
  
      if (INTPAR(tracing_commands) > 0)
          show_cur_cmd_chr();
-@@ -17498,6 +17715,16 @@ reswitch:
+@@ -17498,6 +17722,16 @@ reswitch:
      goto big_switch;
  
  main_loop: /*1069: */

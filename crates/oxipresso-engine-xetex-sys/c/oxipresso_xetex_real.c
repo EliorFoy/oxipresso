@@ -1522,9 +1522,16 @@ void oxipresso_resident_capture(void) {
   if (eqtb != NULL) {
     oxipresso_undump_record(eqtb, sizeof(memory_word) * (size_t)(eqtb_top + 1));
   }
-  if (yhash != NULL) {
-    oxipresso_undump_record(yhash,
-                            sizeof(b32x2) * (size_t)(1 + hash_top - hash_offset));
+  /* Hash table: the collision chain links live in the yhash allocation,
+   * NOT in mem. Pass-1 creates new CS entries whose chain links are ABOVE
+   * the format-load undump range. Without restoring these, pass-2's CS
+   * lookups walk stale chains, giving the SAME CS name a DIFFERENT index
+   * (measured: __hook_next class/article/before at cs 8962232 vs
+   * 8962234), shifting macro_call entry by one token. */
+  if (hash != NULL && hash_top >= HASH_BASE) {
+    oxipresso_undump_record(
+        &hash[HASH_BASE],
+        sizeof(b32x2) * (size_t)(hash_top - HASH_BASE + 1));
   }
   fprintf(stderr,
           "[oxi] istack probe: regs=%d cur@%p loc=%d limit=%d st=%d "
