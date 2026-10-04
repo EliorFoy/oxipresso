@@ -1169,6 +1169,307 @@ void oxipresso_resident_capture(void) {
   oxipresso_undump_record(&input_ptr, sizeof(input_ptr));
   oxipresso_undump_record(&param_ptr, sizeof(param_ptr));
   oxipresso_undump_record(&max_param_stack, sizeof(max_param_stack));
+  /* fmt scalars the host restores via its STACK TEMP (`undump_int(x);
+   * var = x;`): do_undump records the temp's stack address (filtered), so
+   * these globals are invisible to the recorder and pass-1 terminal values
+   * leak. Measured casualties: `rover` (pass-2 get_node walked the S0 free
+   * list from pass-1's terminal rover -> infinite loop at \immediate\write)
+   * and `avail` (one-word list head every get_avail starts from). */
+  oxipresso_undump_record(&rover, sizeof(rover));
+  oxipresso_undump_record(&lo_mem_max, sizeof(lo_mem_max));
+  oxipresso_undump_record(&hi_mem_min, sizeof(hi_mem_min));
+  oxipresso_undump_record(&avail, sizeof(avail));
+  oxipresso_undump_record(&hash_used, sizeof(hash_used));
+  oxipresso_undump_record(&font_ptr, sizeof(font_ptr));
+  oxipresso_undump_record(&par_loc, sizeof(par_loc));
+  oxipresso_undump_record(&write_loc, sizeof(write_loc));
+  oxipresso_undump_record(&hyph_count, sizeof(hyph_count));
+  oxipresso_undump_record(&hyph_next, sizeof(hyph_next));
+  oxipresso_undump_record(&hyph_start, sizeof(hyph_start));
+  /* Measured via the pass-2 mirror dump: `\immediate\write`'s balanced
+   * scan ran away ("Paragraph ended before \@parse@version was
+   * complete") because scan_toks balances braces on the GLOBAL
+   * align_state, whose pass-1 terminal value leaked (baseline showed
+   * align=1000000 mid-document). scanner_status guards the same paths. */
+  oxipresso_undump_record(&align_state, sizeof(align_state));
+  oxipresso_undump_record(&scanner_status, sizeof(scanner_status));
+  /* Job/log name cluster (measured via the pass-2 mirror: "Output written
+   * on ??? (1 page, 3084 bytes)" - the XDV was WRITTEN but to a torn
+   * path, because start_input only sets job_name when it is ZERO and
+   * pass-1 had already set it to a str number that no longer exists in
+   * the rewound string pool). */
+  oxipresso_undump_record(&job_name, sizeof(job_name));
+  oxipresso_undump_record(&log_opened, sizeof(log_opened));
+  oxipresso_undump_record(&texmf_log_name, sizeof(texmf_log_name));
+  /* Output-routing and scanner-flag cluster (measured: pass-2 failed at
+   * \documentclass with "tokens_to_string() called while selector =
+   * new_string" - the selector and scanner flags are runtime state the
+   * host pre-phase initializes but nothing rewinds). */
+  oxipresso_undump_record(&selector, sizeof(selector));
+  oxipresso_undump_record(&force_eof, sizeof(force_eof));
+  oxipresso_undump_record(&name_in_progress, sizeof(name_in_progress));
+  oxipresso_undump_record(&long_state, sizeof(long_state));
+  oxipresso_undump_record(&used_tectonic_coda_tokens,
+                          sizeof(used_tectonic_coda_tokens));
+  /* Scanner result globals (measured: pass-2's stream-number scan for
+   * \write said "A number should have been here; I inserted 0" - the scan
+   * machinery's result state leaked from pass-1). */
+  oxipresso_undump_record(&cur_val, sizeof(cur_val));
+  oxipresso_undump_record(&cur_val1, sizeof(cur_val1));
+  oxipresso_undump_record(&cur_val_level, sizeof(cur_val_level));
+  oxipresso_undump_record(&radix, sizeof(radix));
+  oxipresso_undump_record(&cur_order, sizeof(cur_order));
+  /* SYSTEMATIC SWEEP (r256c): every non-pointer extern global of the engine
+   * (generated from xetex-xetexd.h). The whack-a-mole registrations above
+   * are subsumed by this block; duplicates are harmless (same value
+   * rewritten). Pointer-typed globals are deliberately excluded - their
+   * targets are either stable fmt-load allocations (restoring the pointer
+   * is a no-op) or the realloc'd pools, which the fence machinery restores
+   * through LIVE bases.
+   */  oxipresso_undump_record(&shell_escape_enabled, sizeof(shell_escape_enabled));
+  oxipresso_undump_record(&bad, sizeof(bad));
+  oxipresso_undump_record(&name_length, sizeof(name_length));
+  oxipresso_undump_record(&name_length16, sizeof(name_length16));
+  oxipresso_undump_record(&first, sizeof(first));
+  oxipresso_undump_record(&last, sizeof(last));
+  oxipresso_undump_record(&max_buf_stack, sizeof(max_buf_stack));
+  oxipresso_undump_record(&in_initex_mode, sizeof(in_initex_mode));
+  oxipresso_undump_record(&error_line, sizeof(error_line));
+  oxipresso_undump_record(&half_error_line, sizeof(half_error_line));
+  oxipresso_undump_record(&max_print_line, sizeof(max_print_line));
+  oxipresso_undump_record(&max_strings, sizeof(max_strings));
+  oxipresso_undump_record(&strings_free, sizeof(strings_free));
+  oxipresso_undump_record(&string_vacancies, sizeof(string_vacancies));
+  oxipresso_undump_record(&pool_size, sizeof(pool_size));
+  oxipresso_undump_record(&pool_free, sizeof(pool_free));
+  oxipresso_undump_record(&font_mem_size, sizeof(font_mem_size));
+  oxipresso_undump_record(&font_max, sizeof(font_max));
+  oxipresso_undump_record(&hyph_size, sizeof(hyph_size));
+  oxipresso_undump_record(&trie_size, sizeof(trie_size));
+  oxipresso_undump_record(&buf_size, sizeof(buf_size));
+  oxipresso_undump_record(&stack_size, sizeof(stack_size));
+  oxipresso_undump_record(&max_in_open, sizeof(max_in_open));
+  oxipresso_undump_record(&param_size, sizeof(param_size));
+  oxipresso_undump_record(&nest_size, sizeof(nest_size));
+  oxipresso_undump_record(&save_size, sizeof(save_size));
+  oxipresso_undump_record(&expand_depth, sizeof(expand_depth));
+  oxipresso_undump_record(&file_line_error_style_p, sizeof(file_line_error_style_p));
+  oxipresso_undump_record(&halt_on_error_p, sizeof(halt_on_error_p));
+  oxipresso_undump_record(&quoted_filename, sizeof(quoted_filename));
+  oxipresso_undump_record(&insert_src_special_auto, sizeof(insert_src_special_auto));
+  oxipresso_undump_record(&insert_src_special_every_par, sizeof(insert_src_special_every_par));
+  oxipresso_undump_record(&insert_src_special_every_math, sizeof(insert_src_special_every_math));
+  oxipresso_undump_record(&insert_src_special_every_vbox, sizeof(insert_src_special_every_vbox));
+  oxipresso_undump_record(&pool_ptr, sizeof(pool_ptr));
+  oxipresso_undump_record(&str_ptr, sizeof(str_ptr));
+  oxipresso_undump_record(&init_pool_ptr, sizeof(init_pool_ptr));
+  oxipresso_undump_record(&init_str_ptr, sizeof(init_str_ptr));
+  oxipresso_undump_record(&selector, sizeof(selector));
+  oxipresso_undump_record(&tally, sizeof(tally));
+  oxipresso_undump_record(&term_offset, sizeof(term_offset));
+  oxipresso_undump_record(&file_offset, sizeof(file_offset));
+  oxipresso_undump_record(&trick_count, sizeof(trick_count));
+  oxipresso_undump_record(&first_count, sizeof(first_count));
+  oxipresso_undump_record(&doing_special, sizeof(doing_special));
+  oxipresso_undump_record(&native_text_size, sizeof(native_text_size));
+  oxipresso_undump_record(&native_len, sizeof(native_len));
+  oxipresso_undump_record(&save_native_len, sizeof(save_native_len));
+  oxipresso_undump_record(&interaction, sizeof(interaction));
+  oxipresso_undump_record(&deletions_allowed, sizeof(deletions_allowed));
+  oxipresso_undump_record(&set_box_allowed, sizeof(set_box_allowed));
+  oxipresso_undump_record(&history, sizeof(history));
+  oxipresso_undump_record(&error_count, sizeof(error_count));
+  oxipresso_undump_record(&help_ptr, sizeof(help_ptr));
+  oxipresso_undump_record(&use_err_help, sizeof(use_err_help));
+  oxipresso_undump_record(&arith_error, sizeof(arith_error));
+  oxipresso_undump_record(&tex_remainder, sizeof(tex_remainder));
+  oxipresso_undump_record(&j_random, sizeof(j_random));
+  oxipresso_undump_record(&random_seed, sizeof(random_seed));
+  oxipresso_undump_record(&temp_ptr, sizeof(temp_ptr));
+  oxipresso_undump_record(&lo_mem_max, sizeof(lo_mem_max));
+  oxipresso_undump_record(&hi_mem_min, sizeof(hi_mem_min));
+  oxipresso_undump_record(&dyn_used, sizeof(dyn_used));
+  oxipresso_undump_record(&avail, sizeof(avail));
+  oxipresso_undump_record(&mem_end, sizeof(mem_end));
+  oxipresso_undump_record(&rover, sizeof(rover));
+  oxipresso_undump_record(&last_leftmost_char, sizeof(last_leftmost_char));
+  oxipresso_undump_record(&last_rightmost_char, sizeof(last_rightmost_char));
+  oxipresso_undump_record(&hlist_stack_level, sizeof(hlist_stack_level));
+  oxipresso_undump_record(&first_p, sizeof(first_p));
+  oxipresso_undump_record(&global_prev_p, sizeof(global_prev_p));
+  oxipresso_undump_record(&font_in_short_display, sizeof(font_in_short_display));
+  oxipresso_undump_record(&depth_threshold, sizeof(depth_threshold));
+  oxipresso_undump_record(&breadth_max, sizeof(breadth_max));
+  oxipresso_undump_record(&nest_ptr, sizeof(nest_ptr));
+  oxipresso_undump_record(&max_nest_stack, sizeof(max_nest_stack));
+  oxipresso_undump_record(&cur_list, sizeof(cur_list));
+  oxipresso_undump_record(&shown_mode, sizeof(shown_mode));
+  oxipresso_undump_record(&old_setting, sizeof(old_setting));
+  oxipresso_undump_record(&hash_used, sizeof(hash_used));
+  oxipresso_undump_record(&hash_extra, sizeof(hash_extra));
+  oxipresso_undump_record(&hash_top, sizeof(hash_top));
+  oxipresso_undump_record(&eqtb_top, sizeof(eqtb_top));
+  oxipresso_undump_record(&hash_high, sizeof(hash_high));
+  oxipresso_undump_record(&no_new_control_sequence, sizeof(no_new_control_sequence));
+  oxipresso_undump_record(&cs_count, sizeof(cs_count));
+  oxipresso_undump_record(&prim_used, sizeof(prim_used));
+  oxipresso_undump_record(&save_ptr, sizeof(save_ptr));
+  oxipresso_undump_record(&max_save_stack, sizeof(max_save_stack));
+  oxipresso_undump_record(&cur_level, sizeof(cur_level));
+  oxipresso_undump_record(&cur_group, sizeof(cur_group));
+  oxipresso_undump_record(&cur_boundary, sizeof(cur_boundary));
+  oxipresso_undump_record(&mag_set, sizeof(mag_set));
+  oxipresso_undump_record(&cur_cmd, sizeof(cur_cmd));
+  oxipresso_undump_record(&cur_chr, sizeof(cur_chr));
+  oxipresso_undump_record(&cur_cs, sizeof(cur_cs));
+  oxipresso_undump_record(&cur_tok, sizeof(cur_tok));
+  oxipresso_undump_record(&input_ptr, sizeof(input_ptr));
+  oxipresso_undump_record(&max_in_stack, sizeof(max_in_stack));
+  oxipresso_undump_record(&cur_input, sizeof(cur_input));
+  oxipresso_undump_record(&in_open, sizeof(in_open));
+  oxipresso_undump_record(&open_parens, sizeof(open_parens));
+  oxipresso_undump_record(&line, sizeof(line));
+  oxipresso_undump_record(&scanner_status, sizeof(scanner_status));
+  oxipresso_undump_record(&warning_index, sizeof(warning_index));
+  oxipresso_undump_record(&def_ref, sizeof(def_ref));
+  oxipresso_undump_record(&param_ptr, sizeof(param_ptr));
+  oxipresso_undump_record(&max_param_stack, sizeof(max_param_stack));
+  oxipresso_undump_record(&align_state, sizeof(align_state));
+  oxipresso_undump_record(&base_ptr, sizeof(base_ptr));
+  oxipresso_undump_record(&par_loc, sizeof(par_loc));
+  oxipresso_undump_record(&par_token, sizeof(par_token));
+  oxipresso_undump_record(&force_eof, sizeof(force_eof));
+  oxipresso_undump_record(&expand_depth_count, sizeof(expand_depth_count));
+  oxipresso_undump_record(&is_in_csname, sizeof(is_in_csname));
+  oxipresso_undump_record(&long_state, sizeof(long_state));
+  oxipresso_undump_record(&cur_val, sizeof(cur_val));
+  oxipresso_undump_record(&cur_val1, sizeof(cur_val1));
+  oxipresso_undump_record(&cur_val_level, sizeof(cur_val_level));
+  oxipresso_undump_record(&radix, sizeof(radix));
+  oxipresso_undump_record(&cur_order, sizeof(cur_order));
+  oxipresso_undump_record(&cond_ptr, sizeof(cond_ptr));
+  oxipresso_undump_record(&if_limit, sizeof(if_limit));
+  oxipresso_undump_record(&cur_if, sizeof(cur_if));
+  oxipresso_undump_record(&if_line, sizeof(if_line));
+  oxipresso_undump_record(&skip_line, sizeof(skip_line));
+  oxipresso_undump_record(&cur_name, sizeof(cur_name));
+  oxipresso_undump_record(&cur_area, sizeof(cur_area));
+  oxipresso_undump_record(&cur_ext, sizeof(cur_ext));
+  oxipresso_undump_record(&area_delimiter, sizeof(area_delimiter));
+  oxipresso_undump_record(&ext_delimiter, sizeof(ext_delimiter));
+  oxipresso_undump_record(&file_name_quote_char, sizeof(file_name_quote_char));
+  oxipresso_undump_record(&format_default_length, sizeof(format_default_length));
+  oxipresso_undump_record(&name_in_progress, sizeof(name_in_progress));
+  oxipresso_undump_record(&job_name, sizeof(job_name));
+  oxipresso_undump_record(&log_opened, sizeof(log_opened));
+  oxipresso_undump_record(&texmf_log_name, sizeof(texmf_log_name));
+  oxipresso_undump_record(&fmem_ptr, sizeof(fmem_ptr));
+  oxipresso_undump_record(&font_ptr, sizeof(font_ptr));
+  oxipresso_undump_record(&loaded_font_flags, sizeof(loaded_font_flags));
+  oxipresso_undump_record(&loaded_font_letter_space, sizeof(loaded_font_letter_space));
+  oxipresso_undump_record(&null_character, sizeof(null_character));
+  oxipresso_undump_record(&total_pages, sizeof(total_pages));
+  oxipresso_undump_record(&max_v, sizeof(max_v));
+  oxipresso_undump_record(&max_h, sizeof(max_h));
+  oxipresso_undump_record(&max_push, sizeof(max_push));
+  oxipresso_undump_record(&last_bop, sizeof(last_bop));
+  oxipresso_undump_record(&dead_cycles, sizeof(dead_cycles));
+  oxipresso_undump_record(&doing_leaders, sizeof(doing_leaders));
+  oxipresso_undump_record(&rule_wd, sizeof(rule_wd));
+  oxipresso_undump_record(&epochseconds, sizeof(epochseconds));
+  oxipresso_undump_record(&microseconds, sizeof(microseconds));
+  oxipresso_undump_record(&last_badness, sizeof(last_badness));
+  oxipresso_undump_record(&adjust_tail, sizeof(adjust_tail));
+  oxipresso_undump_record(&pre_adjust_tail, sizeof(pre_adjust_tail));
+  oxipresso_undump_record(&pack_begin_line, sizeof(pack_begin_line));
+  oxipresso_undump_record(&empty, sizeof(empty));
+  oxipresso_undump_record(&cur_f, sizeof(cur_f));
+  oxipresso_undump_record(&cur_c, sizeof(cur_c));
+  oxipresso_undump_record(&cur_i, sizeof(cur_i));
+  oxipresso_undump_record(&cur_align, sizeof(cur_align));
+  oxipresso_undump_record(&cur_span, sizeof(cur_span));
+  oxipresso_undump_record(&cur_loop, sizeof(cur_loop));
+  oxipresso_undump_record(&align_ptr, sizeof(align_ptr));
+  oxipresso_undump_record(&cur_tail, sizeof(cur_tail));
+  oxipresso_undump_record(&cur_pre_tail, sizeof(cur_pre_tail));
+  oxipresso_undump_record(&just_box, sizeof(just_box));
+  oxipresso_undump_record(&hf, sizeof(hf));
+  oxipresso_undump_record(&cur_lang, sizeof(cur_lang));
+  oxipresso_undump_record(&max_hyph_char, sizeof(max_hyph_char));
+  oxipresso_undump_record(&init_list, sizeof(init_list));
+  oxipresso_undump_record(&init_lig, sizeof(init_lig));
+  oxipresso_undump_record(&init_lft, sizeof(init_lft));
+  oxipresso_undump_record(&hyphen_passed, sizeof(hyphen_passed));
+  oxipresso_undump_record(&cur_r, sizeof(cur_r));
+  oxipresso_undump_record(&cur_q, sizeof(cur_q));
+  oxipresso_undump_record(&lig_stack, sizeof(lig_stack));
+  oxipresso_undump_record(&ligature_present, sizeof(ligature_present));
+  oxipresso_undump_record(&rt_hit, sizeof(rt_hit));
+  oxipresso_undump_record(&hyph_count, sizeof(hyph_count));
+  oxipresso_undump_record(&hyph_next, sizeof(hyph_next));
+  oxipresso_undump_record(&trie_op_ptr, sizeof(trie_op_ptr));
+  oxipresso_undump_record(&max_op_used, sizeof(max_op_used));
+  oxipresso_undump_record(&trie_ptr, sizeof(trie_ptr));
+  oxipresso_undump_record(&trie_max, sizeof(trie_max));
+  oxipresso_undump_record(&trie_not_ready, sizeof(trie_not_ready));
+  oxipresso_undump_record(&best_height_plus_depth, sizeof(best_height_plus_depth));
+  oxipresso_undump_record(&page_tail, sizeof(page_tail));
+  oxipresso_undump_record(&page_contents, sizeof(page_contents));
+  oxipresso_undump_record(&last_glue, sizeof(last_glue));
+  oxipresso_undump_record(&last_penalty, sizeof(last_penalty));
+  oxipresso_undump_record(&last_kern, sizeof(last_kern));
+  oxipresso_undump_record(&last_node_type, sizeof(last_node_type));
+  oxipresso_undump_record(&insert_penalties, sizeof(insert_penalties));
+  oxipresso_undump_record(&output_active, sizeof(output_active));
+  oxipresso_undump_record(&main_f, sizeof(main_f));
+  oxipresso_undump_record(&main_i, sizeof(main_i));
+  oxipresso_undump_record(&main_j, sizeof(main_j));
+  oxipresso_undump_record(&main_k, sizeof(main_k));
+  oxipresso_undump_record(&main_p, sizeof(main_p));
+  oxipresso_undump_record(&main_ppp, sizeof(main_ppp));
+  oxipresso_undump_record(&main_h, sizeof(main_h));
+  oxipresso_undump_record(&is_hyph, sizeof(is_hyph));
+  oxipresso_undump_record(&space_class, sizeof(space_class));
+  oxipresso_undump_record(&prev_class, sizeof(prev_class));
+  oxipresso_undump_record(&main_s, sizeof(main_s));
+  oxipresso_undump_record(&bchar, sizeof(bchar));
+  oxipresso_undump_record(&false_bchar, sizeof(false_bchar));
+  oxipresso_undump_record(&cancel_boundary, sizeof(cancel_boundary));
+  oxipresso_undump_record(&ins_disc, sizeof(ins_disc));
+  oxipresso_undump_record(&cur_box, sizeof(cur_box));
+  oxipresso_undump_record(&after_token, sizeof(after_token));
+  oxipresso_undump_record(&long_help_seen, sizeof(long_help_seen));
+  oxipresso_undump_record(&format_ident, sizeof(format_ident));
+  oxipresso_undump_record(&write_loc, sizeof(write_loc));
+  oxipresso_undump_record(&cur_page_width, sizeof(cur_page_width));
+  oxipresso_undump_record(&cur_page_height, sizeof(cur_page_height));
+  oxipresso_undump_record(&cur_h_offset, sizeof(cur_h_offset));
+  oxipresso_undump_record(&cur_v_offset, sizeof(cur_v_offset));
+  oxipresso_undump_record(&pdf_last_x_pos, sizeof(pdf_last_x_pos));
+  oxipresso_undump_record(&pdf_last_y_pos, sizeof(pdf_last_y_pos));
+  oxipresso_undump_record(&LR_ptr, sizeof(LR_ptr));
+  oxipresso_undump_record(&LR_problems, sizeof(LR_problems));
+  oxipresso_undump_record(&cur_dir, sizeof(cur_dir));
+  oxipresso_undump_record(&pseudo_files, sizeof(pseudo_files));
+  oxipresso_undump_record(&max_reg_num, sizeof(max_reg_num));
+  oxipresso_undump_record(&cur_ptr, sizeof(cur_ptr));
+  oxipresso_undump_record(&sa_null, sizeof(sa_null));
+  oxipresso_undump_record(&sa_chain, sizeof(sa_chain));
+  oxipresso_undump_record(&sa_level, sizeof(sa_level));
+  oxipresso_undump_record(&hyph_start, sizeof(hyph_start));
+  oxipresso_undump_record(&hyph_index, sizeof(hyph_index));
+  oxipresso_undump_record(&edit_name_start, sizeof(edit_name_start));
+  oxipresso_undump_record(&stop_at_space, sizeof(stop_at_space));
+  oxipresso_undump_record(&native_font_type_flag, sizeof(native_font_type_flag));
+  oxipresso_undump_record(&xtx_ligature_present, sizeof(xtx_ligature_present));
+  oxipresso_undump_record(&delta, sizeof(delta));
+  oxipresso_undump_record(&synctex_enabled, sizeof(synctex_enabled));
+  oxipresso_undump_record(&synctex_use_gz, sizeof(synctex_use_gz));
+  oxipresso_undump_record(&synctex_texpresso_extension, sizeof(synctex_texpresso_extension));
+  oxipresso_undump_record(&used_tectonic_coda_tokens, sizeof(used_tectonic_coda_tokens));
+  oxipresso_undump_record(&semantic_pagination_enabled, sizeof(semantic_pagination_enabled));
+  oxipresso_undump_record(&gave_char_warning_help, sizeof(gave_char_warning_help));
+
   if (input_stack != NULL && stack_size > 0) {
     oxipresso_undump_record(input_stack,
                             sizeof(input_state_t) * (size_t)stack_size);
@@ -1207,11 +1508,16 @@ void oxipresso_resident_capture(void) {
   if (active_session->callbacks->fence) {
     int cmd = active_session->callbacks->fence(
         active_session->callbacks->userdata);
-    /* NO restore here: we sit exactly AT S0, so writing the buffer back
-     * onto the live pools would double-patch (and corrupt) them. A
-     * controller edit applied during this park takes effect through the
-     * VFS on pass 1's very first read; the buffer stays for the loop. */
-    (void)cmd;
+    /* KEY EXPERIMENT (r256d): restore here too. With the COMPLETE rewind
+     * set this is an identity (we sit at S0), and if pass-1 THEN fails the
+     * same way pass-2 does, the restore itself is unfaithful - localizing
+     * the bug to restore fidelity instead of pass-1 mutations. */
+    if (cmd == 2) {
+      if (oxi_fence_restore(1) != 0 || oxi_scalars_restore() != 0) {
+        fprintf(stderr, "[oxi] park-1 restore FAILED\n");
+        fflush(stderr);
+      }
+    }
   }
   g_fence_park_kind = 0;
 }

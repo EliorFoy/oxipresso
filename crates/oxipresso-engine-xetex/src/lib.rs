@@ -61,11 +61,11 @@ impl FenceControl {
         self.parks.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Spin until the engine has parked at least `at_least` times, or ~300s
-    /// elapse (a pass typeset in debug takes ~40s, and parks land only
-    /// between passes); returns whether the count was reached.
+    /// Spin until the engine has parked at least `at_least` times, or ~120s
+    /// elapse (a pass typesets in ~40s; parks only land between passes);
+    /// returns whether the count was reached.
     pub fn wait_parks(&self, at_least: usize) -> bool {
-        for _ in 0..30000 {
+        for _ in 0..12000 {
             if self.park_count() >= at_least {
                 return true;
             }
@@ -1874,11 +1874,29 @@ mod tests {
                 engine
                     .initialize(&root, &mut vfs)
                     .expect("resident initialize drives the pass loop");
-                engine
-                    .output_document()
-                    .expect("resident artifact")
-                    .bytes
-                    .clone()
+                match engine.output_document() {
+                    Some(doc) => doc.bytes.clone(),
+                    None => {
+                        // Triage: dump the merged out/log mirrors so the
+                        // engine's error text is visible in the test log.
+                        let mut merged: std::collections::BTreeMap<String, Vec<u8>> =
+                            std::collections::BTreeMap::new();
+                        for event in engine.take_output_events() {
+                            merged
+                                .entry(event.path)
+                                .or_default()
+                                .extend_from_slice(&event.data);
+                        }
+                        for (path, bytes) in &merged {
+                            let tail = &bytes[bytes.len().saturating_sub(600)..];
+                            eprintln!(
+                                "[oxi] mirror {path} tail:\n{}",
+                                String::from_utf8_lossy(tail)
+                            );
+                        }
+                        panic!("resident artifact missing after pass 2");
+                    }
+                }
             });
             // Park 1: before pass 1 (S0). Inject edit1 - pass 1 typesets it.
             assert!(control.wait_parks(1), "must park before pass 1");
