@@ -1158,6 +1158,49 @@ void oxipresso_resident_capture(void) {
   if (!g_resident_enabled || !active_session || !active_session->callbacks) {
     return;
   }
+  /* The runtime input stack is NOT in the fmt undump set (only a loc
+   * special-case), so the scalar recorder never sees it - and pass-1's
+   * TERMINAL input state (measured: cur_input.loc ~5e6, limit=1, files
+   * closed) leaked into pass-2, whose start_input then read zero bytes
+   * and the token walk spun on the torn state. Register the whole stack
+   * + top frame + open count into the rewind set before capture. */
+  oxipresso_undump_record(&cur_input, sizeof(cur_input));
+  oxipresso_undump_record(&in_open, sizeof(in_open));
+  oxipresso_undump_record(&input_ptr, sizeof(input_ptr));
+  oxipresso_undump_record(&param_ptr, sizeof(param_ptr));
+  oxipresso_undump_record(&max_param_stack, sizeof(max_param_stack));
+  if (input_stack != NULL && stack_size > 0) {
+    oxipresso_undump_record(input_stack,
+                            sizeof(input_state_t) * (size_t)stack_size);
+  }
+  /* Macro-parameter stack and the per-input-slot arrays: all fmt-load-time
+   * fixed allocations (never realloc'd), pass-1 terminal values otherwise
+   * leak - measured: pass-2 saw param_ptr=1 and the OUT_PARAM branch
+   * restart-looped on a torn param_stack entry (get_next #1782497 hung
+   * without ever returning, invisible to every entry probe). */
+  if (param_stack != NULL && param_size > 0) {
+    oxipresso_undump_record(param_stack,
+                            sizeof(int32_t) * (size_t)param_size);
+  }
+  if (eof_seen != NULL && max_in_open > 0) {
+    oxipresso_undump_record(eof_seen, sizeof(bool) * (size_t)max_in_open);
+  }
+  if (grp_stack != NULL && max_in_open > 0) {
+    oxipresso_undump_record(grp_stack,
+                            sizeof(save_pointer) * (size_t)max_in_open);
+  }
+  if (if_stack != NULL && max_in_open > 0) {
+    oxipresso_undump_record(if_stack,
+                            sizeof(int32_t) * (size_t)max_in_open);
+  }
+  fprintf(stderr,
+          "[oxi] istack probe: regs=%d cur@%p loc=%d limit=%d st=%d "
+          "in_open@%p val=%d stack@%p lo=%p hi=%p\n",
+          g_scalar_count, (void *)&cur_input, (int)cur_input.loc,
+          (int)cur_input.limit, (int)cur_input.state, (void *)&in_open,
+          (int)in_open, (void *)input_stack, (void *)g_stack_lo,
+          (void *)g_stack_hi);
+  fflush(stderr);
   oxi_scalars_capture();
   oxi_fence_capture();
   g_fence_park_kind = 1;

@@ -175,3 +175,32 @@ error-recovery spin with no output (check `history`/`interaction`).
 — scalars cycling = loop running on bad scalars; scalars frozen = spin
 outside the token loop.
 
+## Round-256b — hang NARROWED to the `\immediate\write` dispatch, via the
+second missed rewind set (all measured, in tree)
+
+The input-stack rewind DID land and DID work: S0 payload +120KB
+(input_stack = 5000 x 24B exactly), `param_ptr` provably rewound 1 -> 0
+across passes, and pass-2 now walks the token stream with a
+primitive-call sequence IDENTICAL to pass-1 down to the digit
+(`LaTeXReleaseInfo -> show@release@info -> immediate -> write` — the
+names were recovered by printing `gettexstring(hash[cs].s1)` in the
+csresolve probe). An interim ACCESS VIOLATION was a mis-sized
+registration (eof_seen/grp_stack/if_stack are allocated at
+`max_in_open`, NOT `stack_size`) — fixed.
+
+Pass-2 STILL stalls at the same point: the 10th primitive call is the CS
+token `write` (cmd=59), get_next RETURNS cleanly (a return probe
+fires), and then the engine spins (100% CPU, zero reads/writes, flat
+memory) inside main_control's dispatch of `\write` — the case handler
+loops WITHOUT calling any token primitive, which is why every
+entry/restart probe is silent. Pass-1 executes the IDENTICAL command
+sequence successfully (call counters match to the digit), so the
+divergent input is a pass-boundary value ONE LEVEL BELOW the token
+primitives. Remaining candidates: `align_state` (scan_toks' brace-balance
+loop), `scanner_status`, and `write_file[]/write_open[]`. Next
+discriminator: print `align_state` + `scanner_status` at the dispatch of
+cmd=59 in pass 1 vs pass 2, then walk do_extension's \write branch. All
+probes are gated by `oxi_debug_pass2` (cost: nothing outside resident
+mode). Regression gate: real suite 17/17 + 1 ignored (39.02s) with the
+full probe trail and the expanded rewind set — byte-stable.
+

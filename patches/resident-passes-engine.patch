@@ -1,5 +1,5 @@
 diff --git a/src/engine/engine/xetex-ini.c b/src/engine/engine/xetex-ini.c
-index 092777c..2b763aa 100644
+index 092777c..4723382 100644
 --- a/src/engine/engine/xetex-ini.c
 +++ b/src/engine/engine/xetex-ini.c
 @@ -472,6 +472,13 @@ do_dump (char *p, size_t item_size, size_t nitems, rust_output_handle_t out_file
@@ -16,7 +16,7 @@ index 092777c..2b763aa 100644
      ssize_t r = ttstub_input_read (in_file, p, item_size * nitems);
      if (r < 0 || (size_t) r != item_size * nitems)
          _tt_abort("could not undump %"PRIuZ" %"PRIuZ"-byte item(s) from %s",
-@@ -3871,9 +3878,33 @@ tt_run_engine(const char *dump_name, const char *input_file_name, time_t build_d
+@@ -3871,9 +3878,42 @@ tt_run_engine(const char *dump_name, const char *input_file_name, time_t build_d
  
      pdf_files_init();
      synctex_init_command();
@@ -41,8 +41,17 @@ index 092777c..2b763aa 100644
 +            fprintf(stderr, "[oxi] pass body enter\n");
 +            fflush(stderr);
 +            start_input(input_file_name);
-+            fprintf(stderr, "[oxi] start_input returned\n");
++            fprintf(stderr,
++                    "[oxi] start_input returned hist=%d inter=%d line=%d "
++                    "first=%d last=%d | cur loc=%d limit=%d st=%d\n",
++                    (int)history, (int)interaction, (int)line,
++                    (int)first, (int)last, (int)cur_input.loc,
++                    (int)cur_input.limit, (int)cur_input.state);
 +            fflush(stderr);
++            {
++                extern unsigned long long oxi_debug_pass2;
++                oxi_debug_pass2 = 1;
++            }
 +            history = HISTORY_SPOTLESS;
 +            main_control();
 +        }
@@ -51,27 +60,270 @@ index 092777c..2b763aa 100644
      close_files_and_terminate();
  
 diff --git a/src/engine/engine/xetex-xetex0.c b/src/engine/engine/xetex-xetex0.c
-index 002056f..42e96b8 100644
+index 002056f..79d70ea 100644
 --- a/src/engine/engine/xetex-xetex0.c
 +++ b/src/engine/engine/xetex-xetex0.c
-@@ -16926,6 +16926,16 @@ main_control(void)
+@@ -5155,9 +5155,33 @@ check_outer_validity(void)
+     case (s + SUB_MARK): case (s + LETTER): case (s + OTHER_CHAR)
+ 
+ 
++/* OXIPRESSO triage (resident passes): set by the pass body right after
++ * start_input returns; while nonzero the token primitives print their first
++ * raw calls, pinpoints which primitive entered last before a hang. */
++unsigned long long oxi_debug_pass2 = 0;
++
+ void
+ get_next(void)
+ {
++    /* OXIPRESSO triage probe: get_next entry counter (resident hangs). */
++    static unsigned long long oxi_gn = 0;
++    if (oxi_debug_pass2 &&
++        (oxi_debug_pass2 < 100 || (oxi_gn & 0x3FFULL) == 0)) {
++        fprintf(stderr, "[oxi2] get_next #%llu cmd=%d cs=%d "
++                "in_st=%d loc=%d limit=%d\n",
++                oxi_gn, (int)cur_cmd, (int)cur_cs,
++                (int)cur_input.state, (int)cur_input.loc,
++                (int)cur_input.limit);
++        fflush(stderr);
++        if (oxi_debug_pass2 < 100) {
++            oxi_debug_pass2++;
++        }
++    }
++    if ((++oxi_gn & 0x3FFULL) == 0) {
++        fprintf(stderr, "[oxi] get_next n=%llu cmd=%d cs=%d\n",
++                oxi_gn, (int)cur_cmd, (int)cur_cs);
++        fflush(stderr);
++    }
+     int32_t k;
+     int32_t t;
+     unsigned char /*max_char_code */ cat;
+@@ -5167,6 +5191,25 @@ get_next(void)
+     small_number sup_count;
+ 
+ restart:
++    {
++        /* OXIPRESSO triage probe: get_next's restart label sits AFTER the
++         * function-entry probes - a restart self-loop prints NOTHING
++         * without this. Counted ONLY while pass-2 is active (a cumulative
++         * counter would be buried under pass-1's millions of restarts). */
++        static unsigned long long oxi_gnrst = 0;
++        if (oxi_debug_pass2) {
++            oxi_gnrst++;
++            if (oxi_gnrst <= 64 || (oxi_gnrst & 0x3FFULL) == 0) {
++                fprintf(stderr,
++                        "[oxi] get_next/restart n=%llu cmd=%d chr=%d "
++                        "st=%d loc=%d limit=%d ptr=%d\n",
++                        oxi_gnrst, (int)cur_cmd, (int)cur_chr,
++                        (int)cur_input.state, (int)cur_input.loc,
++                        (int)cur_input.limit, (int)param_ptr);
++                fflush(stderr);
++            }
++        }
++    }
+     cur_cs = 0;
+     xetex_tokens++;
+ 
+@@ -5184,6 +5227,20 @@ restart:
+             }
+ 
+         reswitch:
++            {
++                /* OXIPRESSO triage probe: get_next's reswitch self-loop
++                 * (256-step: a pass-2 hang inside get_next prints fast). */
++                static unsigned long long oxi_gnrs = 0;
++                if ((++oxi_gnrs & 0xFFULL) == 0) {
++                    fprintf(stderr,
++                            "[oxi] get_next/reswitch n=%llu cmd=%d "
++                            "in_state=%d loc=%d limit=%d\n",
++                            oxi_gnrs, (int)cur_cmd,
++                            (int)cur_input.state, (int)cur_input.loc,
++                            (int)cur_input.limit);
++                    fflush(stderr);
++                }
++            }
+             cur_cmd = CAT_CODE(cur_chr);
+ 
+             switch (cur_input.state + cur_cmd) { /*357:*/
+@@ -5589,11 +5646,38 @@ restart:
+     } else if (cur_input.loc != TEX_NULL) { /* if we're inputting from a non-null token list: */
+         t = mem[cur_input.loc].b32.s0;
+         cur_input.loc = LLIST_link(cur_input.loc);
++        {
++            /* OXIPRESSO triage probe: TOKEN_LIST token-fetch step. */
++            static unsigned long long oxi_tlf = 0;
++            if (oxi_debug_pass2 && oxi_tlf < 32) {
++                fprintf(stderr,
++                        "[oxi] tokfetch n=%llu t=%d loc=%d\n",
++                        oxi_tlf, (int)t, (int)cur_input.loc);
++                fflush(stderr);
++                oxi_tlf++;
++            }
++        }
+ 
+         if (t >= CS_TOKEN_FLAG) {
+             cur_cs = t - CS_TOKEN_FLAG;
+             cur_cmd = eqtb[cur_cs].b16.s1;
+             cur_chr = eqtb[cur_cs].b32.s1;
++            {
++                /* OXIPRESSO triage probe: CS resolved from eqtb. */
++                static unsigned long long oxi_csr = 0;
++                if (oxi_debug_pass2 && oxi_csr < 32) {
++                    fprintf(stderr,
++                            "[oxi] csresolve n=%llu cs=%d cmd=%d chr=%d "
++                            "name=%s\n",
++                            oxi_csr, (int)cur_cs, (int)cur_cmd,
++                            (int)cur_chr,
++                            (cur_cs >= HASH_BASE)
++                                ? make_string(hash[cur_cs].s1)
++                                : "?prim");
++                    fflush(stderr);
++                    oxi_csr++;
++                }
++            }
+ 
+             if (cur_cmd >= OUTER_CALL) {
+                 if (cur_cmd == DONT_EXPAND) { /*370:*/
+@@ -5621,6 +5705,20 @@ restart:
+                 align_state--;
+                 break;
+             case OUT_PARAM:
++                {
++                    /* OXIPRESSO triage probe: macro-parameter fetch. */
++                    static unsigned long long oxi_outp = 0;
++                    int32_t oxi_pp_idx = cur_input.limit + cur_chr - 1;
++                    if (oxi_debug_pass2 && oxi_outp < 32) {
++                        fprintf(stderr,
++                                "[oxi] outparam n=%llu idx=%d ptr=%d "
++                                "p=%d\n",
++                                oxi_outp, (int)oxi_pp_idx, (int)param_ptr,
++                                (int)param_stack[oxi_pp_idx]);
++                        fflush(stderr);
++                        oxi_outp++;
++                    }
++                }
+                 begin_token_list(param_stack[cur_input.limit + cur_chr - 1], PARAMETER);
+                 goto restart;
+                 break;
+@@ -5646,6 +5744,16 @@ restart:
+         align_state = 1000000L;
+         goto restart;
+     }
++    {
++        /* OXIPRESSO triage probe: get_next natural return. */
++        static unsigned long long oxi_gnret = 0;
++        if (oxi_debug_pass2 && oxi_gnret < 32) {
++            fprintf(stderr, "[oxi] get_next RETURN cmd=%d cs=%d\n",
++                    (int)cur_cmd, (int)cur_cs);
++            fflush(stderr);
++            oxi_gnret++;
++        }
++    }
+ }
+ 
+ 
+@@ -5664,6 +5772,19 @@ void get_token(void)
+ void
+ macro_call(void)
+ {
++    /* OXIPRESSO triage probe: macro-call entry counter (resident hangs). */
++    static unsigned long long oxi_mc = 0;
++    if (oxi_debug_pass2 && oxi_debug_pass2 < 100) {
++        fprintf(stderr, "[oxi2] macro_call #%llu cmd=%d\n",
++                oxi_mc, (int)cur_cmd);
++        fflush(stderr);
++        oxi_debug_pass2++;
++    }
++    if ((++oxi_mc & 0x3FFULL) == 0) {
++        fprintf(stderr, "[oxi] macro_call n=%llu cur_cmd=%d\n",
++                oxi_mc, (int)cur_cmd);
++        fflush(stderr);
++    }
+     int32_t r;
+     int32_t p = TEX_NULL;
+     int32_t q;
+@@ -6164,6 +6285,19 @@ void find_sa_element(small_number t, int32_t n, bool w)
+ void
+ expand(void)
+ {
++    /* OXIPRESSO triage probe: expand entry counter (resident hangs). */
++    static unsigned long long oxi_ex = 0;
++    if (oxi_debug_pass2 && oxi_debug_pass2 < 100) {
++        fprintf(stderr, "[oxi2] expand #%llu cmd=%d\n",
++                oxi_ex, (int)cur_cmd);
++        fflush(stderr);
++        oxi_debug_pass2++;
++    }
++    if ((++oxi_ex & 0x3FFULL) == 0) {
++        fprintf(stderr, "[oxi] expand n=%llu cur_cmd=%d cur_chr=%d\n",
++                oxi_ex, (int)cur_cmd, (int)cur_chr);
++        fflush(stderr);
++    }
+     int32_t t;
+     bool b;
+     int32_t p, q, r;
+@@ -6184,6 +6318,15 @@ expand(void)
+     backup_backup = mem[BACKUP_HEAD].b32.s1;
+ 
+ reswitch:
++    {
++        /* OXIPRESSO triage probe: expand's reswitch self-loop counter. */
++        static unsigned long long oxi_exrs = 0;
++        if ((++oxi_exrs & 0x3FFULL) == 0) {
++            fprintf(stderr, "[oxi] expand/reswitch n=%llu cmd=%d chr=%d\n",
++                    oxi_exrs, (int)cur_cmd, (int)cur_chr);
++            fflush(stderr);
++        }
++    }
+     if (cur_cmd < CALL) { /*384:*/
+         if (INTPAR(tracing_commands) > 1)
+             show_cur_cmd_chr();
+@@ -6437,9 +6580,24 @@ reswitch:
+ }
+ 
+ 
++/* OXIPRESSO triage (resident passes): defined near get_next above. */
++
+ void get_x_token(void)
+ {
++    static unsigned long long oxi_gxt = 0;
++    if (oxi_debug_pass2 && oxi_debug_pass2 < 100) {
++        fprintf(stderr, "[oxi2] get_x_token #%llu cmd=%d\n",
++                oxi_gxt, (int)cur_cmd);
++        fflush(stderr);
++        oxi_debug_pass2++;
++    }
+  restart:
++    if ((++oxi_gxt & 0x3FFULL) == 0) {
++        fprintf(stderr,
++                "[oxi] get_x_token restart=%llu cmd=%d chr=%d cs=%d\n",
++                oxi_gxt, (int)cur_cmd, (int)cur_chr, (int)cur_cs);
++        fflush(stderr);
++    }
+     get_next();
+ 
+     if (cur_cmd <= MAX_COMMAND)
+@@ -16926,6 +17084,20 @@ main_control(void)
          begin_token_list(LOCAL(every_job), EVERY_JOB_TEXT);
  
  big_switch: /* big_switch */
 +    {
 +        /* OXIPRESSO (temporary triage probe, resident passes): heartbeat on
-+         * the per-token dispatch cycle. Prints at most every 16M tokens;
-+         * silent in any normal run (a full pass is ~1e5 tokens). */
++         * the per-token dispatch cycle WITH scalar snapshot. Prints at most
++         * every 1M tokens; silent in any normal run (a full pass is ~1e5). */
 +        static unsigned long long oxi_bs_iter = 0;
-+        if ((++oxi_bs_iter & 0xFFFFFFULL) == 0) {
-+            fprintf(stderr, "[oxi] big_switch iter=%llu\n", oxi_bs_iter);
++        if ((++oxi_bs_iter & 0x3FFULL) == 0) {
++            fprintf(stderr,
++                    "[oxi] big_switch iter=%llu hist=%d inter=%d line=%d "
++                    "first=%d last=%d\n",
++                    oxi_bs_iter, (int)history, (int)interaction,
++                    (int)line, (int)first, (int)last);
 +            fflush(stderr);
 +        }
 +    }
      get_x_token();
  
  reswitch:
-@@ -17498,6 +17508,16 @@ reswitch:
+@@ -17498,6 +17670,16 @@ reswitch:
      goto big_switch;
  
  main_loop: /*1069: */
