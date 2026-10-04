@@ -204,3 +204,102 @@ probes are gated by `oxi_debug_pass2` (cost: nothing outside resident
 mode). Regression gate: real suite 17/17 + 1 ignored (39.02s) with the
 full probe trail and the expanded rewind set — byte-stable.
 
+
+## r268 - THE RESIDENT PASS THEOREM IS PROVEN (commit 0ea737c)
+
+`real_engine_resident_pass_rebuild_matches_fresh_run` is ACTIVE and GREEN:
+pass 2, restored from the S0 checkpoint inside one process, produces an XDV
+byte-identical (3665 bytes) to a fresh full run of the final document. The
+checkpoint-incremental rebuild core theorem holds on the real XeTeX engine.
+
+### How the last four defects were found
+
+The differential method: run the oracle (fresh, edit2) and the resident
+chain (pass-1 on edit1, restore, pass-2 on edit2) in ONE process; dump both
+XDVs on mismatch and diff them byte-by-byte. Each fix moved the first
+divergence and re-measured:
+
+1. **Hash-table chain links (macro_call divergence 1963 -> 28383).** The
+   macro_call0/macro_call2 dual-channel probes showed the SAME CS name
+   (`__hook_next class/article/before`) resolving to DIFFERENT eqtb indices
+   (8962232 vs 8962234). Root cause: the CS collision chains live in the
+   yhash heap allocation, NOT in mem and NOT in the five pools; pass-1's new
+   CS entries left stale chain links above the format-load undump range, and
+   pass-2 lookups walked ghost chains. Fix: register
+   `hash[HASH_BASE..hash_top]` in the rewind set (oxipresso_xetex_real.c).
+   (An earlier attempt to register `yhash` failed to compile - the shim's TU
+   does not see it; `hash`, the offset-adjusted alias declared in
+   xetex-xetexd.h, is the right symbol.)
+
+2. **Rollback must retain output_paths (macro_call divergence 28383 -> pass
+   completes, artifact None).** The mirror rollback removed handle->path
+   mappings for paths not in the base lens. But the shipout code reuses the
+   pass-1 dvi_file handle (dvi_file != NULL), so every pass-2 DVI write went
+   through a handle whose path mapping had been deleted; the append callback
+   returned "handle not found" and the shim silently dropped the data
+   (output_bytes had no simple.xdv at all). Fix: rollback_to_fence no longer
+   touches output_paths - only output_bytes content is truncated; the append
+   callback's or_default() recreates stale entries on demand. The rollback
+   unit test was updated to pin the new contract.
+
+3. **Shipout state reset (artifact 11708 B -> 3516 B of real content).**
+   With writes landing again, the pass-2 XDV had an 8 KiB ZERO PREFIX plus
+   garbage at offset ~916: my first hand-rolled reset set dvi_limit=0 while
+   keeping the pass-1 buffer, breaking the half-buffer swap invariant
+   (dvi_limit alternates DVI_BUF_SIZE / HALF_BUF; dvi_offset increments by
+   the OTHER size). Fix: the pass body calls oxipresso_shipout_reset()
+   (xetex-shipout.c) which closes the stale dvi_file and runs the engine's
+   OWN deinitialize_shipout_variables + initialize_shipout_variables pair -
+   exactly restoring every invariant. Lesson: never hand-roll resets over
+   engine invariants; reuse the engine's init/deinit pairs.
+
+4. **font_used[] full reset (3516 B -> 3538 B -> 3665 B == oracle).** The
+   pass-2 XDV was missing the cmmi12 fnt_def1 (exactly -22 bytes): shipout
+   emits a font definition only when font_used[f] is false, and font_used[]
+   (heap bool array, NOT in the scalar rewind) still held pass-1's true
+   values. Bounding the reset by the rewound font_ptr missed exactly the
+   DOCUMENT fonts (they live above the S0 font_ptr - they get defined during
+   the pass); the first fix returned +22 bytes for a FORMAT font only. Fix:
+   sweep the whole array (f < font_max). After this, oracle == pass-2
+   byte-for-byte.
+
+### Probe-architecture traps (third and final round)
+
+- Cumulative counters buried under pass-1 traffic (three instances: get_next
+  entry, csresolve window, macro_call): pass-2 probes must be gated by a
+  pass-2-only counter, never a process-lifetime one.
+- Window conditions with the increment INSIDE the window (oxi_tlf++): the
+  counter stalls at the window edge forever; increment must be unconditional
+  under the flag.
+- Block-scope statics are invisible to sibling probes in the same function:
+  shared indices must be declared at function scope.
+
+### Final shape of the resident pass loop (xetex-ini.c)
+
+```
+while (oxipresso_resident_park() == 1) {
+    oxipresso_shipout_reset();      /* dvi_file close + deinit/init pair + font_used */
+    start_input(input_file_name);
+    history = HISTORY_SPOTLESS;
+    main_control();
+}
+```
+
+All triage probes removed from the engine tree; the shim keeps the one-shot
+S0 capture diagnostics and the parks/reads debug export.
+
+### Verification
+
+- stub: 147 passed / 0 failed / 0 ignored (resident test active, env-gated
+  self-skip in stub mode)
+- clippy: clean; fmt: clean
+- real: 18 passed / 0 failed / 0 ignored in 96s (the resident theorem test
+  runs as part of the default real suite)
+
+### What remains for P0
+
+- P0.3: wire the resident loop into the CLI rebuild path (OxipressoApp still
+  full-restarts; the engine wrapper exposes arm_resident_passes /
+  FenceControl::submit_edit / finish).
+- P0.4: measure hot-reload vs full-run latency end to end; record in
+  AGENTS.md.
