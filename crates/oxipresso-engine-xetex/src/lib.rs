@@ -50,6 +50,19 @@ enum FenceMsg {
     Finish,
 }
 
+/// One completed resident pass's outcomes, snapshotted at the pass-boundary
+/// park right before the mirror rollback. Because every earlier pass was
+/// rolled back to the empty S0 lens, the mirrors at a park hold exactly the
+/// last pass's output — so a consumer can run artifact selection and
+/// stream-message conversion per pass without waiting for the session to
+/// end (the CLI worker-thread wiring, P0.3).
+#[derive(Debug, Clone, Default)]
+pub struct ResidentSnapshot {
+    pub output_events: Vec<OutputEvent>,
+    pub output_bytes: std::collections::HashMap<String, Vec<u8>>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 impl FenceControl {
     /// Whether the engine thread is currently parked at the fence.
     pub fn is_parked(&self) -> bool {
@@ -141,6 +154,9 @@ pub struct XetexEngine {
     /// last run. Used by `apply_change_hint` to skip rebuilds for changes to
     /// files the engine never touched.
     read_files: std::collections::HashSet<String>,
+    /// Per-pass outcome snapshots during a resident session (P0.3). The
+    /// controller keeps the receiver; the fence callback sends on it.
+    resident_snapshots: Option<std::sync::mpsc::Sender<ResidentSnapshot>>,
 }
 
 impl XetexEngine {
@@ -300,6 +316,18 @@ impl XetexEngine {
         Some(control)
     }
 
+    /// Install the per-pass snapshot channel (P0.3): the controller keeps the
+    /// receiver and calls this on the engine BEFORE spawning the worker that
+    /// runs `initialize`. The fence callback then sends one
+    /// [`ResidentSnapshot`] per completed pass. Harmless outside resident
+    /// mode (no parks happen, so nothing is ever sent).
+    pub fn set_resident_snapshot_sender(
+        &mut self,
+        sender: Option<std::sync::mpsc::Sender<ResidentSnapshot>>,
+    ) {
+        self.resident_snapshots = sender;
+    }
+
     /// Resident-loop counters (pass-boundary parks, non-format reads) for
     /// hang triage. Zeroes in stub builds.
     pub fn resident_debug_counts() -> (u64, u64) {
@@ -405,6 +433,7 @@ impl XetexEngine {
             output_events: Vec::new(),
             diagnostics: Vec::new(),
             read_files: std::collections::HashSet::new(),
+            resident_snapshots: self.resident_snapshots.clone(),
         };
         let callbacks = OxiXetexCallbacks {
             userdata: (&mut callback_state as *mut CallbackState<'_>).cast::<c_void>(),
@@ -526,6 +555,9 @@ struct CallbackState<'a> {
     diagnostics: Vec<Diagnostic>,
     /// Paths of all files opened for reading (normalized).
     read_files: std::collections::HashSet<String>,
+    /// Per-pass outcome snapshots during a resident session (P0.3). None
+    /// outside resident mode, so the fence callback never sends.
+    resident_snapshots: Option<std::sync::mpsc::Sender<ResidentSnapshot>>,
 }
 
 /// Mirror state captured at a checkpoint fence so a replay can roll the
@@ -800,6 +832,24 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     // replay re-appends exactly these streams after the rollback below.
     let lens = state.capture_fence_lens();
     let kind = unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_fence_park_kind() };
+    // Per-pass outcome snapshot (P0.3): at a resident pass-boundary park the
+    // mirrors hold exactly the completed pass's output (every earlier pass
+    // was rolled back to the empty S0 lens). Send it before the park wait,
+    // so the controller can refresh the preview while the session continues.
+    if kind == 1
+        && let Some(sender) = &state.resident_snapshots
+    {
+        let has_output = !state.output_events.is_empty()
+            || !state.diagnostics.is_empty()
+            || state.output_bytes.values().any(|bytes| !bytes.is_empty());
+        if has_output {
+            let _ = sender.send(ResidentSnapshot {
+                output_events: state.output_events.clone(),
+                output_bytes: state.output_bytes.clone(),
+                diagnostics: state.diagnostics.clone(),
+            });
+        }
+    }
     control
         .parks
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1866,6 +1916,7 @@ mod tests {
                 .clone()
         };
         let control = XetexEngine::arm_resident_passes().expect("resident control (real mode)");
+        let (snap_tx, snap_rx) = std::sync::mpsc::channel::<ResidentSnapshot>();
         let done = std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
                 let mut engine = XetexEngine::new();
@@ -1875,6 +1926,9 @@ mod tests {
                     texlive::KpsewhichResolver::auto()
                         .expect("kpsewhich resolver for real-mode test"),
                 ));
+                // P0.3 shape: the controller keeps the receiver; the worker
+                // installs the sender before the blocking initialize.
+                engine.set_resident_snapshot_sender(Some(snap_tx));
                 engine
                     .initialize(&root, &mut vfs)
                     .expect("resident initialize drives the pass loop");
@@ -1908,22 +1962,43 @@ mod tests {
             // Park 2: pass 1 done. Submit edit2 - S0 restore + fresh pass 2.
             assert!(control.wait_parks(2), "must park after pass 1");
             control.submit_edit("simple.tex", edit2.clone());
-            // TEMP triage: sample loop counters while pass 2 runs.
-            let _wd = scope.spawn(|| {
-                for k in 0..10 {
-                    std::thread::sleep(std::time::Duration::from_millis(5000));
-                    let (parks, reads) = XetexEngine::resident_debug_counts();
-                    eprintln!("[resident-wd {k}] parks={parks} reads={reads}");
-                    if parks >= 3 {
-                        break;
-                    }
-                }
-            });
             // Park 3: pass 2 done. Finish: normal cleanup, initialize returns.
             assert!(control.wait_parks(3), "must park after pass 2");
             control.finish();
             worker.join().expect("resident worker must not panic")
         });
+        // P0.3: each completed pass delivered a snapshot through the channel.
+        // Snapshot 1 = pass on edit1 (different document => different XDV);
+        // snapshot 2 = pass on edit2 (== the fresh-run oracle).
+        let snap1 = snap_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("snapshot for the pass on edit1");
+        let xdv1 = snap1
+            .output_bytes
+            .get("simple.xdv")
+            .expect("pass-1 snapshot carries the XDV");
+        assert!(!xdv1.is_empty(), "pass-1 XDV is nonempty");
+        assert_ne!(
+            xdv1, &oracle,
+            "pass on edit1 must differ from the edit2 oracle"
+        );
+        let snap2 = snap_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("snapshot for the pass on edit2");
+        // The pass snapshot is the DVI stream through the last eop: every
+        // shipped page is fully written (dvi_flush runs at eop), but the
+        // postamble is only emitted by finalize_dvi_file at session end.
+        // That is exactly the original's killed-child preview state — pages
+        // parse without the postamble — so the snapshot must be a byte
+        // prefix of the final oracle artifact, not byte-equal.
+        let snap_xdv = snap2
+            .output_bytes
+            .get("simple.xdv")
+            .expect("pass-2 snapshot carries the XDV");
+        assert!(
+            snap_xdv.len() <= oracle.len() && oracle.starts_with(snap_xdv.as_slice()),
+            "the pass-2 snapshot's XDV must be a prefix of the fresh-run oracle"
+        );
         assert_eq!(
             oracle, done,
             "a resident second pass from S0 must equal a fresh full run of the final document"
@@ -1947,6 +2022,7 @@ mod tests {
             output_events: Vec::new(),
             diagnostics: Vec::new(),
             read_files: std::collections::HashSet::new(),
+            resident_snapshots: None,
         };
         state
             .output_bytes
