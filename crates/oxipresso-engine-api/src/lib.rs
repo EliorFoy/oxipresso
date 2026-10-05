@@ -149,6 +149,39 @@ pub enum OpenResult {
     Promised,
 }
 
+/// Mirrors the editor-wire lookup vocabulary (editor-protocol's
+/// `LookupKind`) so I/O layers can report file lookups without depending on
+/// the protocol crate; consumers map these onto the wire messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoLookupKind {
+    Read,
+    Write,
+}
+
+/// Mirrors the editor-wire lookup status vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoLookupStatus {
+    Successful,
+    Failed,
+    Promised,
+}
+
+/// An engine-side file event drained from the I/O layer: file lookups and
+/// successful input opens, the resident-session counterpart of the
+/// editor-wire `lookup-file` / `input-file` notifications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineIoEvent {
+    Lookup {
+        kind: IoLookupKind,
+        status: IoLookupStatus,
+        path: String,
+    },
+    Input {
+        index: usize,
+        path: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PictureKey {
     pub path: String,
@@ -166,6 +199,13 @@ pub trait EngineIo {
     fn close(&mut self, handle: FileHandle) -> Result<()>;
     fn picture_bounds_get(&mut self, key: &PictureKey) -> Option<[f32; 4]>;
     fn picture_bounds_set(&mut self, key: PictureKey, bounds: [f32; 4]);
+    /// Drain accumulated file events (lookups + successful input opens).
+    /// Resident sessions drain this at every pass-boundary park and forward
+    /// the events to the editor wire; the default (no events) covers
+    /// I/O layers that do not track them.
+    fn drain_events(&mut self) -> Vec<EngineIoEvent> {
+        Vec::new()
+    }
     fn snapshot_inputs(&mut self) -> Result<Vec<(String, Vec<u8>)>> {
         Ok(Vec::new())
     }

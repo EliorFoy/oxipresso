@@ -10,8 +10,8 @@ pub mod texlive;
 
 use oxipresso_engine_api::{
     ArtifactKind, Diagnostic, DiagnosticSeverity, DocumentArtifact, EngineEvent, EngineInit,
-    EngineIo, FileHandle, FileKind, OpenResult, OutputEvent, PathId, RestartPolicy, Result,
-    RootDocument, SyncTexArtifact, TypesettingEngine,
+    EngineIo, EngineIoEvent, FileHandle, FileKind, OpenResult, OutputEvent, PathId, RestartPolicy,
+    Result, RootDocument, SyncTexArtifact, TypesettingEngine,
 };
 use oxipresso_engine_xetex_sys::{
     OxiXetexCallbacks, OxiXetexConfig, OxiXetexResult, oxipresso_xetex_fence_restore_fired,
@@ -61,6 +61,10 @@ pub struct ResidentSnapshot {
     pub output_events: Vec<OutputEvent>,
     pub output_bytes: std::collections::HashMap<String, Vec<u8>>,
     pub diagnostics: Vec<Diagnostic>,
+    /// File events drained from the session's I/O at the park boundary —
+    /// the resident counterpart of the editor-wire lookup/input-file
+    /// notifications.
+    pub io_events: Vec<EngineIoEvent>,
 }
 
 impl ResidentSnapshot {
@@ -585,6 +589,7 @@ impl XetexEngine {
             diagnostics: Vec::new(),
             read_files: std::collections::HashSet::new(),
             resident_snapshots: self.resident_snapshots.clone(),
+            resident_park_index: 0,
         };
         let callbacks = OxiXetexCallbacks {
             userdata: (&mut callback_state as *mut CallbackState<'_>).cast::<c_void>(),
@@ -709,6 +714,12 @@ struct CallbackState<'a> {
     /// Per-pass outcome snapshots during a resident session (P0.3). None
     /// outside resident mode, so the fence callback never sends.
     resident_snapshots: Option<std::sync::mpsc::Sender<ResidentSnapshot>>,
+    /// Kind-1 park sequence number within the current run: 0 = the S0
+    /// capture park is next, >= 1 = pass-boundary parks. The capture park
+    /// must NOT send a snapshot (no pass has run) and must NOT drain the
+    /// I/O events (they belong to pass 1's snapshot, keeping the event set
+    /// identical to the non-resident flow's init drain).
+    resident_park_index: usize,
 }
 
 /// Mirror state captured at a checkpoint fence so a replay can roll the
@@ -990,15 +1001,27 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     if kind == 1
         && let Some(sender) = &state.resident_snapshots
     {
-        let has_output = !state.output_events.is_empty()
-            || !state.diagnostics.is_empty()
-            || state.output_bytes.values().any(|bytes| !bytes.is_empty());
-        if has_output {
-            let _ = sender.send(ResidentSnapshot {
-                output_events: state.output_events.clone(),
-                output_bytes: state.output_bytes.clone(),
-                diagnostics: state.diagnostics.clone(),
-            });
+        // The FIRST kind-1 park is the S0 capture: no pass has run, so no
+        // snapshot is sent and the I/O events stay queued — pass 1's
+        // snapshot then carries the format-load + pass-1 event set, exactly
+        // matching the non-resident flow's init drain. Every LATER kind-1
+        // park is a pass boundary: drain + send.
+        let is_pass_boundary = state.resident_park_index >= 1;
+        state.resident_park_index += 1;
+        if is_pass_boundary {
+            let io_events = state.io.drain_events();
+            let has_output = !state.output_events.is_empty()
+                || !state.diagnostics.is_empty()
+                || !io_events.is_empty()
+                || state.output_bytes.values().any(|bytes| !bytes.is_empty());
+            if has_output {
+                let _ = sender.send(ResidentSnapshot {
+                    output_events: state.output_events.clone(),
+                    output_bytes: state.output_bytes.clone(),
+                    diagnostics: state.diagnostics.clone(),
+                    io_events,
+                });
+            }
         }
     }
     control
@@ -2299,6 +2322,7 @@ mod tests {
             diagnostics: Vec::new(),
             read_files: std::collections::HashSet::new(),
             resident_snapshots: None,
+            resident_park_index: 0,
         };
         state
             .output_bytes

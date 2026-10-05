@@ -6,7 +6,8 @@ use std::{
 use base64::Engine as _;
 use oxipresso_editor_protocol::{Change, EditorCommand, LookupKind, LookupStatus};
 use oxipresso_engine_api::{
-    EngineError, EngineIo, FileHandle, FileKind, FileResolver, OpenResult, PictureKey, Result,
+    EngineError, EngineIo, EngineIoEvent, FileHandle, FileKind, FileResolver, IoLookupKind,
+    IoLookupStatus, OpenResult, PictureKey, Result,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,6 +534,31 @@ impl EngineIo for VirtualFileSystem {
         // an `open` command arriving while the engine is parked.
         let _outcome = self.open_editor(path, bytes);
         true
+    }
+
+    fn drain_events(&mut self) -> Vec<EngineIoEvent> {
+        let mut events = Vec::new();
+        for event in std::mem::take(&mut self.lookup_events) {
+            events.push(EngineIoEvent::Lookup {
+                kind: match event.kind {
+                    LookupKind::Read => IoLookupKind::Read,
+                    LookupKind::Write => IoLookupKind::Write,
+                },
+                status: match event.status {
+                    LookupStatus::Successful => IoLookupStatus::Successful,
+                    LookupStatus::Failed => IoLookupStatus::Failed,
+                    LookupStatus::Promised => IoLookupStatus::Promised,
+                },
+                path: event.path,
+            });
+        }
+        for event in std::mem::take(&mut self.input_events) {
+            events.push(EngineIoEvent::Input {
+                index: event.index,
+                path: event.path,
+            });
+        }
+        events
     }
 }
 

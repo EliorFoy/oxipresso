@@ -517,9 +517,42 @@ impl OxipressoApp {
         if let Some(synctex) = &synctex {
             self.persist_bytes_if_requested("OXIPRESSO_SYNCTEX_OUT", &synctex.bytes)?;
         }
-        // The stream messages carry the pass's out/log appends; consume the
-        // events last (they move out of the snapshot).
-        let messages = stream_messages_from_events(snap.output_events, self.options.line_output);
+        // The stream messages carry the pass's out/log appends; the file
+        // notifications (lookup/input) follow, matching the full-restart
+        // flow's drain order.
+        let mut messages =
+            stream_messages_from_events(snap.output_events, self.options.line_output);
+        for event in snap.io_events {
+            messages.push(match event {
+                oxipresso_engine_api::EngineIoEvent::Lookup { kind, status, path } => {
+                    EditorMessage::LookupFile {
+                        kind: match kind {
+                            oxipresso_engine_api::IoLookupKind::Read => {
+                                oxipresso_editor_protocol::LookupKind::Read
+                            }
+                            oxipresso_engine_api::IoLookupKind::Write => {
+                                oxipresso_editor_protocol::LookupKind::Write
+                            }
+                        },
+                        status: match status {
+                            oxipresso_engine_api::IoLookupStatus::Successful => {
+                                oxipresso_editor_protocol::LookupStatus::Successful
+                            }
+                            oxipresso_engine_api::IoLookupStatus::Failed => {
+                                oxipresso_editor_protocol::LookupStatus::Failed
+                            }
+                            oxipresso_engine_api::IoLookupStatus::Promised => {
+                                oxipresso_editor_protocol::LookupStatus::Promised
+                            }
+                        },
+                        path,
+                    }
+                }
+                oxipresso_engine_api::EngineIoEvent::Input { index, path } => {
+                    EditorMessage::InputFile { index, path }
+                }
+            });
+        }
         if let Some(artifact) = artifact {
             self.viewer
                 .load_artifact_with_renderer(artifact, &self.renderer)
@@ -2812,6 +2845,20 @@ endobj
                 .any(|message| matches!(message, EditorMessage::Flush)),
             "resident pass 1 stream ends with a flush"
         );
+        // Slice 2: the worker VFS's file events reach the wire — the root
+        // open shows up as a successful lookup + input-file notification.
+        assert!(init.iter().any(|message| matches!(
+            message,
+            EditorMessage::InputFile { path, .. } if path == "main.tex"
+        )));
+        assert!(init.iter().any(|message| matches!(
+            message,
+            EditorMessage::LookupFile {
+                path,
+                status: oxipresso_editor_protocol::LookupStatus::Successful,
+                ..
+            } if path == "main.tex"
+        )));
 
         // Hot rebuild 1: the change is one pass through the live session.
         let rebuild1 = app
