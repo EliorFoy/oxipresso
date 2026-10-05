@@ -8,6 +8,8 @@ real time.
 ## Features
 
 - **Real XeTeX engine**: embeds the actual TeXpresso/XeTeX C engine via FFI,
+- **Checkpoint hot rebuilds (resident passes)**: with `OXIPRESSO_RESIDENT=1` and a prebuilt format, editor changes restore the engine's S0 checkpoint and re-typeset in one pass without reloading the 22 MB format — measured ~2.7x faster than a full rebuild (~170-190ms vs ~496ms); the read set of each pass skips rebuilds for edits the engine never saw.
+- **Package providers**: TeX Live via `kpsewhich` (default, with a persistent resolution cache) or `-tectonic` over a local Tectonic-style bundle directory (`OXIPRESSO_TECTONIC_BUNDLE`; network bundles are not supported).
   with automatic format bootstrap from `xelatex.ini` and TeX Live package
   resolution through `kpsewhich`.
 - **Real glyph rendering**: XDV pages are rendered with FreeType-rasterized
