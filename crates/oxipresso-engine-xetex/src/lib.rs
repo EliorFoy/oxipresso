@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod tectonic;
 pub mod texlive;
 
 use oxipresso_engine_api::{

@@ -70,13 +70,10 @@ where
                 provider = PackageProvider::Texlive;
             }
             "-tectonic" => {
-                // The Tectonic package provider is not implemented; the CLI
-                // would otherwise silently fall back to kpsewhich (TeX Live)
-                // resolution, making `-tectonic` a no-op lie. Fail clearly.
-                return Err(
-                    "the Tectonic package provider is not implemented yet; use -texlive or the default"
-                        .to_string(),
-                );
+                if provider == PackageProvider::Texlive {
+                    return Err("-texlive and -tectonic are mutually exclusive".to_string());
+                }
+                provider = PackageProvider::Tectonic;
             }
             "-test-initialize" => initialize_only = true,
             "-stream" => stream_mode = true,
@@ -115,6 +112,13 @@ where
     W: Write,
 {
     let root = root_document(&options)?;
+    // The Tectonic provider's bundle environment is validated up front so a
+    // misconfigured `-tectonic` run fails loudly instead of silently falling
+    // back to TeX Live resolution.
+    if options.provider == PackageProvider::Tectonic {
+        oxipresso_engine_xetex::tectonic::DirBundleResolver::check_env()
+            .map_err(|e| format!("-tectonic: {e}"))?;
+    }
     let mut app = OxipressoApp::new(options, root);
     for message in app.initialize()? {
         writeln!(
@@ -372,22 +376,49 @@ pub struct OxipressoApp {
 }
 
 /// A VFS configured the way the engine should see the document world: disk
-/// roots from the document + include paths, and the TeX Live resolver. Used
-/// for the app's protocol-side VFS and for the resident session's worker
-/// (engine-I/O) VFS.
-fn engine_vfs(root: &RootDocument) -> VirtualFileSystem {
+/// roots from the document + include paths, and the selected package
+/// provider's resolver (TeX Live via kpsewhich, or a local Tectonic bundle
+/// directory). Used for the app's protocol-side VFS and for the resident
+/// session's worker (engine-I/O) VFS.
+fn engine_vfs(root: &RootDocument, provider: PackageProvider) -> Result<VirtualFileSystem, String> {
     let mut vfs = VirtualFileSystem::new();
     vfs.set_disk_roots(disk_roots_for(root));
-    if let Some(resolver) = oxipresso_engine_xetex::texlive::KpsewhichResolver::auto() {
-        vfs.set_resolver(Box::new(resolver));
+    match provider {
+        PackageProvider::Tectonic => {
+            oxipresso_engine_xetex::tectonic::DirBundleResolver::check_env()?;
+            vfs.set_resolver(Box::new(
+                oxipresso_engine_xetex::tectonic::DirBundleResolver::from_env()
+                    .expect("bundle env checked above"),
+            ));
+        }
+        PackageProvider::Texlive | PackageProvider::Auto => {
+            if let Some(resolver) = oxipresso_engine_xetex::texlive::KpsewhichResolver::auto() {
+                vfs.set_resolver(Box::new(resolver));
+            }
+        }
     }
-    vfs
+    Ok(vfs)
 }
 
 impl OxipressoApp {
     pub fn new(options: CliOptions, root: RootDocument) -> Self {
         let paused = options.stream_mode;
-        let vfs = engine_vfs(&root);
+        // run_with_io validated the provider env before constructing the app;
+        // direct construction (tests, embedders) degrades to Auto resolution
+        // with a loud warning instead of failing the constructor.
+        let vfs = match engine_vfs(&root, options.provider) {
+            Ok(vfs) => vfs,
+            Err(error) => {
+                eprintln!("oxipresso: {error}; falling back to default resolution");
+                match engine_vfs(&root, PackageProvider::Auto) {
+                    Ok(vfs) => vfs,
+                    Err(error) => {
+                        eprintln!("oxipresso: {error}; continuing without a resolver");
+                        VirtualFileSystem::new()
+                    }
+                }
+            }
+        };
         let renderer = {
             let renderer = AutoRenderBackend::default();
             #[cfg(feature = "freetype")]
@@ -474,7 +505,7 @@ impl OxipressoApp {
         let Some(bytes) = self.root_bytes_from_vfs(&root_path)? else {
             return Ok(false);
         };
-        let mut worker_vfs = engine_vfs(&self.root);
+        let mut worker_vfs = engine_vfs(&self.root, self.options.provider)?;
         worker_vfs.open_editor(&self.root.root_name, bytes);
         let engine = oxipresso_engine_xetex::XetexEngine::new();
         let session = oxipresso_engine_xetex::XetexEngine::start_resident_session(
@@ -1067,17 +1098,55 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unimplemented_tectonic_provider() {
-        // `-tectonic` must fail loudly, not silently behave like TeX Live.
-        let err = parse_args(["-tectonic", "main.tex"]).unwrap_err();
-        assert!(
-            err.to_lowercase().contains("tectonic")
-                && err.to_lowercase().contains("not implemented"),
-            "unexpected message: {err}"
-        );
+    fn tectonic_provider_is_accepted_and_mutually_exclusive() {
+        // `-tectonic` now selects the local-bundle provider (P3): accepted at
+        // the flag level; the bundle environment is validated at startup.
+        let opts = parse_args(["-tectonic", "main.tex"]).unwrap();
+        assert!(matches!(opts.provider, PackageProvider::Tectonic));
         // `-texlive` remains accepted and selects the TeX Live provider.
         let opts = parse_args(["-texlive", "main.tex"]).unwrap();
         assert!(matches!(opts.provider, PackageProvider::Texlive));
+        // The two providers are still mutually exclusive.
+        assert!(parse_args(["-texlive", "-tectonic", "main.tex"]).is_err());
+        assert!(parse_args(["-tectonic", "-texlive", "main.tex"]).is_err());
+    }
+
+    #[test]
+    fn tectonic_provider_fails_loudly_without_bundle_env() {
+        // A misconfigured `-tectonic` run fails at startup, naming the env —
+        // never silently falling back to TeX Live resolution.
+        let _env = env_lock();
+        let saved = std::env::var_os(oxipresso_engine_xetex::tectonic::BUNDLE_ENV);
+        unsafe {
+            std::env::remove_var(oxipresso_engine_xetex::tectonic::BUNDLE_ENV);
+        }
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(&root_file, "\\relax\n").unwrap();
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Tectonic,
+            initialize_only: true,
+            stream_mode: false,
+            gui: false,
+            root_file,
+        };
+        let mut output = Vec::new();
+        let result = run_with_io(options, std::io::Cursor::new(Vec::<u8>::new()), &mut output);
+        if let Some(value) = saved {
+            unsafe {
+                std::env::set_var(oxipresso_engine_xetex::tectonic::BUNDLE_ENV, value);
+            }
+        }
+        let error = result.expect_err("missing bundle env must fail the run");
+        assert!(
+            error.contains(oxipresso_engine_xetex::tectonic::BUNDLE_ENV),
+            "error names the bundle env, got: {error}"
+        );
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]
