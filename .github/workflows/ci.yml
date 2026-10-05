@@ -1,0 +1,120 @@
+# CI for Oxipresso.
+#
+# Two jobs:
+#  1. windows-stub — the full workspace with the portable stub engine: fmt,
+#     clippy, and every test. This is the supported/verified invocation.
+#  2. linux-pure-rust — the platform-neutral crates build (codegen to rlibs)
+#     for x86_64-linux-musl AND x86_64-linux-gnu, and their tests run on a
+#     real Linux runner. The C-engine crates are Windows-first and are NOT
+#     built on Linux (no cross C toolchain; see AGENTS.md).
+#
+# The real-engine path needs the texpresso C/C++ source tree plus vcpkg
+# triplets, which are machine-specific; it is exercised by the gated tests
+# on the development machine, not in CI.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows-stub:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-stub-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-stub-
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Release build (stub binary)
+        run: cargo build --release -p oxipresso-cli
+
+      - name: Wire smoke (shipped binary)
+        shell: pwsh
+        run: |
+          $doc = Join-Path $env:TEMP "ci-smoke.tex"
+          [IO.File]::WriteAllText($doc, "\documentclass{article}`n\begin{document}`nci`n\end{document}`n")
+          & target\release\oxipresso.exe -test-initialize $doc
+          if ($LASTEXITCODE -ne 0) { throw "wire smoke failed: $LASTEXITCODE" }
+
+  linux-pure-rust:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-pure-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-pure-${{ matrix.target }}-
+
+      # The platform-neutral crates: the design constraint is that they stay
+      # buildable for Linux down to codegen on both ABIs.
+      - name: Pure-Rust crates build (codegen)
+        shell: bash
+        run: |
+          for crate in oxipresso-platform oxipresso-render oxipresso-vfs \
+                       oxipresso-engine-api oxipresso-editor-protocol \
+                       oxipresso-synctex oxipresso-testkit oxipresso-engine-external; do
+            echo "== build $crate (${{ matrix.target }}) =="
+            cargo build -p "$crate" --target ${{ matrix.target }} --lib
+          done
+
+      # Their tests run on a real Linux runner (gnu target).
+      - name: Pure-Rust crates tests (gnu only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          for crate in oxipresso-platform oxipresso-render oxipresso-vfs \
+                       oxipresso-editor-protocol oxipresso-synctex; do
+            echo "== test $crate =="
+            cargo test -p "$crate"
+          done
+
+      - name: Clippy (pure-Rust crates, host target)
+        shell: bash
+        run: |
+          for crate in oxipresso-platform oxipresso-render oxipresso-vfs \
+                       oxipresso-engine-api oxipresso-editor-protocol \
+                       oxipresso-synctex oxipresso-testkit; do
+            cargo clippy -p "$crate" -- -D warnings
+          done
