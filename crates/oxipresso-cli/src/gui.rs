@@ -102,10 +102,11 @@ impl LivePreview {
         let _ = stdout.flush();
     }
 
-    /// Pulls the engine's current artifact into the viewer state and refreshes
-    /// the displayed page texture.
+    /// Pulls the freshest artifact (the resident session's last pass when a
+    /// session is live, otherwise the engine's own output) into the viewer
+    /// state and refreshes the displayed page texture.
     fn refresh_from_engine(&mut self) {
-        let Some(artifact) = self.app.engine.output_document() else {
+        let Some(artifact) = self.app.current_artifact() else {
             return;
         };
         let changed = self

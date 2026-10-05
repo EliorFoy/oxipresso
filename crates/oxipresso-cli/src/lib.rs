@@ -362,6 +362,10 @@ pub struct OxipressoApp {
     /// thread; editor changes become hot passes instead of full restarts.
     /// None in stub/external mode or when OXIPRESSO_RESIDENT is unset.
     resident: Option<oxipresso_engine_xetex::ResidentSession>,
+    /// The freshest artifact a resident pass produced (postamble-pending
+    /// until the session finishes). `current_artifact` serves it while a
+    /// session is live.
+    resident_artifact: Option<oxipresso_engine_api::DocumentArtifact>,
 }
 
 /// A VFS configured the way the engine should see the document world: disk
@@ -405,11 +409,22 @@ impl OxipressoApp {
             synctex: None,
             paused,
             resident: None,
+            resident_artifact: None,
         }
     }
 
     pub fn viewer_state(&self) -> &ViewerState {
         &self.viewer
+    }
+
+    /// The freshest document artifact: the resident session's last pass
+    /// while a session is live (its XDV is postamble-pending until the
+    /// session finishes), otherwise the engine's own output.
+    pub fn current_artifact(&self) -> Option<oxipresso_engine_api::DocumentArtifact> {
+        if self.resident.is_some() {
+            return self.resident_artifact.clone();
+        }
+        self.engine.output_document()
     }
 
     pub fn initialize(&mut self) -> Result<Vec<EditorMessage>, String> {
@@ -519,6 +534,9 @@ impl OxipressoApp {
         if let Some(synctex) = &synctex {
             self.persist_bytes_if_requested("OXIPRESSO_SYNCTEX_OUT", &synctex.bytes)?;
         }
+        // Serve the freshest pass output to consumers (the GUI pulls it
+        // through `current_artifact` after each handled wire line).
+        self.resident_artifact = artifact.clone();
         // The stream messages carry the pass's out/log appends; the file
         // notifications (lookup/input) follow, matching the full-restart
         // flow's drain order.
