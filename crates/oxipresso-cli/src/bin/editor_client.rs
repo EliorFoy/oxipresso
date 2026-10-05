@@ -10,13 +10,18 @@
 //! - the right pane shows the engine's notices (truncate/append/flush,
 //!   input-file/lookup-file) and the mirrored `out` info buffer, applied
 //!   exactly the way a plugin's info buffers would be.
+//!
+//! Threading: the session reader thread owns the wire and the out-buffer
+//! mirror and sends plain-data events over a channel; a repeating Slint
+//! timer on the UI thread drains the channel (Slint components are not Send,
+//! so UI access stays on the event loop).
 
 use oxipresso_cli::editor_wire::{EditorWireSession, WireNotice, escape_wire_string};
 use oxipresso_editor_protocol::{InfoBuffer, WireProtocol};
-use slint::{ComponentHandle, Weak};
+use slint::{ComponentHandle, SharedString};
 
 slint::slint! {
-    import { Button, TextEdit } from "std-widgets.slib";
+    import { Button, TextEdit } from "std-widgets.slint";
 
     export component EditorClientWindow inherits Window {
         title: "Oxipresso editor client";
@@ -75,65 +80,30 @@ slint::slint! {
     }
 }
 
-struct EditorWindow {
-    ui: EditorClientWindow,
-    session: std::sync::Mutex<Option<EditorWireSession>>,
-    doc_path: std::path::PathBuf,
-    protocol: WireProtocol,
-}
-
-impl EditorWindow {
-    fn log_line(&self, line: &str) {
-        let ui = self.ui.as_weak();
-        let line = line.to_string();
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = ui.upgrade() {
-                let mut log = ui.get_message_log();
-                // Cap the log so a long session cannot grow without bound.
-                if log.len() > 128 * 1024 {
-                    log = log[log.len() - 96 * 1024..].to_string();
-                }
-                log.push_str(&line);
-                log.push('\n');
-                ui.set_message_log(log);
-            }
-        });
-    }
-
-    fn send_raw(&self, line: String) {
-        let mut guard = self.session.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(session) = guard.as_mut() {
-            if let Err(error) = session.send_raw(&line) {
-                self.log_line(&format!("[client] {error}"));
-            }
-        } else {
-            self.log_line("[client] no engine session");
-        }
-    }
+/// Plain-data event the reader thread sends to the UI thread.
+struct UiEvent {
+    raw: String,
+    out_buffer: String,
 }
 
 /// Mirror the `out` info buffer exactly the way an editor plugin would:
-/// truncates reset it, appends splice at `pos`, and the pane shows the text.
-fn apply_out_buffer(ui: &Weak<EditorClientWindow>, notice: &WireNotice) {
-    if let Some(ui) = ui.upgrade() {
-        match notice {
-            WireNotice::Truncate {
-                buffer: InfoBuffer::Out,
-                ..
-            } => ui.set_out_buffer(String::new()),
-            WireNotice::Append {
-                buffer: InfoBuffer::Out,
-                pos: Some(pos),
-                text,
-                ..
-            } => {
-                let mut buf = ui.get_out_buffer();
-                let start = (*pos).min(buf.len());
-                buf.insert_str(start, text);
-                ui.set_out_buffer(buf);
-            }
-            _ => {}
+/// truncates reset it, appends splice at `pos`. Returns the new buffer text.
+fn apply_out_buffer(buffer: &mut String, notice: &WireNotice) {
+    match notice {
+        WireNotice::Truncate {
+            buffer: InfoBuffer::Out,
+            ..
+        } => buffer.clear(),
+        WireNotice::Append {
+            buffer: InfoBuffer::Out,
+            pos: Some(pos),
+            text,
+            ..
+        } => {
+            let start = (*pos).min(buffer.len());
+            buffer.insert_str(start, text);
         }
+        _ => {}
     }
 }
 
@@ -210,70 +180,76 @@ fn main() {
     let initial = std::fs::read(&doc_path).unwrap_or_default();
     ui.set_document_text(String::from_utf8_lossy(&initial).into_owned().into());
 
-    let window = std::sync::Arc::new(EditorWindow {
-        ui: ui.clone_strong(),
-        session: std::sync::Mutex::new(Some(session)),
-        doc_path: doc_path.clone(),
-        protocol,
-    });
-
-    // Reader: engine notices -> log pane + out-buffer mirror.
+    // Reader: owns the session wire and the out-buffer mirror; the engine
+    // session is moved here. It forwards queued UI commands (non-blocking)
+    // and polls notices with a short timeout, so one thread serves both
+    // directions.
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
+    let (wire_tx, wire_rx) = std::sync::mpsc::channel::<String>();
     {
-        let window = std::sync::Arc::clone(&window);
-        let ui_weak = ui.as_weak();
+        let ui_tx = ui_tx.clone();
         std::thread::spawn(move || {
+            let mut session = session;
+            let mut out_buffer = String::new();
             loop {
-                let parsed = {
-                    let mut guard = window.session.lock().unwrap_or_else(|p| p.into_inner());
-                    match guard.as_mut() {
-                        Some(session) => session.next_notice(std::time::Duration::from_secs(1)),
-                        None => return,
+                while let Ok(line) = wire_rx.try_recv() {
+                    if session.send_raw(&line).is_err() {
+                        return;
                     }
-                };
-                let Some(parsed) = parsed else { continue };
-                window.log_line(&parsed.raw);
-                let _ = slint::invoke_from_event_loop(move || {
-                    apply_out_buffer(&ui_weak, &parsed.notice);
-                });
+                }
+                if let Some(parsed) = session.next_notice(std::time::Duration::from_millis(100)) {
+                    apply_out_buffer(&mut out_buffer, &parsed.notice);
+                    let event = UiEvent {
+                        raw: parsed.raw,
+                        out_buffer: out_buffer.clone(),
+                    };
+                    if ui_tx.send(event).is_err() {
+                        return;
+                    }
+                }
+                // No notice in this window: loop back to the command queue.
             }
         });
     }
 
-    // Buttons. The on_* handles must outlive the event loop (dropping one
-    // disconnects its handler), so bind each to a named local.
+    // Buttons queue raw wire lines to the reader thread (Slint components
+    // are not Send, so nothing UI-owned crosses a thread here). Each closure
+    // gets its own strong component clone (named separately: the handler
+    // registration borrows the original handle, so the closure cannot move
+    // a shadowed binding of it); the doc path and protocol are captured by
+    // value.
     {
-        let window = std::sync::Arc::clone(&window);
+        let ui_for_open = ui.clone_strong();
+        let wire_tx = wire_tx.clone();
+        let doc_path = doc_path.clone();
         ui.on_send_open(move || {
-            let content = window.ui.get_document_text().to_string();
+            let content = ui_for_open.get_document_text().to_string();
             use base64::Engine as _;
             let payload = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
-            let line = if window.protocol == WireProtocol::Json {
-                format!(
-                    "[\"open-base64\",{},\"{payload}\"]",
-                    json_string(&window.doc_path.to_string_lossy())
-                )
-            } else {
-                format!(
-                    "(open-base64 {} \"{}\")",
-                    escape_wire_string(&window.doc_path.to_string_lossy()),
-                    payload
-                )
-            };
-            window.send_raw(line);
+            let line = format!(
+                "(open-base64 {} \"{}\")",
+                escape_wire_string(&doc_path.to_string_lossy()),
+                payload
+            );
+            let _ = wire_tx.send(line);
         });
     }
     {
-        let window = std::sync::Arc::clone(&window);
+        let ui_for_change = ui.clone_strong();
+        let wire_tx = wire_tx.clone();
+        let doc_path = doc_path.clone();
         ui.on_send_change(move || {
-            let new_text = window.ui.get_document_text().to_string();
-            let old_len = std::fs::read(&window.doc_path)
+            let new_text = ui_for_change.get_document_text().to_string();
+            // Whole-buffer replace, matching what an editor save does: write
+            // the file and replace bytes 0..old_len with the editor content.
+            let old_len = std::fs::read(&doc_path)
                 .map(|bytes| bytes.len())
                 .unwrap_or(0);
-            let _ = std::fs::write(&window.doc_path, new_text.as_bytes());
-            let line = if window.protocol == WireProtocol::Json {
+            let _ = std::fs::write(&doc_path, new_text.as_bytes());
+            let line = if protocol == WireProtocol::Json {
                 format!(
                     "[\"change\",{},{},{},{}]",
-                    json_string(&window.doc_path.to_string_lossy()),
+                    json_string(&doc_path.to_string_lossy()),
                     0,
                     old_len,
                     json_string(&new_text)
@@ -281,25 +257,54 @@ fn main() {
             } else {
                 format!(
                     "(change {} 0 {old_len} {})",
-                    escape_wire_string(&window.doc_path.to_string_lossy()),
+                    escape_wire_string(&doc_path.to_string_lossy()),
                     escape_wire_string(&new_text)
                 )
             };
-            window.send_raw(line);
+            let _ = wire_tx.send(line);
         });
     }
-    let _rescan_handle = {
-        let window = std::sync::Arc::clone(&window);
-        ui.on_send_rescan(move || window.send_raw("(rescan)".to_string()))
-    };
-    let _pause_handle = {
-        let window = std::sync::Arc::clone(&window);
-        ui.on_send_pause(move || window.send_raw("(pause)".to_string()))
-    };
-    let _resume_handle = {
-        let window = std::sync::Arc::clone(&window);
-        ui.on_send_resume(move || window.send_raw("(resume)".to_string()))
-    };
+    ui.on_send_rescan({
+        let wire_tx = wire_tx.clone();
+        move || {
+            let _ = wire_tx.send("(rescan)".to_string());
+        }
+    });
+    ui.on_send_pause({
+        let wire_tx = wire_tx.clone();
+        move || {
+            let _ = wire_tx.send("(pause)".to_string());
+        }
+    });
+    ui.on_send_resume({
+        let wire_tx = wire_tx.clone();
+        move || {
+            let _ = wire_tx.send("(resume)".to_string());
+        }
+    });
+
+    // UI-side timer: drain reader events onto the properties.
+    let timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(100),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                while let Ok(event) = ui_rx.try_recv() {
+                    let mut log = ui.get_message_log().to_string();
+                    if log.len() > 128 * 1024 {
+                        log = log[log.len() - 96 * 1024..].to_string();
+                    }
+                    log.push_str(&event.raw);
+                    log.push('\n');
+                    ui.set_message_log(log.into());
+                    ui.set_out_buffer(SharedString::from(event.out_buffer));
+                }
+            },
+        );
+    }
 
     ui.run().expect("slint event loop");
 }

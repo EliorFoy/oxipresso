@@ -29,7 +29,7 @@ slint = ["dep:slint"]
 [dependencies]
 base64 = "0.22"
 eframe = { version = "0.34.3", optional = true, default-features = false, features = ["default_fonts", "wgpu"] }
-slint = { version = "1.13", optional = true, default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg"] }
+slint = { version = "1.17", optional = true }
 oxipresso-editor-protocol = { path = "../oxipresso-editor-protocol" }
 oxipresso-engine-api = { path = "../oxipresso-engine-api" }
 oxipresso-engine-external = { path = "../oxipresso-engine-external" }
