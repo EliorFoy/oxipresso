@@ -104,7 +104,10 @@ pub struct FileHandle(pub u32);
 /// cannot find itself (for example TeX distribution files resolved through a
 /// TeX Live installation). Implementations return file bytes when the path can
 /// be resolved.
-pub trait FileResolver {
+///
+/// `Send`: resolvers live inside the VFS, which a resident session moves
+/// onto its worker thread (P0.3).
+pub trait FileResolver: Send {
     fn resolve(&mut self, path: &str, kind: FileKind) -> Option<Vec<u8>>;
 }
 

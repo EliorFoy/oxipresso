@@ -130,6 +130,85 @@ impl FenceControl {
     }
 }
 
+/// The final state of a resident session, returned by
+/// [`ResidentSession::finish`].
+#[derive(Debug)]
+pub struct ResidentSessionEnd {
+    /// The last completed pass's artifact (fresh-run equivalent; includes
+    /// the DVI postamble because the engine ran its normal cleanup).
+    pub artifact: Option<DocumentArtifact>,
+    pub diagnostics: Vec<Diagnostic>,
+    /// The initialize error, if the session never got off the ground.
+    pub error: Option<String>,
+}
+
+/// A persistent resident session (P0.3 final): the engine and its I/O live
+/// on a worker thread for the whole session; each [`submit`](Self::submit)
+/// restores the S0 checkpoint and re-typesets the edited document WITHOUT
+/// reloading the format — the hot path, measured ~2.7x faster than a full
+/// rebuild. Completed passes arrive as [`ResidentSnapshot`]s on
+/// [`snapshots`](Self::snapshots) (the last one is a byte prefix of the
+/// final artifact: pages complete, postamble pending).
+///
+/// One session per process: the C shim state is global and the fence
+/// control is a process-wide singleton. Dropping the session signals
+/// finish; the worker then runs the engine's normal cleanup on its own
+/// thread (deliberately not joined — a session dropped at process exit
+/// tears down with the process).
+#[derive(Debug)]
+pub struct ResidentSession {
+    control: std::sync::Arc<FenceControl>,
+    snapshot_rx: std::sync::mpsc::Receiver<ResidentSnapshot>,
+    worker: Option<std::thread::JoinHandle<ResidentSessionEnd>>,
+}
+
+impl ResidentSession {
+    /// Submit edited bytes for `path`: the parked engine injects them into
+    /// its I/O, restores the checkpoint, and re-typesets (one hot pass).
+    pub fn submit(&self, path: &str, bytes: Vec<u8>) {
+        self.control.submit_edit(path, bytes);
+    }
+
+    /// Completed-pass snapshots, in pass order.
+    pub fn snapshots(&self) -> &std::sync::mpsc::Receiver<ResidentSnapshot> {
+        &self.snapshot_rx
+    }
+
+    /// Parks so far: 1 = the S0 capture park, +1 per completed pass.
+    pub fn parks(&self) -> usize {
+        self.control.park_count()
+    }
+
+    /// Park barrier: blocks until the engine parked at least `n` times or
+    /// the park window elapses (false on timeout).
+    pub fn wait_parks(&self, at_least: usize) -> bool {
+        self.control.wait_parks(at_least)
+    }
+
+    /// End the session: the engine runs its normal cleanup and the worker
+    /// returns the final artifact. Blocks until the worker joins.
+    pub fn finish(mut self) -> ResidentSessionEnd {
+        self.control.finish();
+        let fallback = || ResidentSessionEnd {
+            artifact: None,
+            diagnostics: Vec::new(),
+            error: Some("resident worker thread panicked".to_string()),
+        };
+        match self.worker.take() {
+            Some(handle) => handle.join().unwrap_or_else(|_| fallback()),
+            None => fallback(),
+        }
+    }
+}
+
+impl Drop for ResidentSession {
+    fn drop(&mut self) {
+        // Signal finish so the worker exits instead of parking forever; the
+        // cleanup completes on the worker thread without a join.
+        self.control.finish();
+    }
+}
+
 static FENCE_CONTROL: std::sync::Mutex<Option<std::sync::Arc<FenceControl>>> =
     std::sync::Mutex::new(None);
 
@@ -326,6 +405,64 @@ impl XetexEngine {
         sender: Option<std::sync::mpsc::Sender<ResidentSnapshot>>,
     ) {
         self.resident_snapshots = sender;
+    }
+
+    /// Start a persistent resident session (P0.3): `engine` and `io` move
+    /// onto a worker thread, resident passes are armed, and `initialize`
+    /// runs there — parking at the S0 capture before pass 1. Drive edits
+    /// with [`submit`](ResidentSession::submit); completed passes arrive on
+    /// [`snapshots`](ResidentSession::snapshots); end with
+    /// [`finish`](ResidentSession::finish).
+    ///
+    /// Requires a prebuilt format file: a session cannot bootstrap one (the
+    /// INI bootstrap run would park forever waiting for a submit that never
+    /// comes). Real mode only.
+    pub fn start_resident_session<V>(
+        engine: XetexEngine,
+        io: V,
+        root: RootDocument,
+    ) -> Result<ResidentSession>
+    where
+        V: EngineIo + Send + 'static,
+    {
+        if !Self::real_mode() {
+            return Err(oxipresso_engine_api::EngineError::new(
+                "resident sessions require the real engine build",
+            ));
+        }
+        let format_path = Self::format_path_text();
+        if !std::path::Path::new(&format_path).is_file() {
+            return Err(oxipresso_engine_api::EngineError::new(
+                "resident sessions require a prebuilt format file; run one normal initialize first",
+            ));
+        }
+        let control = Self::arm_resident_passes().ok_or_else(|| {
+            oxipresso_engine_api::EngineError::new("resident passes require the real engine build")
+        })?;
+        let (snap_tx, snapshot_rx) = std::sync::mpsc::channel::<ResidentSnapshot>();
+        let mut engine = engine;
+        engine.set_resident_snapshot_sender(Some(snap_tx));
+        let worker = std::thread::spawn(move || {
+            let mut io = io;
+            let init = engine.initialize(&root, &mut io);
+            let error = init.err().map(|e| e.to_string());
+            let artifact = if error.is_none() {
+                engine.output_document()
+            } else {
+                None
+            };
+            let diagnostics = engine.diagnostics().to_vec();
+            ResidentSessionEnd {
+                artifact,
+                diagnostics,
+                error,
+            }
+        });
+        Ok(ResidentSession {
+            control,
+            snapshot_rx,
+            worker: Some(worker),
+        })
     }
 
     /// Resident-loop counters (pass-boundary parks, non-format reads) for
@@ -2075,54 +2212,55 @@ mod tests {
             bytes
         };
 
-        let control = XetexEngine::arm_resident_passes().expect("resident control");
-        let (snap_tx, snap_rx) = std::sync::mpsc::channel::<ResidentSnapshot>();
-        let done = std::thread::scope(|scope| {
-            let worker = scope.spawn(|| {
-                let mut engine = XetexEngine::new();
-                let mut vfs = VirtualFileSystem::new();
-                vfs.open_editor("simple.tex", original.clone());
-                vfs.set_resolver(Box::new(
-                    texlive::KpsewhichResolver::auto().expect("kpsewhich resolver"),
-                ));
-                engine.set_resident_snapshot_sender(Some(snap_tx));
-                engine
-                    .initialize(&root, &mut vfs)
-                    .expect("resident initialize drives the pass loop");
-                engine
-                    .output_document()
-                    .map(|doc| doc.bytes)
-                    .expect("resident artifact after the chain")
-            });
-            let session_started = std::time::Instant::now();
-            let mut last_mark = session_started;
-            // Park 1: the S0 capture. Pass 1 typesets the first edited
-            // document (the inject happens at the capture park). Then each
-            // further edit is one hot pass; the delta is the per-pass cost.
-            assert!(control.wait_parks(1), "park before pass 1");
-            for (k, edit) in edits.iter().enumerate() {
-                control.submit_edit("simple.tex", edit.clone());
-                assert!(control.wait_parks(k + 2), "park after hot pass {k}");
-                let snap = snap_rx
-                    .recv_timeout(std::time::Duration::from_secs(60))
-                    .expect("snapshot per hot pass");
-                let xdv = snap
-                    .output_bytes
-                    .get("simple.xdv")
-                    .expect("hot pass snapshot carries the XDV");
-                let now = std::time::Instant::now();
-                eprintln!(
-                    "[hot-reload] pass {}: {:?} (delta {:?}), {} XDV bytes",
-                    k + 1,
-                    now.duration_since(session_started),
-                    now.duration_since(last_mark),
-                    xdv.len()
-                );
-                last_mark = now;
-            }
-            control.finish();
-            worker.join().expect("resident worker must not panic")
-        });
+        // The session API (P0.3 final): engine + I/O move into the session
+        // worker; the test drives edits and consumes snapshots exactly the
+        // way the CLI wiring will.
+        let session_started = std::time::Instant::now();
+        let mut last_mark = session_started;
+        let session = {
+            let engine = XetexEngine::new();
+            let mut vfs = VirtualFileSystem::new();
+            vfs.open_editor("simple.tex", original.clone());
+            vfs.set_resolver(Box::new(
+                texlive::KpsewhichResolver::auto().expect("kpsewhich resolver"),
+            ));
+            XetexEngine::start_resident_session(engine, vfs, root).expect("resident session")
+        };
+        // Park 1: the S0 capture. Pass 1 typesets the first edited document
+        // (the inject happens at the capture park). Then each further edit
+        // is one hot pass; the delta is the per-pass cost.
+        assert!(session.wait_parks(1), "park before pass 1");
+        for (k, edit) in edits.iter().enumerate() {
+            session.submit("simple.tex", edit.clone());
+            assert!(session.wait_parks(k + 2), "park after hot pass {k}");
+            let snap = session
+                .snapshots()
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("snapshot per hot pass");
+            let xdv = snap
+                .output_bytes
+                .get("simple.xdv")
+                .expect("hot pass snapshot carries the XDV");
+            let now = std::time::Instant::now();
+            eprintln!(
+                "[hot-reload] pass {}: {:?} (delta {:?}), {} XDV bytes",
+                k + 1,
+                now.duration_since(session_started),
+                now.duration_since(last_mark),
+                xdv.len()
+            );
+            last_mark = now;
+        }
+        let end = session.finish();
+        let done = end
+            .artifact
+            .expect("resident artifact after the whole chain")
+            .bytes;
+        assert!(
+            end.error.is_none(),
+            "resident session error: {:?}",
+            end.error
+        );
         assert_eq!(
             oracle, done,
             "the final resident artifact must equal the fresh-run oracle after the whole chain"
