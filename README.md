@@ -62,6 +62,33 @@ Reverse SyncTeX clicks emit source locations over stdout.
 cargo run -p oxipresso-cli --bin oxipresso -- -stream -test-initialize doc.tex
 ```
 
+### Reference editor client
+
+`clients/reference/oxipresso_editor_client.py` is a dependency-free Python
+reference implementation of the editor side of the wire — the integration
+contract an emacs/vscode plugin implements. It validates the shipped binary
+from OUTSIDE the Rust process:
+
+```powershell
+cargo build -p oxipresso-cli
+python clients/reference/oxipresso_editor_client.py --selftest
+# interactive session (type editor commands, watch the messages):
+python clients/reference/oxipresso_editor_client.py --binary target\debug\oxipresso.exe doc.tex
+```
+
+The selftest spawns the binary, observes the initialize stream
+(`(truncate out 0)` → appends → `(flush)` → `(input-file ...)` →
+`(lookup-file ...)`), drives an editor `change` through a full rebuild cycle,
+and exercises pause/resume — exiting nonzero on any broken message shape.
+
+### Resident hot rebuilds (checkpoint-incremental)
+
+With `OXIPRESSO_RESIDENT=1` (real engine + a prebuilt format file), editor
+changes restore the engine's S0 checkpoint and re-typeset in a single pass
+without reloading the 22 MB format — measured ~2.7x faster than a full
+rebuild (`~170-190ms` vs `~496ms` on the simple fixture). Enable it on the
+wire exactly like above; the binary handles the rest.
+
 ### PDF rendering (PDFium)
 
 ```powershell
