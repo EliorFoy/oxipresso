@@ -62,24 +62,27 @@ Reverse SyncTeX clicks emit source locations over stdout.
 cargo run -p oxipresso-cli --bin oxipresso -- -stream -test-initialize doc.tex
 ```
 
-### Reference editor client
+### Reference editor client (Slint)
 
-`clients/reference/oxipresso_editor_client.py` is a dependency-free Python
-reference implementation of the editor side of the wire — the integration
-contract an emacs/vscode plugin implements. It validates the shipped binary
-from OUTSIDE the Rust process:
+`oxipresso-editor-client` is a reference implementation of the editor side of
+the wire — the integration contract an emacs/vscode plugin implements — as a
+small Slint GUI. The engine runs as a child process; the client speaks the
+protocol over stdin/stdout exactly like TeXpresso's plugins: the left pane
+edits the document ("Send change" issues the whole-buffer `change` an editor
+save produces), the right pane shows the engine's notices (truncate/append/
+flush, input-file/lookup-file) and the mirrored `out` info buffer.
 
 ```powershell
-cargo build -p oxipresso-cli
-python clients/reference/oxipresso_editor_client.py --selftest
-# interactive session (type editor commands, watch the messages):
-python clients/reference/oxipresso_editor_client.py --binary target\debug\oxipresso.exe doc.tex
+cargo build -p oxipresso-cli --features slint
+cargo run -p oxipresso-cli --features slint --bin oxipresso-editor-client doc.tex
+# JSON wire form: add --json
 ```
 
-The selftest spawns the binary, observes the initialize stream
-(`(truncate out 0)` → appends → `(flush)` → `(input-file ...)` →
-`(lookup-file ...)`), drives an editor `change` through a full rebuild cycle,
-and exercises pause/resume — exiting nonzero on any broken message shape.
+The same contract is pinned headlessly by the cargo test
+`editor_wire_selftest_against_shipped_binary` (part of `cargo test
+--workspace`): it spawns the shipped `oxipresso` binary from outside the Rust
+process and drives initialize → change-rebuild → pause/resume, asserting the
+message shapes.
 
 ### Resident hot rebuilds (checkpoint-incremental)
 

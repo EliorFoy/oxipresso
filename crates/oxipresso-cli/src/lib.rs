@@ -107,6 +107,8 @@ pub mod gui;
 #[cfg(feature = "gui")]
 pub use gui::run_live_preview;
 
+pub mod editor_wire;
+
 pub fn run_with_io<R, W>(options: CliOptions, input: R, mut output: W) -> Result<(), String>
 where
     R: BufRead,
