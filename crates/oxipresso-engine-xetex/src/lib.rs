@@ -65,6 +65,11 @@ pub struct ResidentSnapshot {
     /// the resident counterpart of the editor-wire lookup/input-file
     /// notifications.
     pub io_events: Vec<EngineIoEvent>,
+    /// Canonical paths the engine READ during this pass — the resident
+    /// counterpart of the `read_files` rebuild-skip: an editor change to a
+    /// file outside this set cannot affect the output, so the hot pass can
+    /// be skipped entirely.
+    pub read_files: Vec<String>,
 }
 
 impl ResidentSnapshot {
@@ -1010,6 +1015,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
         state.resident_park_index += 1;
         if is_pass_boundary {
             let io_events = state.io.drain_events();
+            let read_files: Vec<String> = state.read_files.iter().cloned().collect();
             let has_output = !state.output_events.is_empty()
                 || !state.diagnostics.is_empty()
                 || !io_events.is_empty()
@@ -1020,6 +1026,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
                     output_bytes: state.output_bytes.clone(),
                     diagnostics: state.diagnostics.clone(),
                     io_events,
+                    read_files,
                 });
             }
         }

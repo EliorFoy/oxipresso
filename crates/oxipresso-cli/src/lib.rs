@@ -362,6 +362,9 @@ pub struct OxipressoApp {
     /// thread; editor changes become hot passes instead of full restarts.
     /// None in stub/external mode or when OXIPRESSO_RESIDENT is unset.
     resident: Option<oxipresso_engine_xetex::ResidentSession>,
+    /// Canonical paths the session engine read during its latest pass — the
+    /// read_files rebuild-skip set for the resident path.
+    resident_read_files: Option<std::collections::HashSet<String>>,
     /// The freshest artifact a resident pass produced (postamble-pending
     /// until the session finishes). `current_artifact` serves it while a
     /// session is live.
@@ -410,6 +413,7 @@ impl OxipressoApp {
             paused,
             resident: None,
             resident_artifact: None,
+            resident_read_files: None,
         }
     }
 
@@ -537,6 +541,9 @@ impl OxipressoApp {
         // Serve the freshest pass output to consumers (the GUI pulls it
         // through `current_artifact` after each handled wire line).
         self.resident_artifact = artifact.clone();
+        // The pass's read set powers the resident rebuild-skip: an edit to a
+        // file outside it cannot change the output.
+        self.resident_read_files = Some(snap.read_files.iter().cloned().collect());
         // The stream messages carry the pass's out/log appends; the file
         // notifications (lookup/input) follow, matching the full-restart
         // flow's drain order.
@@ -701,21 +708,28 @@ impl OxipressoApp {
         }
         // Resident path (P0.3): any engine-relevant change becomes one hot
         // pass — the fence injects the edited bytes into the worker VFS and
-        // restores the checkpoint; no format reload. The read_files skip
-        // optimization does not apply here (the session engine tracks its own
-        // reads; the main-side engine never ran).
+        // restores the checkpoint; no format reload. The hot pass targets
+        // the CHANGED file (an include edit must reach the engine), and the
+        // pass's read_files set skips rebuilds for files the engine never
+        // read (the session's own read tracking; the main-side engine never
+        // ran).
         if self.resident.is_some() {
-            let changed = matches!(command, EditorCommand::Rescan)
-                || matches!(
-                    outcome,
-                    Some(ChangeOutcome {
-                        changed_offset: Some(_),
-                        ..
-                    })
-                );
-            if changed && !self.paused {
-                let root_path = self.root.root_name.clone();
-                messages.extend(self.resident_rebuild(&root_path)?);
+            let changed_path = match &command {
+                EditorCommand::Rescan => Some(self.root.root_name.clone()),
+                _ => outcome
+                    .as_ref()
+                    .and_then(|o| o.changed_offset.map(|_| o.path.clone())),
+            };
+            if let Some(target) = changed_path
+                && !self.paused
+            {
+                let relevant = match &self.resident_read_files {
+                    Some(read) => read.contains(&canonical_change_key(&target)),
+                    None => true, // no pass snapshot yet — rebuild to learn it
+                };
+                if relevant {
+                    messages.extend(self.resident_rebuild(&target)?);
+                }
             }
             messages.extend(self.drain_input_messages());
             messages.extend(self.drain_lookup_messages());
@@ -2918,6 +2932,30 @@ endobj
             .unwrap();
         assert!(
             rebuild2
+                .iter()
+                .any(|message| matches!(message, EditorMessage::Flush))
+        );
+
+        // read_files skip (P0.3 slice 2): register a file the engine NEVER
+        // reads, then edit it — no hot pass may fire because the output
+        // cannot change. "hello" is 5 bytes.
+        app.handle_editor_line("(open-base64 \"unrelated.txt\" \"aGVsbG8=\")")
+            .unwrap();
+        let skipped = app
+            .handle_editor_line("(change \"unrelated.txt\" 0 5 \"XYZW\")")
+            .unwrap();
+        assert!(
+            skipped.is_empty(),
+            "an edit to a file outside the pass read set must not trigger a rebuild, got {skipped:?}"
+        );
+
+        // The engine-read root still rebuilds after the skip (the read set
+        // did not swallow relevant changes).
+        let rebuild3 = app
+            .handle_editor_line("(change \"main.tex\" 41 5 \"Final\")")
+            .unwrap();
+        assert!(
+            rebuild3
                 .iter()
                 .any(|message| matches!(message, EditorMessage::Flush))
         );
