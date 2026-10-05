@@ -6,7 +6,7 @@ use std::{
 use oxipresso_editor_protocol::{
     EditorCommand, EditorMessage, InfoBuffer, WireProtocol, parse_command, serialize_message,
 };
-use oxipresso_engine_api::{OutputEvent, RestartPolicy, RootDocument, TypesettingEngine};
+use oxipresso_engine_api::{EngineIo, OutputEvent, RestartPolicy, RootDocument, TypesettingEngine};
 use oxipresso_engine_external::ExternalEngine;
 use oxipresso_engine_xetex::XetexEngine;
 use oxipresso_render::AutoRenderBackend;
@@ -140,6 +140,17 @@ where
         }
     }
     Ok(())
+}
+
+/// Canonical key for matching changed paths against the editor input set:
+/// forward slashes, no leading `./` (same normalization the engine's
+/// change-hint path uses).
+fn canonical_change_key(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    match normalized.strip_prefix("./") {
+        Some(rest) => rest.to_string(),
+        None => normalized,
+    }
 }
 
 fn root_document(options: &CliOptions) -> Result<RootDocument, String> {
@@ -345,20 +356,29 @@ pub struct OxipressoApp {
     renderer: AutoRenderBackend,
     synctex: Option<SyncTexDocument>,
     paused: bool,
+    /// Live resident session (P0.3): the engine runs on the session worker
+    /// thread; editor changes become hot passes instead of full restarts.
+    /// None in stub/external mode or when OXIPRESSO_RESIDENT is unset.
+    resident: Option<oxipresso_engine_xetex::ResidentSession>,
+}
+
+/// A VFS configured the way the engine should see the document world: disk
+/// roots from the document + include paths, and the TeX Live resolver. Used
+/// for the app's protocol-side VFS and for the resident session's worker
+/// (engine-I/O) VFS.
+fn engine_vfs(root: &RootDocument) -> VirtualFileSystem {
+    let mut vfs = VirtualFileSystem::new();
+    vfs.set_disk_roots(disk_roots_for(root));
+    if let Some(resolver) = oxipresso_engine_xetex::texlive::KpsewhichResolver::auto() {
+        vfs.set_resolver(Box::new(resolver));
+    }
+    vfs
 }
 
 impl OxipressoApp {
     pub fn new(options: CliOptions, root: RootDocument) -> Self {
         let paused = options.stream_mode;
-        let mut vfs = VirtualFileSystem::new();
-        vfs.set_disk_roots(disk_roots_for(&root));
-        // TeX Live provider: resolve distribution files (format sources,
-        // classes, fonts) through kpsewhich when available, mirroring the
-        // original engine's texlive backend. Editor buffers and disk roots
-        // still take precedence.
-        if let Some(resolver) = oxipresso_engine_xetex::texlive::KpsewhichResolver::auto() {
-            vfs.set_resolver(Box::new(resolver));
-        }
+        let vfs = engine_vfs(&root);
         let renderer = {
             let renderer = AutoRenderBackend::default();
             #[cfg(feature = "freetype")]
@@ -382,6 +402,7 @@ impl OxipressoApp {
             renderer,
             synctex: None,
             paused,
+            resident: None,
         }
     }
 
@@ -393,11 +414,158 @@ impl OxipressoApp {
         let mut messages = Vec::new();
         if !self.paused {
             self.prime_root_from_disk()?;
-            messages.extend(self.initialize_engine()?);
+            if self.try_start_resident_session()? {
+                // Pass 1 typesets the primed root on the session worker; the
+                // snapshot is this run's outcome (stream messages + artifact).
+                let snap = self.wait_resident_snapshot()?;
+                messages.extend(self.messages_from_snapshot(snap)?);
+            } else {
+                messages.extend(self.initialize_engine()?);
+            }
         }
         messages.extend(self.drain_input_messages());
         messages.extend(self.drain_lookup_messages());
         Ok(messages)
+    }
+
+    /// Whether resident hot-reload mode is requested (`OXIPRESSO_RESIDENT=1`).
+    fn resident_requested(&self) -> bool {
+        matches!(std::env::var("OXIPRESSO_RESIDENT").as_deref(), Ok("1"))
+    }
+
+    /// Start the resident session if requested and possible. Returns false
+    /// (with the normal full-restart path left intact) when the mode is not
+    /// requested, the stub/external engine is in use, or the prebuilt format
+    /// file is missing — a session cannot bootstrap a format (the INI run
+    /// would park forever waiting for a submit that never comes).
+    fn try_start_resident_session(&mut self) -> Result<bool, String> {
+        if self.resident.is_some() || !self.resident_requested() {
+            return Ok(self.resident.is_some());
+        }
+        if !oxipresso_engine_xetex::XetexEngine::real_mode() {
+            return Ok(false);
+        }
+        // The worker VFS is the engine's I/O surface; prime it with the same
+        // current root bytes the protocol-side VFS holds. In stream mode the
+        // editor has not delivered content yet, so the session starts on the
+        // normal path instead (slice-1 scope: non-stream live rebuilds).
+        let root_path = self.root.root_name.clone();
+        let Some(bytes) = self.root_bytes_from_vfs(&root_path)? else {
+            return Ok(false);
+        };
+        let mut worker_vfs = engine_vfs(&self.root);
+        worker_vfs.open_editor(&self.root.root_name, bytes);
+        let engine = oxipresso_engine_xetex::XetexEngine::new();
+        let session = oxipresso_engine_xetex::XetexEngine::start_resident_session(
+            engine,
+            worker_vfs,
+            self.root.clone(),
+        )
+        .map_err(|e| {
+            eprintln!("[resident] session unavailable, falling back to full restarts: {e}");
+            e.to_string()
+        });
+        match session {
+            Ok(session) => {
+                self.resident = Some(session);
+                Ok(true)
+            }
+            Err(error) => {
+                let _ = error;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Current editor bytes for `path` from the protocol-side VFS.
+    fn root_bytes_from_vfs(&mut self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        let wanted = canonical_change_key(path);
+        let inputs = self.vfs.snapshot_inputs().map_err(|e| e.to_string())?;
+        Ok(inputs
+            .into_iter()
+            .find(|(p, _)| canonical_change_key(p) == wanted)
+            .map(|(_, bytes)| bytes))
+    }
+
+    /// Wait for the next completed pass's snapshot (the session parks after
+    /// every pass; a 120s window covers slow first passes).
+    fn wait_resident_snapshot(
+        &mut self,
+    ) -> Result<oxipresso_engine_xetex::ResidentSnapshot, String> {
+        let session = self
+            .resident
+            .as_ref()
+            .expect("wait_resident_snapshot requires a live session");
+        session
+            .snapshots()
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Convert one completed pass's snapshot into editor messages and refresh
+    /// the viewer/synctex/persisted-output state from it — the resident
+    /// counterpart of `messages_after_engine_run`.
+    fn messages_from_snapshot(
+        &mut self,
+        snap: oxipresso_engine_xetex::ResidentSnapshot,
+    ) -> Result<Vec<EditorMessage>, String> {
+        let artifact = snap.document_artifact(&self.root.root_name);
+        let synctex = snap.synctex_artifact();
+        if let Some(artifact) = &artifact {
+            self.persist_bytes_if_requested("OXIPRESSO_ARTIFACT_OUT", &artifact.bytes)?;
+        }
+        if let Some(synctex) = &synctex {
+            self.persist_bytes_if_requested("OXIPRESSO_SYNCTEX_OUT", &synctex.bytes)?;
+        }
+        // The stream messages carry the pass's out/log appends; consume the
+        // events last (they move out of the snapshot).
+        let messages = stream_messages_from_events(snap.output_events, self.options.line_output);
+        if let Some(artifact) = artifact {
+            self.viewer
+                .load_artifact_with_renderer(artifact, &self.renderer)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(synctex) = synctex {
+            self.viewer.sync_position = None;
+            self.synctex = oxipresso_synctex::parse_artifact(&synctex).ok();
+        }
+        Ok(messages)
+    }
+
+    /// Write `bytes` to the env-named output path when set (the shared write
+    /// path of the artifact/synctex persistence helpers).
+    fn persist_bytes_if_requested(&self, env_key: &str, bytes: &[u8]) -> Result<(), String> {
+        let Some(path) = std::env::var_os(env_key) else {
+            return Ok(());
+        };
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, bytes).map_err(|e| e.to_string())
+    }
+
+    /// Hot rebuild: submit the changed file's current bytes to the resident
+    /// session and wait for the pass. The fence injects the bytes into the
+    /// worker VFS, restores the S0 checkpoint, and re-typesets — no format
+    /// reload.
+    fn resident_rebuild(&mut self, path: &str) -> Result<Vec<EditorMessage>, String> {
+        let bytes = self
+            .root_bytes_from_vfs(path)?
+            .ok_or_else(|| format!("changed file {path} is not in the editor set"))?;
+        {
+            let session = self
+                .resident
+                .as_ref()
+                .expect("resident_rebuild needs a live session");
+            let parks = session.parks();
+            session.submit(path, bytes);
+            session.wait_parks(parks + 1);
+        }
+        let snap = self.wait_resident_snapshot()?;
+        self.messages_from_snapshot(snap)
     }
 
     pub fn handle_editor_line(&mut self, line: &str) -> Result<Vec<EditorMessage>, String> {
@@ -425,7 +593,15 @@ impl OxipressoApp {
             EditorCommand::Resume => {
                 self.paused = false;
                 self.prime_root_from_disk()?;
-                messages.extend(self.initialize_engine()?);
+                if self.resident.is_some() || self.try_start_resident_session()? {
+                    // Hot path: the session (new or existing) typesets the
+                    // current content as one pass — a paused span worth of
+                    // edits folds into a single rebuild.
+                    let root_path = self.root.root_name.clone();
+                    messages.extend(self.resident_rebuild(&root_path)?);
+                } else {
+                    messages.extend(self.initialize_engine()?);
+                }
                 messages.extend(self.drain_input_messages());
                 messages.extend(self.drain_lookup_messages());
                 return Ok(messages);
@@ -469,6 +645,28 @@ impl OxipressoApp {
         // rebuild sees current bytes, not the stale VFS copy.
         if matches!(command, EditorCommand::Rescan) {
             let _ = self.prime_root_from_disk();
+        }
+        // Resident path (P0.3): any engine-relevant change becomes one hot
+        // pass — the fence injects the edited bytes into the worker VFS and
+        // restores the checkpoint; no format reload. The read_files skip
+        // optimization does not apply here (the session engine tracks its own
+        // reads; the main-side engine never ran).
+        if self.resident.is_some() {
+            let changed = matches!(command, EditorCommand::Rescan)
+                || matches!(
+                    outcome,
+                    Some(ChangeOutcome {
+                        changed_offset: Some(_),
+                        ..
+                    })
+                );
+            if changed && !self.paused {
+                let root_path = self.root.root_name.clone();
+                messages.extend(self.resident_rebuild(&root_path)?);
+            }
+            messages.extend(self.drain_input_messages());
+            messages.extend(self.drain_lookup_messages());
+            return Ok(messages);
         }
         let mut restart_policy =
             matches!(command, EditorCommand::Rescan).then_some(RestartPolicy::FullRestartRequired);
@@ -2538,6 +2736,129 @@ endobj
             ),
             "[\"truncate\",\"log\",0]"
         );
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    /// Resident CLI flow (gated like the protocol snapshot): with
+    /// OXIPRESSO_RESIDENT=1 the app starts a persistent resident session;
+    /// the initialization typesets pass 1 through the session, and every
+    /// editor change becomes ONE hot pass (checkpoint restore + re-typeset,
+    /// no format reload). The stream messages per pass keep the
+    /// truncate/append/flush shape, and consecutive hot rebuilds prove the
+    /// session persists across changes.
+    #[test]
+    fn real_engine_resident_cli_hot_rebuild() {
+        if std::env::var("OXIPRESSO_USE_REAL_XETEX").ok().as_deref() != Some("1") {
+            return;
+        }
+        if std::env::var_os("TEXPRESSO_SRC").is_none() {
+            return;
+        }
+        let Some(format_path) = std::env::var_os("OXIPRESSO_XETEX_FORMAT") else {
+            return;
+        };
+        if !std::path::Path::new(&format_path).is_file() {
+            return;
+        }
+        let kpsewhich_available = std::process::Command::new("kpsewhich")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !kpsewhich_available {
+            return;
+        }
+        // SAFETY: test-only env toggle; the CLI test binaries do not read
+        // OXIPRESSO_RESIDENT from other threads concurrently.
+        unsafe {
+            std::env::set_var("OXIPRESSO_RESIDENT", "1");
+        }
+
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let root_file = temp_dir.join("main.tex");
+        fs::write(
+            &root_file,
+            "\\documentclass{article}\n\\begin{document}\nResident\n\\end{document}\n",
+        )
+        .unwrap();
+
+        let options = CliOptions {
+            include_paths: Vec::new(),
+            protocol: WireProtocol::Sexp,
+            line_output: false,
+            provider: PackageProvider::Auto,
+            initialize_only: false,
+            stream_mode: false,
+            gui: false,
+            root_file: root_file.clone(),
+        };
+        let root = root_document(&options).unwrap();
+        let mut app = OxipressoApp::new(options, root);
+
+        let init = app.initialize().unwrap();
+        assert!(
+            matches!(
+                init.first(),
+                Some(EditorMessage::Truncate {
+                    buffer: InfoBuffer::Out,
+                    size: 0
+                })
+            ),
+            "resident pass 1 stream starts with the out truncate, got {init:?}"
+        );
+        assert!(
+            init.iter()
+                .any(|message| matches!(message, EditorMessage::Flush)),
+            "resident pass 1 stream ends with a flush"
+        );
+
+        // Hot rebuild 1: the change is one pass through the live session.
+        let rebuild1 = app
+            .handle_editor_line("(change \"main.tex\" 41 8 \"Edited\")")
+            .unwrap();
+        assert!(
+            matches!(
+                rebuild1.first(),
+                Some(EditorMessage::Truncate {
+                    buffer: InfoBuffer::Out,
+                    size: 0
+                })
+            ),
+            "hot pass stream starts with the out truncate, got {rebuild1:?}"
+        );
+        let rebuild1_log: String = rebuild1
+            .iter()
+            .filter_map(|message| match message {
+                EditorMessage::Append {
+                    buffer: InfoBuffer::Log,
+                    text,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rebuild1_log.to_lowercase().contains("xetex"),
+            "hot pass log should carry the engine banner, got {rebuild1_log:?}"
+        );
+
+        // Hot rebuild 2: the session persists across changes (a full restart
+        // would also pass this shape, but only the resident path keeps the
+        // session alive without re-loading the format).
+        let rebuild2 = app
+            .handle_editor_line("(change \"main.tex\" 41 6 \"Again\")")
+            .unwrap();
+        assert!(
+            rebuild2
+                .iter()
+                .any(|message| matches!(message, EditorMessage::Flush))
+        );
+
+        // SAFETY: paired with the set_var above.
+        unsafe {
+            std::env::remove_var("OXIPRESSO_RESIDENT");
+        }
         fs::remove_dir_all(temp_dir).unwrap();
     }
 

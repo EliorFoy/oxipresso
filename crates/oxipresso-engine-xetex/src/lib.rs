@@ -63,6 +63,20 @@ pub struct ResidentSnapshot {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+impl ResidentSnapshot {
+    /// The document artifact carried by this pass. During a live session the
+    /// XDV is postamble-pending (pages complete, byte prefix of the final
+    /// artifact); after `finish` the session end carries the full file.
+    pub fn document_artifact(&self, root_name: &str) -> Option<DocumentArtifact> {
+        select_output_artifact(root_name, &self.output_bytes)
+    }
+
+    /// The SyncTeX sidecar written during this pass.
+    pub fn synctex_artifact(&self) -> Option<SyncTexArtifact> {
+        XetexEngine::select_synctex_artifact(&self.output_bytes)
+    }
+}
+
 impl FenceControl {
     /// Whether the engine thread is currently parked at the fence.
     pub fn is_parked(&self) -> bool {
