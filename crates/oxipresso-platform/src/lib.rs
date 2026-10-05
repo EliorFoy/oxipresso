@@ -9,6 +9,8 @@ mod linux;
 mod macos;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub use windows::NativeReadDirectoryWatcher;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformKind {
@@ -206,6 +208,54 @@ fn platform_file_watcher(path: PathBuf) -> Box<dyn FileWatcher> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The native ReadDirectoryChangesW watcher (Windows): a write to the
+    /// watched file surfaces as Changed on the next poll, an unrelated file
+    /// in the same directory stays Unchanged, and deleting the file reports
+    /// Missing. Skipped when the native watch cannot be established (e.g.
+    /// filesystems without change notification) so the polling fallback is
+    /// exercised instead on those systems.
+    #[test]
+    fn native_watcher_reports_changes_of_the_watched_file_only() {
+        let dir = unique_temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.xdv");
+        std::fs::write(&path, b"first").unwrap();
+        let Some(mut watcher) = NativeReadDirectoryWatcher::new(&path) else {
+            eprintln!("native watcher unavailable on this filesystem; skipping");
+            return;
+        };
+        // Baseline: nothing has changed since the watch was established.
+        assert!(matches!(watcher.poll(), FileWatchEvent::Unchanged));
+
+        // Unrelated sibling change: must NOT invalidate the watched file.
+        std::fs::write(dir.join("other.tmp"), b"noise").unwrap();
+        assert!(matches!(watcher.poll(), FileWatchEvent::Unchanged));
+
+        // Watched-file write: Changed on the next poll (coalesced if the
+        // write happened before the previous poll drained it).
+        std::fs::write(&path, b"second version").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut saw_changed = false;
+        while std::time::Instant::now() < deadline {
+            match watcher.poll() {
+                FileWatchEvent::Changed { path: changed, .. } => {
+                    assert_eq!(changed, path);
+                    saw_changed = true;
+                    break;
+                }
+                FileWatchEvent::Unchanged => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(saw_changed, "watched-file write never surfaced as Changed");
+
+        // Deletion: Missing (the dominant signal, even mid-event-stream).
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(watcher.poll(), FileWatchEvent::Missing { .. }));
+    }
 
     #[test]
     fn polling_watcher_reports_created_file_without_marking_clean() {
