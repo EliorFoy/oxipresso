@@ -10,6 +10,13 @@ use oxipresso_render::{RenderBackend, XdvGlyphRenderBackend};
 struct CliResolver;
 impl oxipresso_render::FontResolver for CliResolver {
     fn find_font_file(&mut self, name: &str, extensions: &[&str]) -> Option<Vec<u8>> {
+        // The engine records some fonts as RESOLVED PATHS (ctex CJK fonts
+        // like C:/WINDOWS/fonts\simhei.ttf) — read them verbatim.
+        let normalized = name.replace('\\', "/");
+        let direct = std::path::PathBuf::from(&normalized);
+        if direct.is_file() {
+            return std::fs::read(&direct).ok();
+        }
         for extension in extensions {
             let out = std::process::Command::new("kpsewhich")
                 .arg(format!("{name}.{extension}"))
@@ -36,11 +43,7 @@ impl oxipresso_render::FontResolver for CliResolver {
 
 #[test]
 fn render_demo_page_to_png() {
-    let path = if std::path::Path::new("F:/code/oxipresso/demo/gui-artifact.xdv").is_file() {
-        "F:/code/oxipresso/demo/gui-artifact.xdv"
-    } else {
-        "F:/code/oxipresso/demo/demo.xdv"
-    };
+    let path = "F:/code/oxipresso/demo/cn-resident.xdv";
     if !std::path::Path::new(path).is_file() {
         eprintln!("demo.xdv not found; skipping");
         return;

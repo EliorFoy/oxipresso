@@ -12,7 +12,7 @@ pdfium-bundled = ["pdfium", "pdfium-auto/bundled"]
 # library (discovered through vcpkg on Windows / pkg-config on Linux). Also
 # enables PDF/TSV image decoding for `pdf:image` specials via the pure-Rust
 # `png` crate.
-freetype = ["dep:vcpkg", "dep:pkg-config", "dep:png"]
+freetype = ["dep:vcpkg", "dep:pkg-config", "dep:png", "dep:cc"]
 
 [dependencies]
 oxipresso-engine-api = { path = "../oxipresso-engine-api" }
@@ -21,5 +21,6 @@ pdfium-render = { version = "0.8.37", optional = true }
 png = { version = "0.18.1", optional = true }
 
 [build-dependencies]
+cc = { version = "1.0", optional = true }
 pkg-config = { version = "0.3", optional = true }
 vcpkg = { version = "0.2", optional = true }

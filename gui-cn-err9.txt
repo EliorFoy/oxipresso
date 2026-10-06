@@ -1,0 +1,408 @@
+[gui] initializing (resident=1)
+[oxi] istack probe: regs=4808 cur@00007FF78B7BDBE0 loc=1 limit=1 st=33 in_open@00007FF78B7BDBDC val=0 stack@0000008C1BEA7440 lo=0000008C1B9DE3C0 hi=0000008C1C1EE3C0
+[oxi] S0 capture: regs=4802 bytes=147037458
+[gui-flow] waiting for the pass snapshot...
+Fontconfig error: Cannot load default config file: No such file: (null)
+[oxi] resident_park entry #1 reads=1685455
+[gui-flow] snapshot received
+[gui] initialize done
+[gui] entering eframe
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2375 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1244 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18142 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11109 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3927 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4502 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1553 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17994 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19602 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17920 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2264 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5923 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17041 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14145 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 708 size_px 10 -> 4x8 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 709 size_px 10 -> 4x8 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2102 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12971 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19760 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16305 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2620 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7206 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6533 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6521 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14514 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5563 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2568 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2374 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1086 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3914 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18051 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2431 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7145 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5150 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13571 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7604 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 452 size_px 10 -> 2x2 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3416 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16861 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13555 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7783 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7516 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7481 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19584 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 712 size_px 10 -> 1x3 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 20161 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10679 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16024 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12138 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11444 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3901 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7538 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5334 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11556 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6613 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5537 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2813 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8273 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3515 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12387 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4554 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5719 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 726 size_px 10 -> 2x3 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2437 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5206 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7235 size_px 10 -> 8x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 9255 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2616 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1085 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2132 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2139 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5791 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13884 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 21758 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7468 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2103 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12458 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19492 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10409 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5553 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1354 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7278 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14983 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3790 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2256 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13604 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7095 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6656 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2090 size_px 10 -> 8x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1072 size_px 10 -> 10x2 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12285 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3626 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1214 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2556 size_px 10 -> 10x8 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7745 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4671 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8978 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6546 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13143 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2049 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1212 size_px 10 -> 10x8 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4480 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2566 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8965 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 20422 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1912 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2137 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11096 size_px 10 -> 9x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18429 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5418 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4649 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5316 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2748 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1108 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1114 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10086 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2622 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4662 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8703 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11801 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19557 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17911 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7248 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4660 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17820 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1130 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2625 size_px 10 -> 8x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18431 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7072 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6558 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19702 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2144 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16884 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1376 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17432 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7189 size_px 10 -> 7x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7503 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16878 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13726 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1083 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17902 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5283 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3447 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2038 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11934 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1352 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 451 size_px 10 -> 2x2 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2554 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16917 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1269 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1455 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1519 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1220 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11560 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17921 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14125 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4558 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10720 size_px 10 -> 10x10 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13526 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2491 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13657 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5286 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2047 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4673 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11521 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11667 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6341 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1485 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17286 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2567 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1483 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 727 size_px 10 -> 2x4 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7530 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2579 size_px 10 -> 8x7 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2064 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1413 size_px 10 -> 10x9 px
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17920 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2264 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5923 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17041 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14145 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11109 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 708 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 709 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2102 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12971 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7192 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3416 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1278 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3940 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11486 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1117 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16886 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2139 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14034 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1411 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 712 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1958 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2132 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1553 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5791 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1131 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16305 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10720 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1130 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5967 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16377 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2410 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14514 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5563 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11444 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1211 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1318 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11560 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1955 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2539 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2620 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8597 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2374 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1086 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 452 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7072 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6558 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19702 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8703 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2621 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16091 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16901 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6656 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1483 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1085 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7189 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7503 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18423 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16861 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13555 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2748 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10524 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12539 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16884 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1376 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17432 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7601 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19563 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6343 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 451 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10470 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5681 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14076 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7327 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3226 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3872 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2568 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1354 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4652 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14372 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2431 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7145 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5150 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5171 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 9522 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12331 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3344 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8596 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16878 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13726 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13875 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4623 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7263 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1269 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11096 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16947 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1352 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10409 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5553 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16024 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12138 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 14125 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2646 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1082 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1549 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6449 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2591 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19856 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5719 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7481 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8965 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2357 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6428 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12458 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19492 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 9492 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8978 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7206 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 20161 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16403 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2064 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1413 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5418 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8273 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4502 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1168 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18426 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3224 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1398 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11521 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11667 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6341 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5537 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1083 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17911 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6415 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2616 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4671 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3914 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17880 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10679 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 21758 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7468 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2121 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11556 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6613 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5877 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2021 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11145 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17994 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18051 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13571 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7604 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 10086 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13884 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1277 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1485 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17286 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16849 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2173 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 726 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2437 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1072 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4589 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5206 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 9255 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3790 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2256 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2103 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13604 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5334 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2556 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7745 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3901 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6546 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17921 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1388 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5283 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1212 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4480 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 12575 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7184 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 19760 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5426 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6732 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13138 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2467 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3370 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4554 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11087 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 6208 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7516 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7095 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2090 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 20422 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1912 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 18429 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1108 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1114 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2622 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4662 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7248 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4660 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2144 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 16862 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 1220 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 8708 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17843 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 5286 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13583 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2546 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7628 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 7230 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13143 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2049 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 17902 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 3447 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2038 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 11934 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 4558 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13526 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 2491 size_px 14 -> NONE
+[cjk-debug] C:/WINDOWS/fonts\simsun.ttc gid 13657 size_px 14 -> NONE

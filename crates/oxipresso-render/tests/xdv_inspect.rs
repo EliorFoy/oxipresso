@@ -6,7 +6,11 @@ use oxipresso_render::xdv::parse_xdv;
 
 #[test]
 fn dump_demo_xdv_fonts_and_glyph_codes() {
-    let path = "F:/code/oxipresso/demo/demo.xdv";
+    let path = if std::path::Path::new("F:/code/oxipresso/demo/cn-current.xdv").is_file() {
+        "F:/code/oxipresso/demo/cn-current.xdv"
+    } else {
+        "F:/code/oxipresso/demo/demo.xdv"
+    };
     if !std::path::Path::new(path).is_file() {
         eprintln!("demo.xdv not found; skipping");
         return;
@@ -40,8 +44,8 @@ fn dump_demo_xdv_fonts_and_glyph_codes() {
     }
     for (id, font) in &doc.fonts {
         println!(
-            "  id={id} native={} name={} size={:.2}pt",
-            font.native, font.name, font.size_pt
+            "  id={id} native={} name={} face={} size={:.2}pt",
+            font.native, font.name, font.face_index, font.size_pt
         );
     }
     println!("== pages ==");

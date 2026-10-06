@@ -19,6 +19,7 @@ pub const FT_LOAD_DEFAULT: c_int = 0;
 pub const FT_LOAD_NO_BITMAP: c_int = 0x8;
 pub const FT_LOAD_NO_HINTING: c_int = 0x2;
 pub const FT_RENDER_MODE_NORMAL: c_uint = 0;
+pub const FT_PIXEL_MODE_MONO: u8 = 1;
 pub const FT_PIXEL_MODE_GRAY: u8 = 2;
 
 /// 16.16 fixed-point transformation matrix. FreeType applies
@@ -73,6 +74,10 @@ unsafe extern "C" {
     pub fn FT_Set_Pixel_Sizes(face: FT_Face, width: c_uint, height: c_uint) -> c_int;
     pub fn FT_Get_Char_Index(face: FT_Face, charcode: c_uint) -> c_uint;
     pub fn FT_Get_Name_Index(face: FT_Face, glyph_name: *const i8) -> u32;
+    pub fn oxipresso_ft_face_glyph_slot(face: FT_Face) -> *mut c_void;
+    pub fn oxipresso_ft_slot_bitmap(slot: *mut c_void) -> *mut c_void;
+    pub fn oxipresso_ft_slot_bitmap_left(slot: *mut c_void) -> c_int;
+    pub fn oxipresso_ft_slot_bitmap_top(slot: *mut c_void) -> c_int;
     pub fn FT_Load_Glyph(face: FT_Face, glyph_index: c_uint, load_flags: c_int) -> c_int;
     pub fn FT_Set_Transform(face: FT_Face, matrix: *const FT_Matrix, delta: *const c_void)
     -> c_int;
@@ -91,102 +96,79 @@ fn read_pointer(base: *const c_void, offset: usize) -> *mut c_void {
 /// example `FT_BBox` coordinates), candidates must first pass a heap-cluster
 /// filter: their address must be near other pointer values found in the face
 /// structure, which all come from the same allocator region.
+/// Returns the face's glyph slot through the C accessor (compiled against
+/// the real FreeType headers — no layout guessing, no memory scanning).
 pub fn find_glyph_slot(face: FT_Face) -> Option<FT_GlyphSlot> {
-    const SCAN_RANGE: usize = 232;
     unsafe {
-        let mut values: Vec<usize> = Vec::new();
-        for offset in (0usize..SCAN_RANGE).step_by(8) {
-            let value = (face.cast::<u8>().add(offset) as *const usize).read();
-            values.push(value);
-        }
-        // Heap-cluster anchor: pointer-like values cluster within a few
-        // megabytes of each other; numeric fields (flags, glyph counts, font
-        // coordinates) do not.
-        let pointer_like: Vec<usize> = values
-            .iter()
-            .copied()
-            .filter(|value| *value > 0x10000 && value % 8 == 0)
-            .collect();
-        let near = |candidate: usize| -> bool {
-            pointer_like
-                .iter()
-                .filter(|other| {
-                    let distance = candidate.abs_diff(**other);
-                    distance > 0 && distance < 0x1000_0000
-                })
-                .count()
-                >= 2
-        };
-        for (index, &candidate) in values.iter().enumerate() {
-            let offset = index * 8;
-            if candidate <= 0x10000 || offset % 8 != 0 || !near(candidate) {
-                continue;
-            }
-            let slot = candidate as *mut c_void;
-            let back_reference = read_pointer(slot, SLOT_FACE_OFFSET);
-            if back_reference == face {
-                #[cfg(test)]
-                eprintln!("[dbg] slot candidate at face+{offset}");
-                return Some(slot);
-            }
-        }
+        let slot = oxipresso_ft_face_glyph_slot(face);
+        if slot.is_null() { None } else { Some(slot) }
     }
-    None
 }
 
 /// Copies out the rendered gray bitmap plus its bearing relative to the pen
-/// position. The `FT_Bitmap` offset inside `FT_GlyphSlotRec` varies across
-/// FreeType versions (2.14 added `glyph_index` + `generic` fields), so the
-/// struct is located by signature: positive rows/width, `|pitch| >= width`,
-/// a non-null buffer, and the gray pixel-mode byte — all validated together.
-/// The scan steps by 4 because the bitmap may sit at a 4-aligned but not
-/// 8-aligned offset.
+/// position. The bitmap fields are read through the C accessor for the slot
+/// and fixed offsets inside `FT_Bitmap` itself (rows/width/pitch/buffer have
+/// no `FT_Pos` and are stable across platforms).
 pub fn read_rendered_bitmap(slot: FT_GlyphSlot) -> Option<RenderedGrayBitmap> {
     unsafe {
-        for base_offset in (0usize..1024).step_by(4) {
-            let base = slot.cast::<u8>().add(base_offset);
-            let rows = (base.add(BITMAP_ROWS_OFFSET) as *const c_uint).read();
-            let width = (base.add(BITMAP_WIDTH_OFFSET) as *const c_uint).read();
-            let pitch = (base.add(BITMAP_PITCH_OFFSET) as *const c_int).read();
-            let buffer = (base.add(BITMAP_BUFFER_OFFSET) as *const *mut u8).read();
-            let pixel_mode = base.add(BITMAP_PIXEL_MODE_OFFSET).read();
-            #[cfg(test)]
-            if rows > 0 && rows < 8192 {
-                eprintln!(
-                    "[dbg] scan@{base_offset}: rows={rows} width={width} pitch={pitch} mode={pixel_mode} buffer_null={}",
-                    buffer.is_null()
-                );
-            }
-            if rows == 0 || width == 0 || rows > 8192 || width > 8192 {
-                continue;
-            }
-            if (pitch.unsigned_abs() as u32) < width {
-                continue;
-            }
-            if buffer.is_null() || pixel_mode != FT_PIXEL_MODE_GRAY {
-                continue;
-            }
-            let left = (base.add(40) as *const c_int).read();
-            let top = (base.add(44) as *const c_int).read();
-            if left.abs() > 100_000 || top.abs() > 100_000 {
-                continue;
-            }
-            let width = width as usize;
-            let height = rows as usize;
-            let stride = pitch.unsigned_abs() as usize;
-            let mut pixels = Vec::with_capacity(width * height);
-            for row in 0..height {
-                pixels
-                    .extend_from_slice(std::slice::from_raw_parts(buffer.add(row * stride), width));
-            }
-            return Some(RenderedGrayBitmap {
-                left: left as i64,
-                top: top as i64,
-                width: width as u32,
-                height: height as u32,
-                pixels,
-            });
+        let bitmap = oxipresso_ft_slot_bitmap(slot);
+        if bitmap.is_null() {
+            return None;
         }
+        let base = bitmap.cast::<u8>();
+        let rows = (base.cast::<u32>()).read();
+        let width = (base.add(4).cast::<u32>()).read();
+        let pitch = (base.add(8).cast::<i32>()).read();
+        let buffer = (base.add(16).cast::<*const u8>()).read();
+        // FT_Bitmap has no FT_Pos fields: rows/width/pitch/buffer are at
+        // fixed offsets, and pixel_mode sits at 26 (BITMAP_PIXEL_MODE_OFFSET).
+        let pixel_mode = (base.add(26).cast::<u8>()).read();
+        if rows == 0 || width == 0 || buffer.is_null() || pitch == 0 {
+            return None;
+        }
+        let abs_pitch = pitch.unsigned_abs() as usize;
+        let mut pixels = Vec::with_capacity(rows as usize * width as usize);
+        // CJK system fonts (SimSun.ttc) carry MONO (1bpp) embedded strikes;
+        // at a pixel size matching a strike FT_Load_Glyph returns MONO, not
+        // GRAY. Expand MSB-first 1bpp rows to 8-bit gray.
+        if pixel_mode == FT_PIXEL_MODE_MONO {
+            for row in 0..rows as usize {
+                let row_index = if pitch > 0 {
+                    row
+                } else {
+                    rows as usize - 1 - row
+                };
+                let line = std::slice::from_raw_parts(
+                    buffer.add(row_index * abs_pitch),
+                    (width as usize).div_ceil(8),
+                );
+                for x in 0..width as usize {
+                    let bit = (line[x / 8] >> (7 - (x % 8))) & 1;
+                    pixels.push(if bit == 1 { 255 } else { 0 });
+                }
+            }
+        } else if pixel_mode == FT_PIXEL_MODE_GRAY {
+            for row in 0..rows as usize {
+                let row_index = if pitch > 0 {
+                    row
+                } else {
+                    rows as usize - 1 - row
+                };
+                let source = buffer.add(row_index * abs_pitch);
+                let line = std::slice::from_raw_parts(source, width as usize);
+                pixels.extend_from_slice(line);
+            }
+        } else {
+            return None;
+        }
+        let left = oxipresso_ft_slot_bitmap_left(slot) as i64;
+        let top = oxipresso_ft_slot_bitmap_top(slot) as i64;
+        Some(RenderedGrayBitmap {
+            width,
+            height: rows,
+            left,
+            top,
+            pixels,
+        })
     }
-    None
 }

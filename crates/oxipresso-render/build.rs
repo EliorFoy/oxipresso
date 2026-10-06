@@ -16,7 +16,14 @@ fn main() {
                              `vcpkg install freetype --triplet x64-windows-static-md` and set VCPKG_ROOT."
                         )
                     });
-                let _ = library;
+                // Field accessors compiled against the real headers (the Rust
+                // side is layout-independent and must not scan face memory).
+                let mut build = cc::Build::new();
+                build.file("c/ft_helpers.c");
+                for include in library.include_paths {
+                    build.include(include);
+                }
+                build.compile("oxipresso_ft_helpers");
             }
             "linux" => {
                 let library = pkg_config::Config::new()

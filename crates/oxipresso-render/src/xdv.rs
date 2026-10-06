@@ -482,10 +482,12 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                     EngineError::new("XDV SET_TEXT_AND_GLYPHS before font selection")
                 })?;
                 let text_len = reader.u16()? as usize;
-                // The text section is `text_len` BYTES (UTF-8), not UTF-16
-                // code units — over-skipping misaligns the glyph array so
-                // every math glyph reads as code 0 (blank equations).
-                reader.skip(text_len)?;
+                // Per the engine's writer (xetex-shipout.c): `dvi_two(len)`
+                // stores the CHAR COUNT, then each char is written as TWO
+                // bytes (UTF-16BE) — the text section is 2×len bytes.
+                // Skipping only len misaligns the glyph array and blanks
+                // every CJK run.
+                reader.skip(text_len * 2)?;
                 let glyphs = read_glyph_array(&mut reader, state.h, state.v, pt_per_unit)?;
                 if let Some(target) = page.as_mut() {
                     target.elements.push(XdvElement::Glyphs {

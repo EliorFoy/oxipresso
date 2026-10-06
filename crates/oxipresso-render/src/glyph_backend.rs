@@ -302,6 +302,16 @@ impl XdvGlyphRenderBackend {
             return cached.clone();
         }
         let rendered = self.rasterize_uncached(font, code, size_px).map(Rc::new);
+        if std::env::var_os("OXI_DEBUG_CJK").is_some() && rendered.is_none() {
+            eprintln!(
+                "[cjk-debug] {} gid {code} size_px {size_px} -> {}",
+                font.name,
+                rendered
+                    .as_ref()
+                    .map(|b| format!("{}x{} px", b.width, b.height))
+                    .unwrap_or_else(|| "NONE".to_string())
+            );
+        }
         self.glyph_cache
             .borrow_mut()
             .insert(cache_key, rendered.clone());
@@ -319,7 +329,14 @@ impl XdvGlyphRenderBackend {
         }
         let face = self.face_for(font).ok()??;
         unsafe {
-            if ft::FT_Set_Pixel_Sizes(face, 0, size_px) != 0 {
+            let set_size = ft::FT_Set_Pixel_Sizes(face, 0, size_px);
+            if set_size != 0 && std::env::var_os("OXI_DEBUG_CJK").is_some() {
+                eprintln!(
+                    "[cjk-debug] FT_Set_Pixel_Sizes {} {} failed status {set_size}",
+                    font.name, size_px
+                );
+            }
+            if set_size != 0 {
                 return None;
             }
             // Native XDV fonts: `code` is a GLYPH ID (harfbuzz shaping output)
@@ -348,7 +365,20 @@ impl XdvGlyphRenderBackend {
                     }
                 }
             };
-            if ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT) != 0 {
+            // SimSun.ttc carries embedded bitmap strikes at fixed pixel
+            // sizes; at a size without a strike FT_Load_Glyph(FT_LOAD_DEFAULT)
+            // fails for every CJK glyph (the whole body text vanished at
+            // some zoom densities). Retry without bitmap strikes — the
+            // outline renders at any size.
+            let mut status = ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT);
+            if status != 0 {
+                status = ft::FT_Load_Glyph(
+                    face,
+                    glyph_index,
+                    ft::FT_LOAD_DEFAULT | ft::FT_LOAD_NO_BITMAP,
+                );
+            }
+            if status != 0 {
                 return None;
             }
             let Some(slot) = ft::find_glyph_slot(face) else {
