@@ -12,6 +12,7 @@
 use std::os::raw::{c_int, c_long, c_uint, c_void};
 
 pub type FT_Library = *mut c_void;
+pub type FT_CharMap = *mut c_void;
 pub type FT_Face = *mut c_void;
 pub type FT_GlyphSlot = *mut c_void;
 
@@ -58,7 +59,9 @@ pub struct RenderedGrayBitmap {
     pub pixels: Vec<u8>,
 }
 
-pub const FT_ENCODING_ADOBE_CUSTOM: u32 = 0x41_44_43_55; // 'ADCU'
+pub const FT_ENCODING_ADOBE_CUSTOM: u32 = 0x41444243; // FT_ENC_TAG A D B C
+pub const FT_ENCODING_ADOBE_STANDARD: u32 = 0x41444F42; // FT_ENC_TAG A D O B
+pub const FT_ENCODING_MS_SYMBOL: u32 = 0x73796D62; // FT_ENC_TAG s y m b
 
 unsafe extern "C" {
     pub fn FT_Init_FreeType(library: *mut FT_Library) -> c_int;
@@ -73,6 +76,8 @@ unsafe extern "C" {
     pub fn FT_Done_Face(face: FT_Face) -> c_int;
     pub fn FT_Set_Pixel_Sizes(face: FT_Face, width: c_uint, height: c_uint) -> c_int;
     pub fn FT_Get_Char_Index(face: FT_Face, charcode: c_uint) -> c_uint;
+    pub fn FT_Select_Charmap(face: FT_Face, encoding: c_uint) -> c_int;
+    pub fn FT_Get_Glyph_Name(glyph_index: c_uint, buffer: *mut u8, buffer_max: c_uint) -> c_int;
     pub fn FT_Get_Name_Index(face: FT_Face, glyph_name: *const i8) -> u32;
     pub fn oxipresso_ft_face_glyph_slot(face: FT_Face) -> *mut c_void;
     pub fn oxipresso_ft_slot_bitmap(slot: *mut c_void) -> *mut c_void;

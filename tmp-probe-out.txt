@@ -1,0 +1,18 @@
+   Compiling oxipresso-render v0.1.0 (F:\code\oxipresso\crates\oxipresso-render)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.74s
+     Running tests\render_check.rs (target\debug\deps\render_check-f2993f145ce41628.exe)
+
+running 1 test
+[oxi-glyph] font=lmmi8 code=22 afm-MISS char-index=0 raw-fallback
+[oxi-glyph] font=lmmi8 code=61 afm-MISS char-index=0 raw-fallback
+[oxi-glyph] font=lmmi8 code=12 afm-MISS char-index=0 raw-fallback
+[oxi-glyph] font=lmmi10 code=22 afm-MISS char-index=0 raw-fallback
+[oxi-glyph] font=lmmi10 code=61 afm-MISS char-index=0 raw-fallback
+[oxi-glyph] font=lmmi10 code=12 afm-MISS char-index=0 raw-fallback
+page 797x1127 px
+dark total=24130 bottom_band=2223 (page index 0)
+written F:\code\oxipresso\tmp-probe.png
+test render_demo_page_to_png ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.46s
+

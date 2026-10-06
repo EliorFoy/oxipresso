@@ -358,10 +358,54 @@ impl XdvGlyphRenderBackend {
                         (gid != 0).then_some(gid)
                     });
                 match via_afm {
-                    Some(gid) => gid,
+                    Some(gid) => {
+                        if code >= 12 {
+                            eprintln!(
+                                "[oxi-glyph] font={} code={} afm-hit name-gid={}",
+                                font.name, code, gid
+                            );
+                        }
+                        gid
+                    }
                     None => {
-                        let mapped = ft::FT_Get_Char_Index(face, code);
-                        if mapped == 0 { code } else { mapped }
+                        // The face's default charmap is synthesized unicode;
+                        // TeX char codes are font-layout positions. Select the
+                        // legacy encodings in turn (the Type1 /Encoding maps
+                        // codes to glyph names directly) and use the first
+                        // that knows this code.
+                        let mut chosen = 0u32;
+                        for encoding in [
+                            ft::FT_ENCODING_ADOBE_CUSTOM,
+                            ft::FT_ENCODING_ADOBE_STANDARD,
+                            ft::FT_ENCODING_MS_SYMBOL,
+                        ] {
+                            if ft::FT_Select_Charmap(face, encoding) != 0 {
+                                continue;
+                            }
+                            let idx = ft::FT_Get_Char_Index(face, code);
+                            if idx != 0 {
+                                if code >= 12 {
+                                    eprintln!(
+                                        "[oxi-glyph] font={} code={} encoding={:#x} idx={}",
+                                        font.name, code, encoding, idx
+                                    );
+                                }
+                                chosen = idx;
+                                break;
+                            }
+                        }
+                        if chosen != 0 {
+                            chosen
+                        } else {
+                            ft::FT_Select_Charmap(face, ft::FT_ENCODING_ADOBE_CUSTOM);
+                            if code >= 12 {
+                                eprintln!(
+                                    "[oxi-glyph] font={} code={} afm-MISS char-index=0 raw-fallback",
+                                    font.name, code
+                                );
+                            }
+                            code
+                        }
                     }
                 }
             };
