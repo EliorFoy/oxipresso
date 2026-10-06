@@ -46,11 +46,21 @@ fn render_demo_page_to_png() {
         return;
     }
     let bytes = std::fs::read(path).unwrap();
+    let artifact_bytes = bytes.clone();
     let artifact = DocumentArtifact {
         kind: ArtifactKind::Xdv,
         bytes,
         source_name: Some("demo.xdv".to_string()),
     };
+    let none_tfm = oxipresso_render::xdv::parse_xdv(&artifact_bytes, &mut |_| None);
+    println!(
+        "None-tfm parse: {:?}",
+        none_tfm.as_ref().map(|d| d.pages.len())
+    );
+    println!(
+        "None-tfm parse: {:?}",
+        none_tfm.as_ref().map(|d| d.pages.len())
+    );
     let backend = XdvGlyphRenderBackend::new(Box::new(CliResolver));
     let scale = std::env::var("OXI_RENDER_SCALE")
         .ok()

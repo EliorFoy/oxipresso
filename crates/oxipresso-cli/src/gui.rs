@@ -10,8 +10,7 @@ use eframe::egui;
 use oxipresso_editor_protocol::{EditorMessage, serialize_message};
 use oxipresso_platform::{FileWatchEvent, FileWatcher};
 #[cfg(feature = "freetype")]
-use oxipresso_render::XdvGlyphRenderBackend;
-use oxipresso_render::{AutoRenderBackend, RenderBackend};
+use oxipresso_render::{RenderBackend, XdvGlyphRenderBackend};
 use oxipresso_viewer::ViewerState;
 
 use crate::{CliOptions, OxipressoApp, disk_roots_for, root_document};
@@ -22,18 +21,11 @@ use crate::{DocumentImageLoader, KpseFontResolver};
 pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
     let root = root_document(&options)?;
     let doc_path = root.root_dir.join(&root.root_name);
-    let renderer = {
-        // Real XDV rendering in the preview: glyphs + rules + images through
-        // the glyph backend (placeholder page without the freetype feature).
-        let renderer = AutoRenderBackend::default();
-        #[cfg(feature = "freetype")]
-        let renderer = renderer.with_xdv_glyph_backend(XdvGlyphRenderBackend::with_image_loader(
-            Box::new(KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy())),
-            Box::new(DocumentImageLoader {
-                roots: disk_roots_for(&root),
-            }),
-        ));
-        renderer
+    // The preview renders through the async worker's own glyph backend;
+    // without the freetype feature the worker falls back to the placeholder.
+    #[cfg(feature = "freetype")]
+    let image_loader = DocumentImageLoader {
+        roots: disk_roots_for(&root),
     };
     let mut app = OxipressoApp::new(options, root);
     // Initialize the engine before the window appears so editor-facing
@@ -63,18 +55,66 @@ pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
 
     eprintln!("[gui] entering eframe");
     let options = eframe::NativeOptions::default();
+    // The async render worker owns a dedicated glyph backend (its FreeType
+    // handles and caches are thread-local); requests are coalesced so zoom
+    // bursts cost one render, and the UI thread only swaps finished
+    // textures in.
+    let (render_req_tx, render_req_rx) = mpsc::channel::<RenderRequest>();
+    let (render_res_tx, render_res_rx) = mpsc::channel::<RenderResult>();
+    {
+        let resolver = KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy());
+        std::thread::spawn(move || {
+            let worker = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let backend = XdvGlyphRenderBackend::with_image_loader(
+                    Box::new(resolver),
+                    Box::new(image_loader),
+                );
+                while let Ok(mut request) = render_req_rx.recv() {
+                    // Coalesce: keep only the newest request in the queue.
+                    while let Ok(newer) = render_req_rx.try_recv() {
+                        request = newer;
+                    }
+                    let page = backend
+                        .render_page_scaled(&request.artifact, request.page, request.scale)
+                        .map_err(|error| error.to_string());
+                    if render_res_tx
+                        .send(RenderResult {
+                            key: request.key,
+                            scale: request.scale,
+                            page,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+            if worker.is_err() {
+                eprintln!("[render-worker] PANICKED — page rendering stopped");
+            }
+        });
+    }
     let mut host = LivePreview {
         app,
         editor_rx,
         pending,
         viewer: ViewerState::default(),
-        renderer,
+        render_req_tx,
+        render_rx: render_res_rx,
+        pending_render: None,
         texture: None,
         texture_key: None,
         rendered_size: None,
         rendered_scale: 1.0,
         centered_zoom: 1.0,
-        status: String::new(),
+        status: format!(
+            "engine: {}",
+            if oxipresso_engine_xetex::XetexEngine::real_mode() {
+                "xetex-real"
+            } else {
+                "XETEX STUB (no real engine linked!)"
+            }
+        ),
         doc_watcher: oxipresso_platform::file_watcher(doc_path),
     };
     // The initial pass's artifact must reach the viewer BEFORE the first
@@ -89,12 +129,30 @@ pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+/// A page-render request for the async worker (densities change on zoom).
+struct RenderRequest {
+    artifact: oxipresso_engine_api::DocumentArtifact,
+    page: usize,
+    scale: f32,
+    key: u64,
+}
+
+/// The async worker's answer, keyed to match the request.
+struct RenderResult {
+    key: u64,
+    scale: f32,
+    page: Result<oxipresso_render::RenderedPage, String>,
+}
+
 struct LivePreview {
     app: OxipressoApp,
     editor_rx: mpsc::Receiver<String>,
     pending: Vec<EditorMessage>,
     viewer: ViewerState,
-    renderer: AutoRenderBackend,
+    render_req_tx: mpsc::Sender<RenderRequest>,
+    render_rx: mpsc::Receiver<RenderResult>,
+    /// The latest desired render; coalesced so zoom bursts cost one render.
+    pending_render: Option<RenderRequest>,
     texture: Option<egui::TextureHandle>,
     texture_key: Option<u64>,
     rendered_size: Option<egui::Vec2>,
@@ -182,11 +240,15 @@ impl LivePreview {
         if !changed {
             return;
         }
-        if self
-            .viewer
-            .load_artifact_with_renderer(artifact, &self.renderer)
-            .is_ok()
-        {
+        // Page count straight from the XDV stream (no render backend on the
+        // UI thread — rendering lives in the async worker).
+        let page_count = oxipresso_render::xdv::parse_xdv(&artifact.bytes, &mut |_| None)
+            .map(|document| document.pages.len())
+            .map_err(|error| error.to_string());
+        if let Ok(count) = page_count {
+            self.viewer.set_artifact(artifact, count);
+            // The artifact changed: drop the texture so the next frame
+            // queues a fresh async render.
             self.texture = None;
             self.texture_key = None;
             self.rendered_size = None;
@@ -271,46 +333,40 @@ impl LivePreview {
         Some((page.width_pt, page.height_pt))
     }
 
-    /// Re-renders the current page when the displayed resolution demands
-    /// more pixels than the cached texture has (zoom / window resize), so
-    /// text stays crisp instead of upscaling a 96dpi bitmap.
+    /// Requests a re-render when the displayed resolution demands more
+    /// pixels than the cached texture has (zoom / window resize). The
+    /// request goes to the async worker; the CURRENT texture stays
+    /// displayed (scaled) until the new one arrives, so zoom never blocks
+    /// or stutters the UI — the TeXpresso behavior of always-redrawing at
+    /// the display density without freezing.
     fn ensure_texture(&mut self, ctx: &egui::Context, available: egui::Vec2) {
         let Some(artifact) = self.viewer.last_artifact.clone() else {
             return;
         };
         let wanted = self.wanted_render_scale(ctx, available);
-        let scale_changed =
-            (wanted - self.rendered_scale).abs() / self.rendered_scale.max(0.01) > 0.15;
-        if scale_changed {
-            // Force a re-render at the new density (the key changes too).
-            self.texture_key = None;
-        }
+        // Full f32 precision: truncating the scale into the key (as u64)
+        // made sub-integer density changes share one key and never
+        // re-render — the "zoom is blurry" bug.
         let key = page_texture_key(&artifact, self.viewer.page)
-            ^ (wanted as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            ^ (wanted as f64)
+                .to_bits()
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15);
         if self.texture_key == Some(key) {
             return;
         }
-        match self
-            .renderer
-            .render_page_scaled(&artifact, self.viewer.page, wanted)
+        if self
+            .pending_render
+            .as_ref()
+            .is_some_and(|req| req.key == key)
         {
-            Ok(page) => {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [page.width as usize, page.height as usize],
-                    &page.pixels_rgba,
-                );
-                let handle = ctx.load_texture("page", image, egui::TextureOptions::LINEAR);
-                // Logical page size in points: the texture holds
-                // pt × (96/72) × wanted pixels.
-                let logical =
-                    egui::vec2(page.width as f32, page.height as f32) / (4.0 / 3.0 * wanted);
-                self.rendered_size = Some(logical);
-                self.rendered_scale = wanted;
-                self.texture = Some(handle);
-                self.texture_key = Some(key);
-            }
-            Err(error) => self.status = error.to_string(),
+            return; // already queued
         }
+        self.pending_render = Some(RenderRequest {
+            artifact,
+            page: self.viewer.page,
+            scale: wanted,
+            key,
+        });
     }
 
     /// The pixel density the current zoom/fit actually needs, clamped to a
@@ -329,7 +385,7 @@ impl LivePreview {
             }
             None => 1.0,
         };
-        (fit * self.viewer.zoom * ppp).clamp(1.0, 4.0)
+        (fit * self.viewer.zoom * ppp).clamp(1.0, 6.0)
     }
 }
 
@@ -346,6 +402,33 @@ impl eframe::App for LivePreview {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_editor_wire();
         self.poll_document_watcher();
+        // Dispatch the latest render request (coalesced; the worker drops
+        // superseded requests itself).
+        if let Some(request) = self.pending_render.take() {
+            let _ = self.render_req_tx.send(request);
+        }
+        // Adopt finished renders (the texture swap happens here on the UI
+        // thread; the old texture stays until this moment).
+        while let Ok(result) = self.render_rx.try_recv() {
+            match result.page {
+                Ok(page) => {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [page.width as usize, page.height as usize],
+                        &page.pixels_rgba,
+                    );
+                    let handle = ctx.load_texture("page", image, egui::TextureOptions::LINEAR);
+                    // Logical page size in points: the texture holds
+                    // pt × (96/72) × scale pixels.
+                    let logical = egui::vec2(page.width as f32, page.height as f32)
+                        / (4.0 / 3.0 * result.scale);
+                    self.rendered_size = Some(logical);
+                    self.rendered_scale = result.scale;
+                    self.texture = Some(handle);
+                    self.texture_key = Some(result.key);
+                }
+                Err(error) => self.status = error,
+            }
+        }
         // Keep the GUI responsive to the editor wire even when idle.
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }

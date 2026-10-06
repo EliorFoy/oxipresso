@@ -73,6 +73,12 @@ pub fn parse_afm_charmetrics(bytes: &[u8]) -> Option<HashMap<u32, String>> {
     (!map.is_empty()).then_some(map)
 }
 
+// SAFETY: the backend is deliberately NOT Sync; the GUI's render worker
+// thread owns one instance exclusively (all interior mutability stays on
+// that thread). The raw FreeType handles are created and used on the owner
+// thread only.
+unsafe impl Send for XdvGlyphRenderBackend {}
+
 pub struct XdvGlyphRenderBackend {
     /// Page rasterization scale in pixels per point (96 dpi = 4/3).
     pub px_per_pt: f64,
@@ -141,6 +147,12 @@ impl std::fmt::Debug for XdvGlyphRenderBackend {
 impl XdvGlyphRenderBackend {
     pub fn new(resolver: Box<dyn FontResolver>) -> Self {
         Self::with_image_loader(resolver, Box::new(NullImageLoader))
+    }
+
+    /// Builds a backend for a dedicated render-worker thread: real glyph
+    /// rendering with the given resolver (identity images loader).
+    pub fn for_worker_thread(resolver: Box<dyn FontResolver>) -> Self {
+        Self::new(resolver)
     }
 
     pub fn with_image_loader(
