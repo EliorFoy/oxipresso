@@ -185,19 +185,19 @@ fn root_document(options: &CliOptions) -> Result<RootDocument, String> {
 }
 
 #[cfg(feature = "freetype")]
-struct KpseFontResolver {
+pub struct KpseFontResolver {
     kpsewhich: Option<PathBuf>,
 }
 
 #[cfg(feature = "freetype")]
 impl KpseFontResolver {
-    fn detect() -> Option<Self> {
+    pub fn detect() -> Option<Self> {
         Some(Self {
             kpsewhich: which_kpsewhich(),
         })
     }
 
-    fn dummy() -> Self {
+    pub fn dummy() -> Self {
         Self { kpsewhich: None }
     }
 }
@@ -264,8 +264,8 @@ impl GlyphFontResolver for KpseFontResolver {
 /// against the root document's directory first (the specials usually carry
 /// paths relative to the TeX source), then against the include paths.
 #[cfg(feature = "freetype")]
-struct DocumentImageLoader {
-    roots: Vec<PathBuf>,
+pub struct DocumentImageLoader {
+    pub roots: Vec<PathBuf>,
 }
 
 #[cfg(feature = "freetype")]

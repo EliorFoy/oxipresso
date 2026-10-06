@@ -22,7 +22,7 @@ const CLASSIC_FONT_EXTENSIONS: &[&str] = &["pfb", "ttf", "otf"];
 /// Locates image files referenced by `pdf:image` specials. Implementations
 /// typically resolve the path against the document directory (the special
 /// carries the path exactly as written in the TeX source).
-pub trait ImageLoader {
+pub trait ImageLoader: Send {
     /// Returns the image file bytes for `path`, or `None`.
     fn find_image_file(&mut self, path: &str) -> Option<Vec<u8>>;
 }
