@@ -921,6 +921,7 @@ unsafe extern "C" fn callback_open_write(
     let Some(path) = callback_path(path, path_len) else {
         return state.set_error("FFI open_write path is not valid UTF-8");
     };
+    eprintln!("[oxi-io] open_write path={path} kind={kind}");
     match state.io.open_write(path, callback_file_kind(kind)) {
         Ok(file_handle) => {
             if handle.is_null() {
@@ -1009,6 +1010,11 @@ unsafe extern "C" fn callback_append(
             data: data.to_vec(),
         });
         output.extend_from_slice(data);
+    } else {
+        eprintln!(
+            "[oxi-io] append MIRROR MISS handle={handle} len={len} paths_known={}",
+            state.output_paths.len()
+        );
     }
     match state.io.append(FileHandle(handle), data) {
         Ok(()) => 0,
