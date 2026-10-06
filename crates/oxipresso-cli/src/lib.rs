@@ -218,6 +218,19 @@ fn which_kpsewhich() -> Option<PathBuf> {
 #[cfg(feature = "freetype")]
 impl GlyphFontResolver for KpseFontResolver {
     fn find_font_file(&mut self, name: &str, extensions: &[&str]) -> Option<Vec<u8>> {
+        // The engine sometimes records the font name as the RESOLVED PATH
+        // (ctex-fontset-windows emits e.g. `C:/WINDOWS/fonts\simhei.ttf`) —
+        // such a name is used verbatim, without a kpsewhich round-trip.
+        let normalized = name.replace('\\', "/");
+        let direct = PathBuf::from(&normalized);
+        if direct.is_file() {
+            return std::fs::read(&direct).ok();
+        }
+        let bare = normalized
+            .rsplit('/')
+            .next()
+            .unwrap_or(&normalized)
+            .to_string();
         let kpsewhich = self.kpsewhich.as_ref()?;
         for extension in extensions {
             let output = std::process::Command::new(kpsewhich)
@@ -233,6 +246,14 @@ impl GlyphFontResolver for KpseFontResolver {
                 && let Ok(bytes) = std::fs::read(path)
             {
                 return Some(bytes);
+            }
+        }
+        // Last resort: the Windows system font directory by bare name —
+        // SimSun/SimHei and friends live there, outside kpathsea databases.
+        for extension in extensions {
+            let candidate = PathBuf::from(r"C:\Windows\Fonts").join(format!("{bare}.{extension}"));
+            if candidate.is_file() {
+                return std::fs::read(&candidate).ok();
             }
         }
         None

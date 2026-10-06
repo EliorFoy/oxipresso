@@ -158,7 +158,8 @@ impl LivePreview {
     }
 
     fn page_image(&mut self, ui: &mut egui::Ui) {
-        self.ensure_texture(ui.ctx());
+        let available = ui.available_size();
+        self.ensure_texture(ui.ctx(), available);
         let Some(texture) = self.texture.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label("No document yet");
@@ -224,11 +225,11 @@ impl LivePreview {
     /// Re-renders the current page when the displayed resolution demands
     /// more pixels than the cached texture has (zoom / window resize), so
     /// text stays crisp instead of upscaling a 96dpi bitmap.
-    fn ensure_texture(&mut self, ctx: &egui::Context) {
+    fn ensure_texture(&mut self, ctx: &egui::Context, available: egui::Vec2) {
         let Some(artifact) = self.viewer.last_artifact.clone() else {
             return;
         };
-        let wanted = self.wanted_render_scale(ctx);
+        let wanted = self.wanted_render_scale(ctx, available);
         let scale_changed =
             (wanted - self.rendered_scale).abs() / self.rendered_scale.max(0.01) > 0.15;
         if scale_changed {
@@ -266,15 +267,14 @@ impl LivePreview {
     /// The pixel density the current zoom/fit actually needs, clamped to a
     /// re-render budget (≤4× the 96dpi base ≈ 384dpi, beyond which the blur
     /// is imperceptible and the raster cost dominates).
-    fn wanted_render_scale(&self, ctx: &egui::Context) -> f32 {
+    fn wanted_render_scale(&self, ctx: &egui::Context, available: egui::Vec2) -> f32 {
         let ppp = ctx.pixels_per_point();
         let fit = match self.page_dims_pt() {
             Some((w_pt, h_pt)) => {
-                let available = egui::vec2(1200.0, 900.0); // conservative window estimate
                 let sx = available.x / w_pt as f32;
                 let sy = available.y / h_pt as f32;
                 match self.viewer.fit_mode {
-                    oxipresso_viewer::FitMode::Page => sx.min(sy).min(1.5),
+                    oxipresso_viewer::FitMode::Page => sx.min(sy),
                     oxipresso_viewer::FitMode::Width => sx.min(4.0),
                 }
             }
