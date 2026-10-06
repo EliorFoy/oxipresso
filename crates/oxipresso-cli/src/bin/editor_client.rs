@@ -8,14 +8,15 @@
 //!
 //! Threading (the freeze-proof design): the UI thread NEVER touches the
 //! child pipes. Three workers own the blocking ends:
-//! - the WIRE worker owns `EditorWireSession`: sends queued commands and
-//!   drains notices into `UiEvent::Log` (throttled; a CN first pass floods
-//!   thousands of lines);
+//! - the WIRE worker owns `EditorWireSession`: sends the init dance, then
+//!   COALESCES pending buffer texts into one whole-buffer change (typing
+//!   bursts cost one hot pass, never a queue of rebuilds), and drains
+//!   notices into `UiEvent::Log` (throttled);
 //! - the RENDER worker owns a dedicated glyph backend and ships
-//!   `UiEvent::Page` pixel buffers;
-//! - the Slint timer on the UI thread adopts finished events and hands the
-//!   wire worker new commands through an unbounded channel — a slow child
-//!   (a 24KB change while a pass runs) can never block the UI.
+//!   `UiEvent::Page` pixel buffers (keyed on len+mtime so equal-length
+//!   rebuilds still update);
+//! - the Slint timer on the UI thread adopts finished events — a slow child
+//!   can never block the UI.
 
 use oxipresso_cli::KpseFontResolver;
 use oxipresso_cli::editor_wire::{EditorWireSession, WireNotice, escape_wire_string};
@@ -23,7 +24,6 @@ use oxipresso_editor_protocol::{InfoBuffer, WireProtocol};
 use oxipresso_engine_api::{ArtifactKind, DocumentArtifact};
 use oxipresso_render::{RenderBackend, XdvGlyphRenderBackend};
 use slint::{ComponentHandle, SharedString};
-use std::sync::mpsc::TryRecvError;
 
 slint::slint! {
     import { Button, TextEdit } from "std-widgets.slint";
@@ -172,80 +172,83 @@ fn main() {
     ui.set_document_text(String::from_utf8_lossy(&initial).into_owned().into());
     ui.set_status("starting the engine...".into());
 
-    let (wire_cmd_tx, wire_cmd_rx) = std::sync::mpsc::channel::<String>();
+    // edit_text: the UI hands the CURRENT buffer text; the wire worker
+    // coalesces and pushes.
+    let (edit_text_tx, edit_text_rx) = std::sync::mpsc::channel::<String>();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
-    // Due-edit texts: the UI thread hands the current buffer to the wire
-    // worker, which performs the possibly-blocking whole-buffer send.
-    let (edit_due_tx, edit_due_rx) = std::sync::mpsc::channel::<String>();
 
-    // Stream-mode init dance: register → open (unsaved buffer) → resume.
+    // The WIRE worker: owns the session. Sends the init dance, then
+    // coalesces pending buffer texts into ONE whole-buffer change per
+    // cycle (typing bursts cost a single hot pass), and drains notices
+    // into the throttled log tail. A slow child blocks THIS thread only.
     {
-        use base64::Engine as _;
-        let initial_b64 = base64::engine::general_purpose::STANDARD.encode(&initial);
-        for line in [
-            format!("(register {})", escape_wire_string(&wire_name)),
-            format!(
-                "(open-base64 {} \"{initial_b64}\")",
-                escape_wire_string(&wire_name)
-            ),
-            "(resume)".to_string(),
-        ] {
-            let _ = wire_cmd_tx.send(line);
-        }
-    }
-
-    // The WIRE worker: owns the session. Sends queued commands in order
-    // (a 24KB change while a pass runs blocks THIS thread, never the UI),
-    // drains notices into the log tail, and forwards everything to the UI.
-    {
+        let wire_name = wire_name.clone();
+        let initial_len = initial.len();
         let ui_tx = ui_tx.clone();
         std::thread::spawn(move || {
             let mut session = session;
             let mut log = String::new();
             let mut last_log_send = std::time::Instant::now();
-            // The engine buffer starts as the opened document: the first
+            // The engine's buffer starts as the opened document: the first
             // edit replaces exactly those bytes.
-            let mut last_sent_len: Option<usize> = Some(initial.len());
+            let mut engine_len: usize = initial_len;
+            let mut pending_text: Option<String> = None;
             let mut out_buffer = String::new();
+
+            let send_line = |session: &mut EditorWireSession, line: &str| {
+                if let Err(error) = session.send_raw(line) {
+                    eprintln!("[client] {error}");
+                }
+                if let Ok(log_path) = std::env::var("OXI_CLIENT_LOG") {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(log_path)
+                    {
+                        use std::io::Write as _;
+                        let _ = writeln!(f, "SEND {line}");
+                    }
+                }
+            };
+
+            // Init dance: register → open (unsaved buffer) → resume.
+            {
+                use base64::Engine as _;
+                let initial_b64 = base64::engine::general_purpose::STANDARD.encode(&initial);
+                send_line(
+                    &mut session,
+                    &format!("(register {})", escape_wire_string(&wire_name)),
+                );
+                send_line(
+                    &mut session,
+                    &format!(
+                        "(open-base64 {} \"{initial_b64}\")",
+                        escape_wire_string(&wire_name)
+                    ),
+                );
+                send_line(&mut session, "(resume)");
+            }
+
             loop {
-                // 1. Send every queued command in order (changes are
-                //    cumulative; dropping one would desync the buffer).
-                loop {
-                    match wire_cmd_rx.try_recv() {
-                        Ok(line) => {
-                            if let Err(error) = session.send_raw(&line) {
-                                eprintln!("[client] {error}");
-                            }
-                            if let Ok(log_path) = std::env::var("OXI_CLIENT_LOG") {
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(log_path)
-                                {
-                                    use std::io::Write as _;
-                                    let _ = writeln!(f, "SEND {line}");
-                                }
-                            }
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => return,
-                    }
+                // 1. Coalesce pending buffer texts into ONE whole-buffer
+                //    change: the latest state supersedes everything typed
+                //    before it (a typing burst costs a single hot pass).
+                while let Ok(text) = edit_text_rx.try_recv() {
+                    pending_text = Some(text);
                 }
-                // 2. Apply due edit flushes: the UI thread hands over the
-                //    current buffer text; compute old_len here.
-                while let Ok(new_text) = edit_due_rx.try_recv() {
-                    let old_len = last_sent_len.unwrap_or(new_text.len());
-                    last_sent_len = Some(new_text.len());
-                    let line = format!(
-                        "(change {} 0 {old_len} {})",
-                        escape_wire_string(&wire_name),
-                        escape_wire_string(&new_text)
+                if let Some(text) = pending_text.take() {
+                    let old_len = engine_len;
+                    engine_len = text.len();
+                    send_line(
+                        &mut session,
+                        &format!(
+                            "(change {} 0 {old_len} {})",
+                            escape_wire_string(&wire_name),
+                            escape_wire_string(&text)
+                        ),
                     );
-                    if let Err(error) = session.send_raw(&line) {
-                        eprintln!("[client] {error}");
-                    }
                 }
-                // 3. Drain notices into the log tail.
+                // 2. Drain notices into the log tail.
                 loop {
                     let Some(parsed) = session.next_notice(std::time::Duration::ZERO) else {
                         break;
@@ -273,7 +276,7 @@ fn main() {
                     log.push_str(&parsed.raw);
                     log.push('\n');
                 }
-                // 4. Forward the log tail at most ~3x/second (the CN first
+                // 3. Forward the log tail at most ~3x/second (the CN first
                 //    pass floods thousands of notices).
                 if last_log_send.elapsed() >= std::time::Duration::from_millis(350) {
                     last_log_send = std::time::Instant::now();
@@ -289,7 +292,8 @@ fn main() {
         });
     }
 
-    // The RENDER worker: dedicated glyph backend, artifact watching, pixel
+    // The RENDER worker: dedicated glyph backend, artifact watching keyed on
+    // (len, mtime) — an equal-length rebuild still updates — and pixel
     // buffers to the UI.
     {
         let artifact_path = artifact_path.clone();
@@ -297,20 +301,28 @@ fn main() {
             let backend = XdvGlyphRenderBackend::new(Box::new(
                 KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy()),
             ));
-            let mut last_len: Option<usize> = None;
+            let mut fingerprint: Option<(usize, u64)> = None;
             loop {
-                let len = std::fs::metadata(&artifact_path)
-                    .ok()
-                    .map(|m| m.len() as usize);
-                if len.is_none() || len == last_len {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                let meta = std::fs::metadata(&artifact_path).ok();
+                let current = meta.as_ref().map(|m| {
+                    (
+                        m.len() as usize,
+                        m.modified()
+                            .ok()
+                            .and_then(|t| Some(t.duration_since(std::time::UNIX_EPOCH).ok()?))
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0),
+                    )
+                });
+                if current.is_none() || current == fingerprint {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
                     continue;
                 }
+                fingerprint = current;
                 let Ok(bytes) = std::fs::read(&artifact_path) else {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::thread::sleep(std::time::Duration::from_millis(150));
                     continue;
                 };
-                last_len = Some(bytes.len());
                 let artifact = DocumentArtifact {
                     kind: ArtifactKind::Xdv,
                     bytes,
@@ -378,14 +390,14 @@ fn main() {
         );
     }
 
-    // Editor edits: the due-buffer text goes straight to the wire worker
-    // (it performs the debounced, possibly-blocking whole-buffer send).
+    // Editor edits and Push: hand the CURRENT buffer text to the wire
+    // worker (it coalesces and performs the possibly-blocking send).
     {
         let ui_weak = ui.as_weak();
-        let edit_due_tx = edit_due_tx.clone();
+        let edit_text_tx = edit_text_tx.clone();
         ui.on_editor_edited(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let _ = edit_due_tx.send(ui.get_document_text().to_string());
+                let _ = edit_text_tx.send(ui.get_document_text().to_string());
             }
         });
     }
