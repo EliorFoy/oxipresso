@@ -113,6 +113,8 @@ fn main() {
             }
         }
     }
+    // The env fallback for the auto-edit (convenient for detached launches).
+    let auto_edit = auto_edit.or_else(|| std::env::var("OXI_CLIENT_AUTOEDIT").ok());
     // Double-click launch (no arguments): pick a document with the native
     // file dialog instead of exiting with a usage message that flashes
     // away in a console.
@@ -466,8 +468,13 @@ fn main() {
                     let current = ui.get_document_text().to_string();
                     // Insert a VISIBLE marker into the page-1 keywords line
                     // (the auto-edit must produce a visible page-1 change).
-                    let edited =
-                        current.replace("双树复小波变换", &format!("双树复小波变换 {}", auto_text));
+                    let edited = current.replace(
+                        "\\end{document}",
+                        &format!(
+                            "\\begin{{center}}\\bfseries {}\\end{{center}}\n\\end{{document}}",
+                            auto_text
+                        ),
+                    );
                     let _ = edit_text_tx.send(edited);
                     ui.set_status(SharedString::from("auto-edit pushed"));
                 }
