@@ -34,7 +34,14 @@ fn main() {
                              `freetype2` on Linux: {error}"
                         )
                     });
-                let _ = library;
+                // Same field accessors on Linux (cc + the pkg-config include
+                // paths) so both platforms link the real-header accessors.
+                let mut build = cc::Build::new();
+                build.file("c/ft_helpers.c");
+                for include in library.include_paths {
+                    build.include(include);
+                }
+                build.compile("oxipresso_ft_helpers");
             }
             other => panic!(
                 "the oxipresso-render `freetype` feature is not configured for target OS `{other}` yet"
