@@ -464,8 +464,10 @@ fn main() {
             move || {
                 if let Some(ui) = ui_weak.upgrade() {
                     let current = ui.get_document_text().to_string();
-                    let edited = format!("{current}{auto_text}");
-                    let _ = edit_text_tx.send(edited.clone());
+                    // Insert a VISIBLE marker into the page-1 keywords line
+                    // (the auto-edit must produce a visible page-1 change).
+                    let edited =
+                        current.replace("双树复小波变换", &format!("双树复小波变换 {}", auto_text));
                     let _ = edit_text_tx.send(edited);
                     ui.set_status(SharedString::from("auto-edit pushed"));
                 }

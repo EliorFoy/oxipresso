@@ -5,7 +5,7 @@ use oxipresso_render::xdv::parse_xdv;
 
 #[test]
 fn dump_demo_xdv_fonts_and_glyph_codes() {
-    let path = "F:/code/oxipresso/demo/demo.xdv";
+    let path = "F:/code/dist/oxipresso-windows-x64/paper_v14_cn.xdv";
     if !std::path::Path::new(path).is_file() {
         eprintln!("demo.xdv not found; skipping");
         return;
