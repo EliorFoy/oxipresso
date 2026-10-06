@@ -26,51 +26,205 @@ use oxipresso_render::{RenderBackend, XdvGlyphRenderBackend};
 use slint::{ComponentHandle, SharedString};
 
 slint::slint! {
-    import { Button, TextEdit } from "std-widgets.slint";
+    import { TextEdit } from "std-widgets.slint";
+
+    // 工具栏按钮：圆角、悬停变色、按下加深
+    component ToolButton inherits Rectangle {
+        in property <string> label;
+        in property <bool> enabled: true;
+        in property <length> min-w: 34px;
+        callback clicked();
+        height: 30px;
+        min-width: root.min-w;
+        border-radius: 6px;
+        ta := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+            clicked => { root.clicked(); }
+        }
+        background: ta.pressed ? #45475a : (ta.has-hover ? #3c3c54 : transparent);
+        animate background { duration: 110ms; }
+        Text {
+            text: root.label;
+            color: root.enabled ? #cdd6f4 : #585b70;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
 
     export component EditorClientWindow inherits Window {
-        title: "Oxipresso editor client";
-        preferred-width: 1400px;
-        preferred-height: 900px;
+        title: "Oxipresso — live TeX preview";
+        background: #1e1e2e;
+        preferred-width: 1440px;
+        preferred-height: 920px;
+
         in property <string> doc-path;
         in-out property <string> document-text <=> doc-edit.text;
         in-out property <image> page-image;
         in-out property <string> engine-log <=> log-edit.text;
         in-out property <string> status;
+        in property <int> page-index;
+        in property <int> page-count;
+        in-out property <float> zoom: 1.0;
+        in property <bool> editor-open: true;
+        in property <bool> log-open: false;
+        in property <float> page-ratio: 1.414;
         callback editor-edited();
+        callback prev-page();
+        callback next-page();
+        callback toggle-editor();
+        callback toggle-log();
+        callback zoom-in();
+        callback zoom-out();
+        callback push-now();
 
-        HorizontalLayout {
-            padding: 8px;
-            spacing: 8px;
-            VerticalLayout {
-                spacing: 6px;
-                horizontal-stretch: 2;
-                Text { text: "editor — " + doc-path + "  (edits push live)"; font-size: 11px; }
-                doc-edit := TextEdit {
-                    text: "";
-                    vertical-stretch: 1;
-                    font-size: 13px;
-                    edited => { editor-edited(); }
+        VerticalLayout {
+            // ── 工具栏 ────────────────────────────────────────────
+            Rectangle {
+                height: 46px;
+                background: #181825;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 8px;
+                    alignment: center;
+                    Text { text: "◆"; color: #89b4fa; font-size: 15px; vertical-alignment: center; }
+                    Text { text: "Oxipresso"; color: #cdd6f4; font-size: 14px; font-weight: 700; vertical-alignment: center; }
+                    Rectangle { width: 1px; height: 22px; background: #313244; }
+                    ToolButton {
+                        label: editor-open ? "◁ 源码" : "▷ 源码";
+                        clicked => { toggle-editor(); }
+                    }
+                    ToolButton { label: "◀"; min-w: 30px; clicked => { prev-page(); } }
+                    Rectangle {
+                        min-width: 74px;
+                        height: 30px;
+                        border-radius: 6px;
+                        background: #11111b;
+                        Text {
+                            text: (page-count > 0 ? page-index + 1 : 0) + " / " + page-count;
+                            color: #a6adc8;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    ToolButton { label: "▶"; min-w: 30px; clicked => { next-page(); } }
+                    Rectangle { width: 8px; }
+                    ToolButton { label: "－"; min-w: 30px; clicked => { zoom-out(); } }
+                    Rectangle {
+                        min-width: 56px;
+                        height: 30px;
+                        border-radius: 6px;
+                        background: #11111b;
+                        Text {
+                            text: round(zoom * 100) + "%";
+                            color: #a6adc8;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    ToolButton { label: "＋"; min-w: 30px; clicked => { zoom-in(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    ToolButton {
+                        label: log-open ? "▽ 日志" : "△ 日志";
+                        clicked => { toggle-log(); }
+                    }
+                    push-btn := ToolButton {
+                        label: "推送 ⇧";
+                        min-w: 72px;
+                        clicked => { push-now(); }
+                    }
                 }
-                Button { text: "Push now"; clicked => { editor-edited(); } }
             }
-            VerticalLayout {
-                spacing: 6px;
-                horizontal-stretch: 3;
-                Text { text: "rendered preview"; font-size: 11px; }
-                page-view := Image {
-                    source: page-image;
-                    image-fit: contain;
-                    vertical-stretch: 3;
+            Rectangle { height: 1px; background: #313244; }
+            // ── 主区域 ────────────────────────────────────────────
+            HorizontalLayout {
+                spacing: 0px;
+                // 编辑面板（宽度动画折叠）
+                Rectangle {
+                    width: editor-open ? 400px : 0px;
+                    animate width { duration: 220ms; easing: ease-out; }
+                    background: #181825;
+                    clip: true;
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 4px;
+                        Text { text: "TeX 源码 · 修改即推送"; color: #6c7086; font-size: 11px; }
+                        doc-edit := TextEdit {
+                            text: "";
+                            vertical-stretch: 1;
+                            font-size: 13px;
+                            edited => { editor-edited(); }
+                        }
+                    }
                 }
-                Text { text: "engine log (tail)"; font-size: 11px; }
-                log-edit := TextEdit {
-                    text: "";
-                    read-only: true;
-                    vertical-stretch: 1;
-                    font-size: 11px;
+                Rectangle { width: 1px; background: #313244; }
+                // 预览：Flickable 支持缩放平移
+                Rectangle {
+                    background: #11111b;
+                    horizontal-stretch: 1;
+                    clip: true;
+                    flick := Flickable {
+                        Rectangle {
+                            width: flick.width * zoom;
+                            height: flick.width * zoom * page-ratio;
+                            preview-holder := Rectangle {
+                                background: #ffffff;
+                                width: parent.width;
+                                height: parent.height;
+                                page-view := Image {
+                                    x: 0; y: 0;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    source: page-image;
+                                }
+                            }
+                        }
+                    }
+                    // 键盘翻页
+                    FocusScope {
+                        width: parent.width;
+                        height: parent.height;
+                        key-pressed(e) => {
+                            if e.text == Key.RightArrow { next-page(); return accept; }
+                            if e.text == Key.LeftArrow { prev-page(); return accept; }
+                            reject
+                        }
+                    }
                 }
-                Text { text: status; font-size: 11px; color: gray; }
+            }
+            // ── 日志面板（折叠） ──────────────────────────────────
+            Rectangle {
+                height: log-open ? 150px : 0px;
+                animate height { duration: 220ms; easing: ease-out; }
+                background: #181825;
+                clip: true;
+                VerticalLayout {
+                    padding: 6px;
+                    log-edit := TextEdit {
+                        text: "";
+                        read-only: true;
+                        font-size: 11px;
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: #313244; }
+            // ── 状态栏 ────────────────────────────────────────────
+            Rectangle {
+                height: 26px;
+                background: #181825;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 12px;
+                    alignment: center;
+                    Text { text: doc-path; color: #585b70; font-size: 11px; vertical-alignment: center; overflow: elide; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text { text: status; color: #a6e3a1; font-size: 11px; vertical-alignment: center; }
+                }
             }
         }
     }
@@ -78,8 +232,9 @@ slint::slint! {
 
 /// Plain-data events from the workers to the UI timer (all Send).
 enum UiEvent {
-    Page(SharedPixelBuffer, String),
+    Page(SharedPixelBuffer, usize, String),
     Log(String),
+    Pages(usize),
 }
 
 /// Sendable pixel buffer for the preview pane (slint::Image is not Send;
@@ -344,16 +499,23 @@ fn main() {
     }
 
     // The RENDER worker: dedicated glyph backend, artifact watching keyed on
-    // (len, mtime) — an equal-length rebuild still updates — and pixel
-    // buffers to the UI.
+    // (len, mtime) — an equal-length rebuild still updates — page-request
+    // handling for the toolbar navigation, and pixel buffers to the UI.
+    let (page_req_tx, page_req_rx) = std::sync::mpsc::channel::<usize>();
     {
         let artifact_path = artifact_path.clone();
+        let ui_tx = ui_tx.clone();
         std::thread::spawn(move || {
             let backend = XdvGlyphRenderBackend::new(Box::new(
                 KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy()),
             ));
             let mut fingerprint: Option<(usize, u64)> = None;
+            let mut artifact_bytes: Vec<u8> = Vec::new();
+            let mut artifact_version: u64 = 0;
+            let mut requested_page: usize = 0;
+            let mut rendered: Option<(u64, usize)> = None;
             loop {
+                // Artifact change detection (len + mtime).
                 let meta = std::fs::metadata(&artifact_path).ok();
                 let current = meta.as_ref().map(|m| {
                     (
@@ -365,43 +527,86 @@ fn main() {
                             .unwrap_or(0),
                     )
                 });
-                if current.is_none() || current == fingerprint {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    continue;
-                }
-                fingerprint = current;
-                let Ok(bytes) = std::fs::read(&artifact_path) else {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    continue;
-                };
-                let artifact = DocumentArtifact {
-                    kind: ArtifactKind::Xdv,
-                    bytes,
-                    source_name: Some(artifact_path.to_string_lossy().into_owned()),
-                };
-                match backend.render_page(&artifact, 0) {
-                    Ok(page) => {
-                        let buffer = SharedPixelBuffer {
-                            rgba: page.pixels_rgba,
-                            width: page.width,
-                            height: page.height,
-                        };
-                        let size = artifact.bytes.len();
-                        let _ =
-                            ui_tx.send(UiEvent::Page(buffer, format!("rendered {size} B of XDV")));
-                    }
-                    Err(error) => {
-                        let _ = ui_tx.send(UiEvent::Page(
-                            SharedPixelBuffer {
-                                rgba: Vec::new(),
-                                width: 0,
-                                height: 0,
-                            },
-                            format!("render error: {error}"),
-                        ));
+                if current.is_some() && current != fingerprint {
+                    fingerprint = current;
+                    if let Ok(bytes) = std::fs::read(&artifact_path) {
+                        artifact_bytes = bytes;
+                        artifact_version += 1;
+                        // Page count for the toolbar (parse is cheap: a few
+                        // hundred KB, done once per new artifact).
+                        if let Ok(doc) =
+                            oxipresso_render::xdv::parse_xdv(&artifact_bytes, &mut |_| None)
+                        {
+                            let _ = ui_tx.send(UiEvent::Pages(doc.pages.len()));
+                        }
+                        rendered = None; // force a re-render of the page
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(120));
+                // Page requests from the toolbar: keep the latest.
+                let mut req = None;
+                while let Ok(p) = page_req_rx.try_recv() {
+                    req = Some(p);
+                }
+                if let Some(p) = req {
+                    if p != requested_page {
+                        requested_page = p;
+                        rendered = None;
+                    }
+                }
+                // Render the requested page of the current artifact version.
+                if rendered != Some((artifact_version, requested_page))
+                    && !artifact_bytes.is_empty()
+                {
+                    let t_render = std::time::Instant::now();
+                    let artifact = DocumentArtifact {
+                        kind: ArtifactKind::Xdv,
+                        bytes: artifact_bytes.clone(),
+                        source_name: Some(artifact_path.to_string_lossy().into_owned()),
+                    };
+                    match backend.render_page(&artifact, requested_page) {
+                        Ok(page) => {
+                            let ratio = if page.width > 0 {
+                                page.height as f32 / page.width as f32
+                            } else {
+                                1.414
+                            };
+                            let buffer = SharedPixelBuffer {
+                                rgba: page.pixels_rgba,
+                                width: page.width,
+                                height: page.height,
+                            };
+                            let size = artifact.bytes.len();
+                            let ms = (std::time::Instant::now() - t_render).as_millis();
+                            let _ = ui_tx.send(UiEvent::Page(
+                                buffer,
+                                requested_page,
+                                format!(
+                                    "第 {} 页 · {size} B XDV · 渲染 {ms}ms",
+                                    requested_page + 1
+                                ),
+                            ));
+                        }
+                        Err(error) => {
+                            // Out-of-range page = the artifact shrank; clamp.
+                            if requested_page > 0 {
+                                requested_page = 0;
+                                rendered = None;
+                            } else {
+                                let _ = ui_tx.send(UiEvent::Page(
+                                    SharedPixelBuffer {
+                                        rgba: Vec::new(),
+                                        width: 0,
+                                        height: 0,
+                                    },
+                                    requested_page,
+                                    format!("渲染错误: {error}"),
+                                ));
+                            }
+                        }
+                    }
+                    rendered = Some((artifact_version, requested_page));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(80));
             }
         });
     }
@@ -415,17 +620,24 @@ fn main() {
             std::time::Duration::from_millis(120),
             move || {
                 let mut log_tail: Option<String> = None;
-                let mut page_event: Option<(SharedPixelBuffer, String)> = None;
+                let mut page_event: Option<(SharedPixelBuffer, usize, String)> = None;
+                let mut pages: Option<usize> = None;
                 while let Ok(event) = ui_rx.try_recv() {
                     match event {
                         UiEvent::Log(tail) => log_tail = Some(tail),
-                        UiEvent::Page(buffer, status) => page_event = Some((buffer, status)),
+                        UiEvent::Pages(count) => pages = Some(count),
+                        UiEvent::Page(buffer, page, status) => {
+                            page_event = Some((buffer, page, status))
+                        }
                     }
                 }
                 if let Some(tail) = log_tail {
                     ui_handle.set_engine_log(SharedString::from(tail.as_str()));
                 }
-                if let Some((buffer, status)) = page_event {
+                if let Some(count) = pages {
+                    ui_handle.set_page_count(count as i32);
+                }
+                if let Some((buffer, page, status)) = page_event {
                     if buffer.width > 0 {
                         let image =
                             slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
@@ -434,7 +646,13 @@ fn main() {
                                 buffer.height,
                             ));
                         ui_handle.set_page_image(image);
+                        ui_handle.set_page_ratio(if buffer.width > 0 {
+                            buffer.height as f32 / buffer.width as f32
+                        } else {
+                            1.414
+                        });
                     }
+                    ui_handle.set_page_index(page as i32);
                     ui_handle.set_status(SharedString::from(status));
                 }
             },
@@ -444,11 +662,63 @@ fn main() {
     // Editor edits and Push: hand the CURRENT buffer text to the wire
     // worker (it coalesces and performs the possibly-blocking send).
     {
+        let edit_text_tx_editor = edit_text_tx.clone();
         let ui_weak = ui.as_weak();
-        let edit_text_tx = edit_text_tx.clone();
         ui.on_editor_edited(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let _ = edit_text_tx.send(ui.get_document_text().to_string());
+                let _ = edit_text_tx_editor.send(ui.get_document_text().to_string());
+            }
+        });
+        let edit_text_tx_push = edit_text_tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_push_now(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let _ = edit_text_tx_push.send(ui.get_document_text().to_string());
+            }
+        });
+    }
+    // Page navigation + zoom + panel toggles.
+    {
+        let ui_weak_prev = ui.as_weak();
+        let page_req_prev = page_req_tx.clone();
+        ui.on_prev_page(move || {
+            if let Some(ui) = ui_weak_prev.upgrade() {
+                let p = (ui.get_page_index() - 1).max(0);
+                ui.set_page_index(p);
+                let _ = page_req_prev.send(p as usize);
+            }
+        });
+        let ui_weak_next = ui.as_weak();
+        let page_req_next = page_req_tx.clone();
+        ui.on_next_page(move || {
+            if let Some(ui) = ui_weak_next.upgrade() {
+                let p = (ui.get_page_index() + 1).min(ui.get_page_count().saturating_sub(1));
+                ui.set_page_index(p);
+                let _ = page_req_next.send(p as usize);
+            }
+        });
+        let ui_weak = ui.as_weak();
+        ui.on_toggle_editor(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_editor_open(!ui.get_editor_open());
+            }
+        });
+        let ui_weak = ui.as_weak();
+        ui.on_toggle_log(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_log_open(!ui.get_log_open());
+            }
+        });
+        let ui_weak = ui.as_weak();
+        ui.on_zoom_in(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_zoom((ui.get_zoom() * 1.25).min(4.0));
+            }
+        });
+        let ui_weak = ui.as_weak();
+        ui.on_zoom_out(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_zoom((ui.get_zoom() / 1.25).max(0.4));
             }
         });
     }

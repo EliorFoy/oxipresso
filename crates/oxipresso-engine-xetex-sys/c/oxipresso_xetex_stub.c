@@ -73,6 +73,7 @@ void oxipresso_xetex_request_fence_park(void) {}
 void oxipresso_xetex_arm_fence_replay(void) {}
 
 void oxipresso_xetex_enable_resident_passes(void) {}
+void oxipresso_xetex_disable_resident_passes(void) {}
 
 uint64_t oxipresso_xetex_fence_park_kind(void) { return 0; }
 
