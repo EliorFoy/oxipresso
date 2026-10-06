@@ -356,6 +356,10 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
             }
             SET_RULE | PUT_RULE => {
                 flush_glyphs!();
+                // The DVI spec (engine: dvi_four(rule_ht); dvi_four(rule_wd)) puts
+                // the HEIGHT first, then the WIDTH — swapped reads turned every
+                // horizontal rule (title bars, radical vinculi) into a thin
+                // vertical line.
                 let w = reader.i32()?;
                 let h = reader.i32()?;
                 if w > 0
