@@ -939,11 +939,22 @@ int64_t oxipresso_xetex_snapshot_capture(void *dst, uint64_t dst_len) {
 
 /* One-shot capture of the live pools into a static buffer, run from the
  * read bridge at the fence (active_session is non-NULL here). */
+/* Document-level mark state lives OUTSIDE the five pools: sa_root is the
+ * sparse-array root mutated by pass 1's \mark insertions, and cur_mark is
+ * the running-head mark pair. Neither is ever touched by the fmt-load
+ * undump stream, so the passive scalar recording never sees them - and an
+ * unrestored sa_root walks pass-1 tree nodes into S0-overwritten memory
+ * (do_marks -> delete_token_ref SEGV). Saved/restored explicitly. */
+static int32_t g_sa_root_saved[8];
+static int32_t g_cur_mark_saved[5];
+
 static void oxi_fence_capture(void) {
   /* Fresh capture per arm: the previous checkpoint buffer is superseded. */
   free(g_fence_buf);
   g_fence_buf = NULL;
   g_fence_len = 0;
+  memcpy(g_sa_root_saved, sa_root, sizeof(g_sa_root_saved));
+  memcpy(g_cur_mark_saved, cur_mark, sizeof(g_cur_mark_saved));
   uint64_t sizes[5];
   const void *bases[5];
   uint64_t need = oxi_snap_sizes(sizes, bases);
@@ -966,6 +977,8 @@ static void oxi_fence_capture(void) {
  * captured prefix plus the header cursors reproduces the exact captured
  * state - unreachable later bytes simply stay dead. */
 static int oxi_fence_restore(int allow_grow) {
+  memcpy(sa_root, g_sa_root_saved, sizeof(g_sa_root_saved));
+  memcpy(cur_mark, g_cur_mark_saved, sizeof(g_cur_mark_saved));
   uint64_t sizes[5];
   const void *bases[5];
   uint64_t need = oxi_snap_sizes(sizes, bases);
