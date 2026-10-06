@@ -160,7 +160,7 @@ pub struct XdvFont {
     pub native: bool,
     /// Font file name carried by the XDV stream (without directory).
     pub name: String,
-    /// Scaled size in points (16.16 Fixed for native fonts, 20.12 for classic).
+    /// Scaled size in points (16.16 fixed-point for BOTH native and classic fonts).
     pub size_pt: f64,
     pub design_size_pt: f64,
     pub face_index: u32,
@@ -482,7 +482,10 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                     EngineError::new("XDV SET_TEXT_AND_GLYPHS before font selection")
                 })?;
                 let text_len = reader.u16()? as usize;
-                reader.skip(text_len * 2)?;
+                // The text section is `text_len` BYTES (UTF-8), not UTF-16
+                // code units — over-skipping misaligns the glyph array so
+                // every math glyph reads as code 0 (blank equations).
+                reader.skip(text_len)?;
                 let glyphs = read_glyph_array(&mut reader, state.h, state.v, pt_per_unit)?;
                 if let Some(target) = page.as_mut() {
                     target.elements.push(XdvElement::Glyphs {
@@ -509,6 +512,7 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                 let code = opcode as u32;
                 push_classic_glyph(
                     &mut pending_glyphs,
+                    page.as_mut(),
                     font_id,
                     current_color,
                     code,
@@ -523,6 +527,7 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                 let code = reader.sized_u32(opcode - SET1 + 1)?;
                 push_classic_glyph(
                     &mut pending_glyphs,
+                    page.as_mut(),
                     font_id,
                     current_color,
                     code,
@@ -537,6 +542,7 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
                 let code = reader.sized_u32(opcode - PUT1 + 1)?;
                 push_classic_glyph(
                     &mut pending_glyphs,
+                    page.as_mut(),
                     font_id,
                     current_color,
                     code,
@@ -593,6 +599,7 @@ fn read_glyph_array(
 
 fn push_classic_glyph(
     pending: &mut Option<(u32, Option<u32>, Vec<XdvGlyph>)>,
+    page: Option<&mut XdvPage>,
     font_id: u32,
     color: Option<u32>,
     code: u32,
@@ -600,6 +607,19 @@ fn push_classic_glyph(
     pt_per_unit: f64,
 ) {
     if !matches!(pending, Some((pending_font, _, _)) if *pending_font == font_id) {
+        // Font changed: the accumulated run must reach the page BEFORE the
+        // new run starts. A math line switches fonts per symbol — dropping
+        // the run here silently lost most equation glyphs.
+        if let Some((run_font, run_color, glyphs)) = pending.take()
+            && !glyphs.is_empty()
+            && let Some(target) = page
+        {
+            target.elements.push(XdvElement::Glyphs {
+                font_id: run_font,
+                color_rgba: run_color,
+                glyphs,
+            });
+        }
         *pending = Some((font_id, color, Vec::new()));
     }
     if let Some((_, glyphs_color, glyphs)) = pending.as_mut() {
@@ -704,8 +724,12 @@ fn parse_classic_font_def(reader: &mut Reader<'_>, id_size: u8) -> Result<XdvFon
         id,
         native: false,
         name,
-        size_pt: size as f64 / (1 << 20) as f64,
-        design_size_pt: design_size as f64 / (1 << 20) as f64,
+        // Classic fnt_def sizes are 16.16 fixed-point points — the SAME
+        // format as native fonts (a 12pt font stores 786432); dividing
+        // by 2^20 understated every classic font size 16x, rendering
+        // all math glyphs as sub-pixel specks.
+        size_pt: size as f64 / (1 << 16) as f64,
+        design_size_pt: design_size as f64 / (1 << 16) as f64,
         face_index: 0,
         color_rgba: None,
         extend: 1.0,

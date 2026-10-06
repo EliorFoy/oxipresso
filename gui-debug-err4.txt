@@ -1,0 +1,4 @@
+[gui] initializing (resident=1)
+[gui] initialize done
+[gui] entering eframe
+[dump-texture] wrote F:\code\oxipresso\demo\gui-texture.bmp scale=1

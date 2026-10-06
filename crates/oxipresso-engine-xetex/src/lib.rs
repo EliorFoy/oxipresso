@@ -503,7 +503,24 @@ impl XetexEngine {
     }
 
     fn format_path_text() -> String {
-        env::var("OXIPRESSO_XETEX_FORMAT").unwrap_or_else(|_| "texpresso.fmt".to_string())
+        // Resolution order: explicit env → CWD → the executable's directory
+        // (self-contained dist: the .fmt ships next to oxipresso.exe, and a
+        // double-clicked exe may have any working directory).
+        if let Some(path) = env::var_os("OXIPRESSO_XETEX_FORMAT") {
+            return path.to_string_lossy().into_owned();
+        }
+        if std::path::Path::new("texpresso.fmt").is_file() {
+            return "texpresso.fmt".to_string();
+        }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            let bundled = dir.join("texpresso.fmt");
+            if bundled.is_file() {
+                return bundled.to_string_lossy().into_owned();
+            }
+        }
+        "texpresso.fmt".to_string()
     }
 
     fn format_source_name() -> String {
@@ -528,6 +545,13 @@ impl XetexEngine {
                 .join("x64-windows-static-md")
                 .join("etc")
                 .join("fonts");
+            candidate.is_dir().then_some(candidate)
+        });
+        let candidate = candidate.or_else(|| {
+            // Self-contained dist: the etc/fonts tree ships next to the
+            // executable for double-click launches with no build env.
+            let exe = std::env::current_exe().ok()?;
+            let candidate = exe.parent()?.join("etc").join("fonts");
             candidate.is_dir().then_some(candidate)
         });
         if let Some(path) = candidate {

@@ -1,0 +1,10 @@
+[gui] initializing (resident=1)
+[oxi] istack probe: regs=4796 cur@00007FF60FFE8B60 loc=1 limit=1 st=33 in_open@00007FF60FFE8B5C val=0 stack@000000D07D047440 lo=000000D07C77E6A0 hi=000000D07CF8E6A0
+[oxi] S0 capture: regs=4790 bytes=147211585
+[gui-flow] waiting for the pass snapshot...
+Fontconfig error: Cannot load default config file: No such file: (null)
+[oxi] resident_park entry #1 reads=257145
+[gui-flow] snapshot received
+[gui] initialize done
+[gui] entering eframe
+[dump-page] wrote F:\code\oxipresso\demo\gui-canvas.png

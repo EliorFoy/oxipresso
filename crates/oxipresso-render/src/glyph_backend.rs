@@ -45,6 +45,34 @@ pub struct DecodedImage {
     pub pixels: Vec<u8>,
 }
 
+/// Parses an Adobe Font Metrics file's `StartCharMetrics` table into a
+/// charcode -> glyph-name map: lines like
+/// `C 25 ; WX 500 ; N pi ; B 20 -13 489 621 ;`.
+pub fn parse_afm_charmetrics(bytes: &[u8]) -> Option<HashMap<u32, String>> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut map = HashMap::new();
+    let mut in_metrics = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("StartCharMetrics") {
+            in_metrics = true;
+            continue;
+        }
+        if line.starts_with("EndCharMetrics") {
+            break;
+        }
+        if !in_metrics || !line.starts_with("C ") {
+            continue;
+        }
+        let code: u32 = line[2..].split(';').next()?.trim().parse().ok()?;
+        let name = line.split("; N ").nth(1)?.split(';').next()?.trim();
+        if !name.is_empty() {
+            map.insert(code, name.to_string());
+        }
+    }
+    (!map.is_empty()).then_some(map)
+}
+
 pub struct XdvGlyphRenderBackend {
     /// Page rasterization scale in pixels per point (96 dpi = 4/3).
     pub px_per_pt: f64,
@@ -53,6 +81,9 @@ pub struct XdvGlyphRenderBackend {
     library: RefCell<Option<ft::FT_Library>>,
     faces: RefCell<HashMap<(String, u32), ft::FT_Face>>,
     font_files: RefCell<HashMap<String, Option<Rc<Vec<u8>>>>>,
+    /// Classic Type1 fonts: charcode -> glyph-name table parsed from the
+    /// font's AFM (the encoding vector), keyed by font name.
+    afm_tables: RefCell<HashMap<String, Option<Rc<HashMap<u32, String>>>>>,
     glyph_cache: RefCell<HashMap<(String, u32, u32, u32, u64), Option<Rc<GrayBitmap>>>>,
     /// Decoded images keyed by (path, content hash) so an in-place image edit
     /// (same path, different bytes) re-decodes rather than serving a stale one.
@@ -123,6 +154,7 @@ impl XdvGlyphRenderBackend {
             library: RefCell::new(None),
             faces: RefCell::new(HashMap::new()),
             font_files: RefCell::new(HashMap::new()),
+            afm_tables: RefCell::new(HashMap::new()),
             glyph_cache: RefCell::new(HashMap::new()),
             image_cache: RefCell::new(HashMap::new()),
             parsed: RefCell::new(None),
@@ -194,6 +226,24 @@ impl XdvGlyphRenderBackend {
         self.resolver.borrow_mut().find_font_file(name, &["tfm"])
     }
 
+    /// The classic font's charcode -> glyph-name table from its AFM file
+    /// (the font's encoding vector), resolved once per font name.
+    fn afm_table(&self, name: &str) -> Option<Rc<HashMap<u32, String>>> {
+        if let Some(cached) = self.afm_tables.borrow().get(name) {
+            return cached.clone();
+        }
+        let table = self
+            .resolver
+            .borrow_mut()
+            .find_font_file(name, &["afm"])
+            .and_then(|bytes| parse_afm_charmetrics(&bytes))
+            .map(Rc::new);
+        self.afm_tables
+            .borrow_mut()
+            .insert(name.to_string(), table.clone());
+        table
+    }
+
     fn face_for(&self, font: &xdv::XdvFont) -> Result<Option<ft::FT_Face>> {
         let Some(bytes) = self.font_bytes(&font.name, font.native) else {
             return Ok(None);
@@ -262,13 +312,29 @@ impl XdvGlyphRenderBackend {
             }
             // Native XDV fonts: `code` is a GLYPH ID (harfbuzz shaping output)
             // and must be loaded by index. Classic TFM/Type1 fonts: `code` is
-            // a CHAR CODE — map it through the font's CMap, falling back to
-            // the raw code for Type1 fonts whose encoding is the identity.
+            // a CHAR CODE in the font's TeX encoding — the Type1 face only
+            // exposes a synthesized UNICODE charmap (math codes have none), so
+            // map charcode -> glyph NAME via the font's AFM, then name -> gid
+            // through FT_Get_Name_Index.
             let glyph_index = if font.native {
                 code
             } else {
-                let mapped = ft::FT_Get_Char_Index(face, code);
-                if mapped == 0 { code } else { mapped }
+                let afm = self.afm_table(&font.name);
+                let via_afm = afm
+                    .as_ref()
+                    .and_then(|table| table.get(&code))
+                    .and_then(|name| {
+                        let cname = std::ffi::CString::new(name.as_str()).ok()?;
+                        let gid = ft::FT_Get_Name_Index(face, cname.as_ptr());
+                        (gid != 0).then_some(gid)
+                    });
+                match via_afm {
+                    Some(gid) => gid,
+                    None => {
+                        let mapped = ft::FT_Get_Char_Index(face, code);
+                        if mapped == 0 { code } else { mapped }
+                    }
+                }
             };
             if ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT) != 0 {
                 return None;
@@ -1229,11 +1295,11 @@ mod tests {
     /// Image loader whose current bytes can be swapped between renders
     /// (shared via `Rc<RefCell<..>>`) to simulate an in-place file edit.
     struct SwapImages {
-        current: Rc<RefCell<Vec<u8>>>,
+        current: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     }
     impl ImageLoader for SwapImages {
         fn find_image_file(&mut self, _path: &str) -> Option<Vec<u8>> {
-            Some(self.current.borrow().clone())
+            Some(self.current.lock().unwrap().clone())
         }
     }
 
@@ -1243,11 +1309,11 @@ mod tests {
         // image file's bytes change between renders. The renderer must NOT
         // serve the stale cached page — image content is folded into the
         // page-cache key. Guards the documented image-edit-invalidation fix.
-        let shared = Rc::new(RefCell::new(solid_png(2, 2, [255, 0, 0, 255])));
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(solid_png(2, 2, [255, 0, 0, 255])));
         let backend = XdvGlyphRenderBackend::with_image_loader(
             Box::new(NullFonts),
             Box::new(SwapImages {
-                current: Rc::clone(&shared),
+                current: std::sync::Arc::clone(&shared),
             }),
         );
         let artifact = DocumentArtifact {
@@ -1267,7 +1333,7 @@ mod tests {
         assert_eq!(rgb_at(&first, 120, 120), [255, 0, 0], "first render: red");
 
         // Replace the image bytes in place (same path); the XDV is unchanged.
-        *shared.borrow_mut() = solid_png(2, 2, [0, 0, 255, 255]);
+        *shared.lock().unwrap() = solid_png(2, 2, [0, 0, 255, 255]);
         let second = backend.render_page(&artifact, 0).unwrap();
         assert_eq!(
             rgb_at(&second, 120, 120),

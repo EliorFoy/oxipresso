@@ -57,6 +57,8 @@ pub struct RenderedGrayBitmap {
     pub pixels: Vec<u8>,
 }
 
+pub const FT_ENCODING_ADOBE_CUSTOM: u32 = 0x41_44_43_55; // 'ADCU'
+
 unsafe extern "C" {
     pub fn FT_Init_FreeType(library: *mut FT_Library) -> c_int;
     pub fn FT_Done_FreeType(library: FT_Library) -> c_int;
@@ -70,6 +72,7 @@ unsafe extern "C" {
     pub fn FT_Done_Face(face: FT_Face) -> c_int;
     pub fn FT_Set_Pixel_Sizes(face: FT_Face, width: c_uint, height: c_uint) -> c_int;
     pub fn FT_Get_Char_Index(face: FT_Face, charcode: c_uint) -> c_uint;
+    pub fn FT_Get_Name_Index(face: FT_Face, glyph_name: *const i8) -> u32;
     pub fn FT_Load_Glyph(face: FT_Face, glyph_index: c_uint, load_flags: c_int) -> c_int;
     pub fn FT_Set_Transform(face: FT_Face, matrix: *const FT_Matrix, delta: *const c_void)
     -> c_int;

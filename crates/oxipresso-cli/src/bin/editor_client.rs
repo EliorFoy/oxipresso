@@ -22,7 +22,6 @@ use oxipresso_editor_protocol::{InfoBuffer, WireProtocol};
 use oxipresso_engine_api::{ArtifactKind, DocumentArtifact};
 use oxipresso_render::{RenderBackend, XdvGlyphRenderBackend};
 use slint::{ComponentHandle, SharedString};
-use std::sync::mpsc::TryRecvError;
 
 slint::slint! {
     import { Button, TextEdit } from "std-widgets.slint";

@@ -26,7 +26,18 @@ fn dump_demo_xdv_fonts_and_glyph_codes() {
         std::fs::read(&line).ok()
     };
     let doc = parse_xdv(&bytes, &mut tfm_lookup).expect("parse");
-    println!("== fonts ==");
+    println!("== fonts == ({} entries)", doc.fonts.len());
+    // opcode histogram over the raw stream for the font-def family
+    let mut hist = std::collections::BTreeMap::new();
+    for b in bytes.iter() {
+        if (243..=254).contains(b) {
+            *hist.entry(*b).or_insert(0usize) += 1;
+        }
+    }
+    println!("== opcode histogram (243..=254) ==");
+    for (op, n) in &hist {
+        println!("  op {op}: {n}x");
+    }
     for (id, font) in &doc.fonts {
         println!(
             "  id={id} native={} name={} size={:.2}pt",

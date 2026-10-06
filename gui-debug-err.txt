@@ -1,0 +1,33 @@
+[gui] initializing (resident=1)
+[oxi] istack probe: regs=4809 cur@00007FF69EAAFB60 loc=1 limit=1 st=33 in_open@00007FF69EAAFB5C val=0 stack@0000008000933590 lo=00000080005AE780 hi=0000008000DBE780
+[oxi] S0 capture: regs=4803 bytes=147053458
+[gui-flow] waiting for the pass snapshot...
+Fontconfig error: Cannot load default config file: No such file: (null)
+[oxi] resident_park entry #1 reads=257145
+[gui-flow] snapshot received
+[gui] initialize done
+[gui] entering eframe
+[classic-debug] first rasterize of cmr12 code 101 size_px 16
+[classic-debug] cmr12 code 101 afm=166
+[classic-debug] first rasterize of cmr8 code 105 size_px 11
+[classic-debug] cmr8 code 105 afm=166
+[classic-debug] first rasterize of cmmi8 code 25 size_px 11
+[classic-debug] cmmi8 code 25 afm=164
+[classic-debug] cmr12 code 43 afm=166
+[classic-debug] cmr12 code 49 afm=166
+[classic-debug] cmr12 code 61 afm=166
+[classic-debug] cmr12 code 48 afm=166
+[classic-debug] first rasterize of cmex10 code 90 size_px 16
+[classic-debug] cmex10 code 90 afm=176
+[classic-debug] first rasterize of cmsy8 code 49 size_px 11
+[classic-debug] cmsy8 code 49 afm=164
+[classic-debug] cmsy8 code 0 afm=164
+[classic-debug] cmmi8 code 120 afm=164
+[classic-debug] first rasterize of cmr6 code 50 size_px 8
+[classic-debug] cmr6 code 50 afm=166
+[classic-debug] cmr12 code 100 afm=166
+[classic-debug] first rasterize of cmmi12 code 120 size_px 16
+[classic-debug] cmmi12 code 120 afm=164
+[classic-debug] first rasterize of cmsy10 code 112 size_px 16
+[classic-debug] cmsy10 code 112 afm=164
+[classic-debug] cmmi12 code 25 afm=164

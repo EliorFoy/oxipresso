@@ -10,7 +10,9 @@ pub mod glyph_backend;
 pub mod xdv;
 
 #[cfg(feature = "freetype")]
-pub use glyph_backend::{DecodedImage, FontResolver, ImageLoader, XdvGlyphRenderBackend};
+pub use glyph_backend::{
+    DecodedImage, FontResolver, ImageLoader, XdvGlyphRenderBackend, parse_afm_charmetrics,
+};
 
 #[cfg(feature = "pdfium")]
 use pdfium_render::prelude::*;
@@ -132,6 +134,23 @@ impl RenderBackend for AutoRenderBackend {
             return Ok(rendered);
         }
         self.metadata.render_page(artifact, page)
+    }
+
+    fn render_page_scaled(
+        &self,
+        artifact: &DocumentArtifact,
+        page: usize,
+        extra_scale: f32,
+    ) -> Result<RenderedPage> {
+        #[cfg(not(feature = "freetype"))]
+        let _ = extra_scale;
+        #[cfg(feature = "freetype")]
+        if matches!(artifact.kind, ArtifactKind::Xdv | ArtifactKind::Dvi)
+            && let Some(backend) = self.xdv_glyphs.as_ref()
+        {
+            return backend.render_page_scaled(artifact, page, extra_scale);
+        }
+        self.render_page(artifact, page)
     }
 }
 
