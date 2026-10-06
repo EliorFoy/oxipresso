@@ -8,14 +8,31 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use oxipresso_editor_protocol::{EditorMessage, serialize_message};
+#[cfg(feature = "freetype")]
+use oxipresso_render::XdvGlyphRenderBackend;
 use oxipresso_render::{AutoRenderBackend, RenderBackend};
 use oxipresso_viewer::ViewerState;
 
-use crate::{CliOptions, OxipressoApp, root_document};
+use crate::{CliOptions, OxipressoApp, disk_roots_for, root_document};
+#[cfg(feature = "freetype")]
+use crate::{DocumentImageLoader, KpseFontResolver};
 
 /// Runs the live preview window; blocks until the window closes.
 pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
     let root = root_document(&options)?;
+    let renderer = {
+        // Real XDV rendering in the preview: glyphs + rules + images through
+        // the glyph backend (placeholder page without the freetype feature).
+        let renderer = AutoRenderBackend::default();
+        #[cfg(feature = "freetype")]
+        let renderer = renderer.with_xdv_glyph_backend(XdvGlyphRenderBackend::with_image_loader(
+            Box::new(KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy())),
+            Box::new(DocumentImageLoader {
+                roots: disk_roots_for(&root),
+            }),
+        ));
+        renderer
+    };
     let mut app = OxipressoApp::new(options, root);
     // Initialize the engine before the window appears so editor-facing
     // messages (lookup/input/stream) reach stdout in order.
@@ -44,17 +61,21 @@ pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
 
     eprintln!("[gui] entering eframe");
     let options = eframe::NativeOptions::default();
-    let host = LivePreview {
+    let mut host = LivePreview {
         app,
         editor_rx,
         pending,
         viewer: ViewerState::default(),
-        renderer: AutoRenderBackend::default(),
+        renderer,
         texture: None,
         texture_key: None,
         rendered_size: None,
         status: String::new(),
     };
+    // The initial pass's artifact must reach the viewer BEFORE the first
+    // frame: poll_editor_wire only refreshes after an editor command, so
+    // without this the window shows "No document yet" forever.
+    host.refresh_from_engine();
     eframe::run_native(
         "Oxipresso Live Preview",
         options,
