@@ -8,6 +8,7 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use oxipresso_editor_protocol::{EditorMessage, serialize_message};
+use oxipresso_platform::{FileWatchEvent, FileWatcher};
 #[cfg(feature = "freetype")]
 use oxipresso_render::XdvGlyphRenderBackend;
 use oxipresso_render::{AutoRenderBackend, RenderBackend};
@@ -20,6 +21,7 @@ use crate::{DocumentImageLoader, KpseFontResolver};
 /// Runs the live preview window; blocks until the window closes.
 pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
     let root = root_document(&options)?;
+    let doc_path = root.root_dir.join(&root.root_name);
     let renderer = {
         // Real XDV rendering in the preview: glyphs + rules + images through
         // the glyph backend (placeholder page without the freetype feature).
@@ -71,7 +73,9 @@ pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
         texture_key: None,
         rendered_size: None,
         rendered_scale: 1.0,
+        centered_zoom: 1.0,
         status: String::new(),
+        doc_watcher: oxipresso_platform::file_watcher(doc_path),
     };
     // The initial pass's artifact must reach the viewer BEFORE the first
     // frame: poll_editor_wire only refreshes after an editor command, so
@@ -95,7 +99,12 @@ struct LivePreview {
     texture_key: Option<u64>,
     rendered_size: Option<egui::Vec2>,
     rendered_scale: f32,
+    /// The zoom level the scroll view was last centered for.
+    centered_zoom: f32,
     status: String,
+    /// Watches the root document on disk: an external editor save triggers
+    /// an automatic rebuild (the standalone-preview core loop).
+    doc_watcher: Box<dyn FileWatcher>,
 }
 
 impl LivePreview {
@@ -119,6 +128,33 @@ impl LivePreview {
         }
         if handled {
             self.refresh_from_engine();
+        }
+    }
+
+    /// Polls the document watcher: an external save of the root file
+    /// triggers a rebuild — a resident hot pass when a session is live,
+    /// a full restart otherwise. This is the standalone-preview core loop.
+    fn poll_document_watcher(&mut self) {
+        let watcher = self.doc_watcher.as_mut();
+        match watcher.poll() {
+            FileWatchEvent::Changed { .. } => {
+                watcher.mark_clean(None);
+                if self.app.paused {
+                    return;
+                }
+                match self.app.handle_editor_line("(rescan)") {
+                    Ok(messages) => {
+                        self.emit(&messages);
+                        self.refresh_from_engine();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+            FileWatchEvent::Missing { .. } => {
+                // The document is momentarily absent (atomic-save rename);
+                // the next poll after the save completes will see it again.
+            }
+            FileWatchEvent::Unchanged => {}
         }
     }
 
@@ -175,37 +211,50 @@ impl LivePreview {
             oxipresso_viewer::FitMode::Width => (available.x / rendered_size.x).min(4.0),
         };
         let display_size = rendered_size * fit_scale * self.viewer.zoom;
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    let response = ui.add(
-                        egui::Image::new((texture.id(), display_size)).sense(egui::Sense::click()),
-                    );
-                    if response.clicked()
-                        && let Some(pointer) = response.interact_pointer_pos()
-                        && let Some((width_pt, height_pt)) = self.page_dims_pt()
+        // Zoom keeps the page CENTERED in view (TeXpresso behavior): without
+        // this the scroll offset stays at the top-left corner, which after a
+        // zoom-in shows the blank page margin — the zoom appears to "do
+        // nothing". Re-center on every zoom change.
+        let zoom_changed = self.centered_zoom != self.viewer.zoom;
+        let mut scroll_area = egui::ScrollArea::both().auto_shrink([false, false]);
+        if zoom_changed {
+            let oversize = display_size - available;
+            if oversize.x > 0.0 {
+                scroll_area = scroll_area.horizontal_scroll_offset(oversize.x / 2.0);
+            }
+            if oversize.y > 0.0 {
+                scroll_area = scroll_area.vertical_scroll_offset(oversize.y / 2.0);
+            }
+            self.centered_zoom = self.viewer.zoom;
+        }
+        scroll_area.show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                let response = ui.add(
+                    egui::Image::new((texture.id(), display_size)).sense(egui::Sense::click()),
+                );
+                if response.clicked()
+                    && let Some(pointer) = response.interact_pointer_pos()
+                    && let Some((width_pt, height_pt)) = self.page_dims_pt()
+                {
+                    let relative = (pointer - response.rect.min) / response.rect.size();
+                    let x_pt = relative.x.clamp(0.0, 1.0) as f64 * width_pt;
+                    let y_pt = relative.y.clamp(0.0, 1.0) as f64 * height_pt;
+                    // Click-to-source: emit the reverse SyncTeX
+                    // notification over the editor wire.
+                    if let Some(message) =
+                        self.app
+                            .synctex_reverse_message(self.viewer.page + 1, x_pt, y_pt)
                     {
-                        let relative = (pointer - response.rect.min) / response.rect.size();
-                        let x_pt = relative.x.clamp(0.0, 1.0) as f64 * width_pt;
-                        let y_pt = relative.y.clamp(0.0, 1.0) as f64 * height_pt;
-                        // Click-to-source: emit the reverse SyncTeX
-                        // notification over the editor wire.
-                        if let Some(message) =
-                            self.app
-                                .synctex_reverse_message(self.viewer.page + 1, x_pt, y_pt)
-                        {
-                            if let EditorMessage::Synctex { path, line, .. } = &message {
-                                self.status = format!("syncTeX: {path}:{line}");
-                            }
-                            self.emit(&[message]);
-                        } else {
-                            self.status =
-                                format!("No syncTeX hit on page {}", self.viewer.page + 1);
+                        if let EditorMessage::Synctex { path, line, .. } = &message {
+                            self.status = format!("syncTeX: {path}:{line}");
                         }
+                        self.emit(&[message]);
+                    } else {
+                        self.status = format!("No syncTeX hit on page {}", self.viewer.page + 1);
                     }
-                });
+                }
             });
+        });
     }
 
     /// Page size in points for the current page, parsed from the XDV stream.
@@ -296,6 +345,7 @@ fn page_texture_key(artifact: &oxipresso_engine_api::DocumentArtifact, page: usi
 impl eframe::App for LivePreview {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_editor_wire();
+        self.poll_document_watcher();
         // Keep the GUI responsive to the editor wire even when idle.
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }

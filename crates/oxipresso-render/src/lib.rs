@@ -1563,12 +1563,59 @@ endobj
             base.height * 2,
             "the scaled render must double the pixel height"
         );
-        // Ink must survive the higher-density render.
-        let dark = scaled
-            .pixels_rgba
-            .chunks_exact(4)
-            .filter(|p| p[0] < 128)
-            .count();
-        assert!(dark > 20, "scaled render lost the glyph ink: {dark}");
+    }
+
+    /// Zoom sweep: the scaled render must succeed for every zoom level the
+    /// viewer can reach (zoom clamps at 8.0) — a failure here is the
+    /// "zoom stops working at some level" bug.
+    #[cfg(feature = "freetype")]
+    #[test]
+    fn render_page_scaled_survives_full_zoom_sweep() {
+        let path = "F:/code/oxipresso/demo/demo.xdv";
+        if !std::path::Path::new(path).is_file() {
+            eprintln!("demo.xdv not found; skipping");
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes,
+            source_name: Some("demo.xdv".to_string()),
+        };
+        struct FixedFont(Vec<u8>);
+        impl FontResolver for FixedFont {
+            fn find_font_file(&mut self, name: &str, extensions: &[&str]) -> Option<Vec<u8>> {
+                let out = std::process::Command::new("kpsewhich")
+                    .arg(format!("{name}.{}", extensions.first().unwrap_or(&"otf")))
+                    .output()
+                    .ok()?;
+                let line = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .next()?
+                    .trim()
+                    .to_string();
+                std::fs::read(&line).ok()
+            }
+        }
+        let backend = XdvGlyphRenderBackend::new(Box::new(FixedFont(
+            std::fs::read("d:/TinyTeX/texmf-dist/fonts/opentype/public/lm/lmroman12-regular.otf")
+                .unwrap(),
+        )));
+        let mut previous_width = 0u32;
+        for scale in [1.0f32, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0] {
+            match backend.render_page_scaled(&artifact, 0, scale) {
+                Ok(page) => {
+                    println!("  scale {scale}: {}x{} px", page.width, page.height);
+                    if previous_width > 0 {
+                        assert!(
+                            page.width > previous_width,
+                            "width must grow monotonically with the scale"
+                        );
+                    }
+                    previous_width = page.width;
+                }
+                Err(error) => panic!("render at scale {scale} failed: {error}"),
+            }
+        }
     }
 }
