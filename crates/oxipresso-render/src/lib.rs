@@ -35,6 +35,19 @@ pub struct RenderedPage {
 pub trait RenderBackend {
     fn page_count(&self, artifact: &DocumentArtifact) -> Result<usize>;
     fn render_page(&self, artifact: &DocumentArtifact, page: usize) -> Result<RenderedPage>;
+    /// Re-render the page at `extra_scale` × the backend's native pixel
+    /// density, so zoomed display stays crisp instead of upscaling a 96dpi
+    /// bitmap. Backends that cannot re-render at another density return the
+    /// unscaled result (the default).
+    fn render_page_scaled(
+        &self,
+        artifact: &DocumentArtifact,
+        page: usize,
+        extra_scale: f32,
+    ) -> Result<RenderedPage> {
+        let _ = extra_scale;
+        self.render_page(artifact, page)
+    }
 }
 
 pub struct AutoRenderBackend {
@@ -1369,8 +1382,32 @@ endobj
         }
 
         // Build a synthetic XDV selecting a native font named `times` and
-        // setting glyph 'A' (FreeType maps it via the font's cmap).
+        // setting the glyph for 'A'. NATIVE XDV fonts carry GLYPH IDs (not
+        // char codes), so resolve 'A' through FreeType's charmap for the
+        // exact font file the fake resolver will return.
         use crate::xdv::parse_xdv;
+        let font_bytes = std::fs::read(FONT_PATH).unwrap();
+        let mut library: ft::FT_Library = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(ft::FT_Init_FreeType(&mut library), 0);
+        }
+        let mut face: ft::FT_Face = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                ft::FT_New_Memory_Face(
+                    library,
+                    font_bytes.as_ptr(),
+                    font_bytes.len() as std::os::raw::c_long,
+                    0,
+                    &mut face,
+                ),
+                0,
+                "failed to open the system font"
+            );
+        }
+        let gid_a = unsafe { ft::FT_Get_Char_Index(face, 'A' as u32) };
+        assert!(gid_a != 0, "times.ttf must map 'A' through its charmap");
+
         let mut stream: Vec<u8> = Vec::new();
         stream.extend_from_slice(&[247u8, 7]);
         stream.extend_from_slice(&25_400_000u32.to_be_bytes());
@@ -1394,7 +1431,7 @@ endobj
         stream.extend_from_slice(&1u16.to_be_bytes());
         stream.extend_from_slice(&0i32.to_be_bytes());
         stream.extend_from_slice(&0i32.to_be_bytes());
-        stream.extend_from_slice(&65u16.to_be_bytes()); // glyph 'A'
+        stream.extend_from_slice(&(gid_a as u16).to_be_bytes()); // glyph 'A' by ID
         stream.extend_from_slice(&[140u8]); // EOP
 
         let document = parse_xdv(&stream, &mut |_| None).unwrap();
@@ -1438,5 +1475,100 @@ endobj
             dark_pixels > 20,
             "rendered glyph should produce visible dark pixels, got {dark_pixels}"
         );
+    }
+
+    /// The zoom feature re-renders at a higher pixel density: the scaled
+    /// render must produce a bitmap with doubled dimensions (a genuine
+    /// higher-density render, not an upscaled copy).
+    #[cfg(feature = "freetype")]
+    #[test]
+    fn freetype_render_page_scaled_doubles_resolution() {
+        // Uses a font shipped with Windows so no TeX distribution is needed.
+        const FONT: &str = "times";
+        const FONT_PATH: &str = r"C:\Windows\Fonts\times.ttf";
+        if !std::path::Path::new(FONT_PATH).is_file() {
+            return;
+        }
+        let font_bytes = std::fs::read(FONT_PATH).unwrap();
+        let mut library: ft::FT_Library = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(ft::FT_Init_FreeType(&mut library), 0);
+        }
+        let mut face: ft::FT_Face = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                ft::FT_New_Memory_Face(
+                    library,
+                    font_bytes.as_ptr(),
+                    font_bytes.len() as std::os::raw::c_long,
+                    0,
+                    &mut face,
+                ),
+                0,
+                "failed to open the system font"
+            );
+        }
+        let gid_a = unsafe { ft::FT_Get_Char_Index(face, 'A' as u32) };
+        assert!(gid_a != 0, "times.ttf must map 'A' through its charmap");
+
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(&[247u8, 7]);
+        stream.extend_from_slice(&25_400_000u32.to_be_bytes());
+        stream.extend_from_slice(&473_628_672u32.to_be_bytes());
+        stream.extend_from_slice(&1000u32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&[139u8]); // BOP
+        stream.extend_from_slice(&[0u8; 40]);
+        stream.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        stream.extend_from_slice(&[252u8]); // DEFINE_NATIVE_FONT
+        stream.extend_from_slice(&40u32.to_be_bytes());
+        stream.extend_from_slice(&(12u32 << 16).to_be_bytes());
+        stream.extend_from_slice(&0u16.to_be_bytes());
+        stream.push("times".len() as u8);
+        stream.extend_from_slice(FONT.as_bytes());
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        stream.extend_from_slice(&[236u8]); // FNT2: select font 40
+        stream.extend_from_slice(&40u16.to_be_bytes());
+        stream.extend_from_slice(&[253u8]); // SET_GLYPHS
+        stream.extend_from_slice(&100i32.to_be_bytes());
+        stream.extend_from_slice(&1u16.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&0i32.to_be_bytes());
+        stream.extend_from_slice(&(gid_a as u16).to_be_bytes());
+        stream.extend_from_slice(&[140u8]); // EOP
+
+        let artifact = DocumentArtifact {
+            kind: ArtifactKind::Xdv,
+            bytes: stream,
+            source_name: Some("scaled.xdv".to_string()),
+        };
+        struct FixedFont(Vec<u8>);
+        impl FontResolver for FixedFont {
+            fn find_font_file(&mut self, _name: &str, _extensions: &[&str]) -> Option<Vec<u8>> {
+                Some(self.0.clone())
+            }
+        }
+        let backend = XdvGlyphRenderBackend::new(Box::new(FixedFont(font_bytes)));
+        let base = backend.render_page(&artifact, 0).unwrap();
+        let scaled = backend
+            .render_page_scaled(&artifact, 0, 2.0)
+            .expect("scaled render");
+        assert_eq!(
+            scaled.width,
+            base.width * 2,
+            "the scaled render must double the pixel width"
+        );
+        assert_eq!(
+            scaled.height,
+            base.height * 2,
+            "the scaled render must double the pixel height"
+        );
+        // Ink must survive the higher-density render.
+        let dark = scaled
+            .pixels_rgba
+            .chunks_exact(4)
+            .filter(|p| p[0] < 128)
+            .count();
+        assert!(dark > 20, "scaled render lost the glyph ink: {dark}");
     }
 }

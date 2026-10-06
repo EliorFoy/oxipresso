@@ -70,6 +70,7 @@ pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
         texture: None,
         texture_key: None,
         rendered_size: None,
+        rendered_scale: 1.0,
         status: String::new(),
     };
     // The initial pass's artifact must reach the viewer BEFORE the first
@@ -93,6 +94,7 @@ struct LivePreview {
     texture: Option<egui::TextureHandle>,
     texture_key: Option<u64>,
     rendered_size: Option<egui::Vec2>,
+    rendered_scale: f32,
     status: String,
 }
 
@@ -219,27 +221,66 @@ impl LivePreview {
         Some((page.width_pt, page.height_pt))
     }
 
+    /// Re-renders the current page when the displayed resolution demands
+    /// more pixels than the cached texture has (zoom / window resize), so
+    /// text stays crisp instead of upscaling a 96dpi bitmap.
     fn ensure_texture(&mut self, ctx: &egui::Context) {
         let Some(artifact) = self.viewer.last_artifact.clone() else {
             return;
         };
-        let key = page_texture_key(&artifact, self.viewer.page);
+        let wanted = self.wanted_render_scale(ctx);
+        let scale_changed =
+            (wanted - self.rendered_scale).abs() / self.rendered_scale.max(0.01) > 0.15;
+        if scale_changed {
+            // Force a re-render at the new density (the key changes too).
+            self.texture_key = None;
+        }
+        let key = page_texture_key(&artifact, self.viewer.page)
+            ^ (wanted as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         if self.texture_key == Some(key) {
             return;
         }
-        match self.renderer.render_page(&artifact, self.viewer.page) {
+        match self
+            .renderer
+            .render_page_scaled(&artifact, self.viewer.page, wanted)
+        {
             Ok(page) => {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [page.width as usize, page.height as usize],
                     &page.pixels_rgba,
                 );
                 let handle = ctx.load_texture("page", image, egui::TextureOptions::LINEAR);
-                self.rendered_size = Some(egui::vec2(page.width as f32, page.height as f32));
+                // Logical page size in points: the texture holds
+                // pt × (96/72) × wanted pixels.
+                let logical =
+                    egui::vec2(page.width as f32, page.height as f32) / (4.0 / 3.0 * wanted);
+                self.rendered_size = Some(logical);
+                self.rendered_scale = wanted;
                 self.texture = Some(handle);
                 self.texture_key = Some(key);
             }
             Err(error) => self.status = error.to_string(),
         }
+    }
+
+    /// The pixel density the current zoom/fit actually needs, clamped to a
+    /// re-render budget (≤4× the 96dpi base ≈ 384dpi, beyond which the blur
+    /// is imperceptible and the raster cost dominates).
+    fn wanted_render_scale(&self, ctx: &egui::Context) -> f32 {
+        let ppp = ctx.pixels_per_point();
+        let fit = match self.page_dims_pt() {
+            Some((w_pt, h_pt)) => {
+                let available = egui::vec2(1200.0, 900.0); // conservative window estimate
+                let sx = available.x / w_pt as f32;
+                let sy = available.y / h_pt as f32;
+                match self.viewer.fit_mode {
+                    oxipresso_viewer::FitMode::Page => sx.min(sy).min(1.5),
+                    oxipresso_viewer::FitMode::Width => sx.min(4.0),
+                }
+            }
+            None => 1.0,
+        };
+        (fit * self.viewer.zoom * ppp).clamp(1.0, 4.0)
     }
 }
 

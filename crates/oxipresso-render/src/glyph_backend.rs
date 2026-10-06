@@ -640,6 +640,26 @@ impl RenderBackend for XdvGlyphRenderBackend {
     }
 
     fn render_page(&self, artifact: &DocumentArtifact, page: usize) -> Result<RenderedPage> {
+        self.render_page_inner(artifact, page, 1.0)
+    }
+
+    fn render_page_scaled(
+        &self,
+        artifact: &DocumentArtifact,
+        page: usize,
+        extra_scale: f32,
+    ) -> Result<RenderedPage> {
+        self.render_page_inner(artifact, page, extra_scale)
+    }
+}
+
+impl XdvGlyphRenderBackend {
+    fn render_page_inner(
+        &self,
+        artifact: &DocumentArtifact,
+        page: usize,
+        extra_scale: f32,
+    ) -> Result<RenderedPage> {
         if !matches!(artifact.kind, ArtifactKind::Xdv | ArtifactKind::Dvi) {
             return Err(EngineError::new(
                 "XdvGlyphRenderBackend only accepts XDV/DVI artifacts",
@@ -661,11 +681,12 @@ impl RenderBackend for XdvGlyphRenderBackend {
         let image_salt = images
             .values()
             .fold(0u64, |acc, (hash, _)| acc ^ hash.rotate_left(17));
-        let cache_key = if image_salt == 0 {
-            page_digest
-        } else {
-            page_digest ^ image_salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        };
+        // Different zoom scales must not share a cache entry: fold the scale
+        // bits into the key alongside the image salt.
+        let scale_salt = (extra_scale as f64).to_bits();
+        let cache_key = page_digest
+            ^ image_salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ scale_salt.wrapping_mul(0xA24B_A5D3_1C0E_4D5F);
         if let Some(cached) = self.page_cache.borrow().get(&cache_key) {
             let mut cached = cached.clone();
             cached.index = page;
@@ -673,7 +694,7 @@ impl RenderBackend for XdvGlyphRenderBackend {
         }
         #[cfg(test)]
         self.render_misses.set(self.render_misses.get() + 1);
-        let scale = self.px_per_pt;
+        let scale = self.px_per_pt * f64::from(extra_scale);
         let width = (page_data.width_pt * scale).round().max(1.0) as u32;
         let height = (page_data.height_pt * scale).round().max(1.0) as u32;
         // A corrupt/hand-edited .xdv (the viewer and `--features freetype` builds
