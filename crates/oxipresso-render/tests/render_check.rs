@@ -1,3 +1,5 @@
+// Needs the freetype glyph backend.
+#![cfg(feature = "freetype")]
 //! Headless page render to a PNG + per-band ink report, for visual checks
 //! (math glyphs, radicals, rules) without launching the GUI.
 
