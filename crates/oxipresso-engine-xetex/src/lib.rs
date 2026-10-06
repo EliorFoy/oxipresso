@@ -198,6 +198,13 @@ impl ResidentSession {
         &self.snapshot_rx
     }
 
+    /// Re-arm the fence so the (re)played run parks again at its next
+    /// non-format read — the controller calls this after every submit to
+    /// chain pass-boundary parks (one arm = one park).
+    pub fn replay_again(&self) {
+        self.control.replay_again();
+    }
+
     /// Parks so far: 1 = the S0 capture park, +1 per completed pass.
     pub fn parks(&self) -> usize {
         self.control.park_count()
@@ -620,6 +627,7 @@ impl XetexEngine {
             read_files: std::collections::HashSet::new(),
             resident_snapshots: self.resident_snapshots.clone(),
             resident_park_index: 0,
+            resident_boundary_sent: false,
         };
         let callbacks = OxiXetexCallbacks {
             userdata: (&mut callback_state as *mut CallbackState<'_>).cast::<c_void>(),
@@ -655,6 +663,32 @@ impl XetexEngine {
         self.output_synctex = Self::select_synctex_artifact(&state.output_bytes);
         self.output_events = std::mem::take(&mut state.output_events);
         self.read_files = std::mem::take(&mut state.read_files);
+        // A document whose class reads nothing after shipout never crosses a
+        // post-shipout read fence: the pass-boundary park never fires and
+        // pass 1's snapshot is never sent — the controller would see a
+        // disconnected channel. Flush one final snapshot here when the last
+        // boundary park didn't already send this pass's output.
+        if Self::real_mode()
+            && let Some(sender) = &state.resident_snapshots
+            && !state.resident_boundary_sent
+            && state.resident_park_index >= 1
+        {
+            let io_events = state.io.drain_events();
+            let has_output = !self.output_events.is_empty()
+                || !self.diagnostics.is_empty()
+                || !io_events.is_empty()
+                || state.output_bytes.values().any(|bytes| !bytes.is_empty());
+            if has_output {
+                let _ = sender.send(ResidentSnapshot {
+                    output_events: self.output_events.clone(),
+                    output_bytes: state.output_bytes.clone(),
+                    diagnostics: self.diagnostics.clone(),
+                    io_events,
+                    read_files: self.read_files.iter().cloned().collect(),
+                });
+                state.resident_boundary_sent = true;
+            }
+        }
         Ok(result)
     }
 
@@ -750,6 +784,7 @@ struct CallbackState<'a> {
     /// I/O events (they belong to pass 1's snapshot, keeping the event set
     /// identical to the non-resident flow's init drain).
     resident_park_index: usize,
+    resident_boundary_sent: bool,
 }
 
 /// Mirror state captured at a checkpoint fence so a replay can roll the
@@ -1024,6 +1059,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     // replay re-appends exactly these streams after the rollback below.
     let lens = state.capture_fence_lens();
     let kind = unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_fence_park_kind() };
+
     // Per-pass outcome snapshot (P0.3): at a resident pass-boundary park the
     // mirrors hold exactly the completed pass's output (every earlier pass
     // was rolled back to the empty S0 lens). Send it before the park wait,
@@ -1062,20 +1098,22 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     control
         .parked
         .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Park INDEFINITELY for the controller's message — TeXpresso's fence
+    // semantics: the editor drives the parked engine, and a parked engine
+    // with no pending edit is the normal idle state between passes. (A
+    // deadline here consumed the fence mid-typing and left the run without
+    // a boundary park, so the pass snapshot was never sent.)
     let mut pending = control
         .msg
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while pending.is_none() {
-        let (guard, wait) = control
+        let (guard, _) = control
             .condvar
             .wait_timeout(pending, std::time::Duration::from_millis(200))
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         pending = guard;
-        if wait.timed_out() && std::time::Instant::now() >= deadline {
-            break;
-        }
     }
     control
         .parked
@@ -1282,6 +1320,15 @@ impl TypesettingEngine for XetexEngine {
 
 #[cfg(test)]
 mod tests {
+    /// The fence state (FENCE_CONTROL + the shim's globals) is process-global:
+    /// the real-engine park tests must not overlap, or a parallel run parks
+    /// another test's engine. Every park-driving test holds this lock.
+    fn fence_lock() -> std::sync::MutexGuard<'static, ()> {
+        static FENCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        FENCE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
     use super::*;
     use oxipresso_vfs::VirtualFileSystem;
     use std::{env, fs, path::PathBuf};
@@ -1751,6 +1798,7 @@ mod tests {
             || env::var_os("TEXPRESSO_SRC").is_none()
             || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
         {
+            let _fence_guard = fence_lock();
             return;
         }
         let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
@@ -1858,6 +1906,7 @@ mod tests {
             || env::var_os("TEXPRESSO_SRC").is_none()
             || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
         {
+            let _fence_guard = fence_lock();
             return;
         }
         let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
@@ -1975,6 +2024,7 @@ mod tests {
             || env::var_os("TEXPRESSO_SRC").is_none()
             || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
         {
+            let _fence_guard = fence_lock();
             return;
         }
         let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
@@ -2078,6 +2128,7 @@ mod tests {
             || env::var_os("TEXPRESSO_SRC").is_none()
             || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
         {
+            let _fence_guard = fence_lock();
             return;
         }
         let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
@@ -2226,6 +2277,7 @@ mod tests {
             || env::var_os("TEXPRESSO_SRC").is_none()
             || env::var_os("OXIPRESSO_XETEX_FORMAT").is_none()
         {
+            let _fence_guard = fence_lock();
             return;
         }
         let Some(fixture) = oxipresso_testkit::original_texpresso_fixture("simple.tex") else {
@@ -2355,6 +2407,7 @@ mod tests {
             read_files: std::collections::HashSet::new(),
             resident_snapshots: None,
             resident_park_index: 0,
+            resident_boundary_sent: false,
         };
         state
             .output_bytes

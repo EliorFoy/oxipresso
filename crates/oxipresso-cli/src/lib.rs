@@ -681,10 +681,25 @@ impl OxipressoApp {
                 .expect("resident_rebuild needs a live session");
             let parks = session.parks();
             session.submit(path, bytes);
+            // Re-arm the fence so the (re)played run parks at its next
+            // non-format read — without this the pass-boundary park never
+            // fires, the pass snapshot is never sent, and every later edit
+            // stalls.
+            session.replay_again();
             session.wait_parks(parks + 1);
         }
-        let snap = self.wait_resident_snapshot()?;
-        self.messages_from_snapshot(snap)
+        Ok(match self.wait_resident_snapshot() {
+            Ok(snap) => self.messages_from_snapshot(snap)?,
+            Err(error) => {
+                // The session ended (the engine run completed without a
+                // boundary park, or the worker died). Drop it and fall back
+                // to one full restart for this edit — the preview still
+                // updates, just without hot-pass latency.
+                eprintln!("[resident] session ended ({error}); falling back to a full restart");
+                self.resident = None;
+                self.initialize_engine()?
+            }
+        })
     }
 
     pub fn handle_editor_line(&mut self, line: &str) -> Result<Vec<EditorMessage>, String> {
