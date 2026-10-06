@@ -580,27 +580,34 @@ impl<'a> SexpParser<'a> {
     }
     fn parse_string(&mut self) -> Result<String> {
         self.expect_byte(b'"')?;
-        let mut out = String::new();
+        // Byte-collecting: the raw non-ASCII bytes (UTF-8 multibyte) must
+        // pass through untouched — pushing each byte `as char` would
+        // mojibake every CJK document into Latin-1 soup (36662-byte
+        // "changes" for a 23452-byte file).
+        let mut out: Vec<u8> = Vec::new();
         loop {
             let Some(b) = self.next() else {
                 return Err(ProtocolError::new("unterminated string"));
             };
             match b {
-                b'"' => return Ok(out),
+                b'"' => {
+                    return String::from_utf8(out)
+                        .map_err(|_| ProtocolError::new("string is not valid UTF-8"));
+                }
                 b'\\' => {
                     let Some(escaped) = self.next() else {
                         return Err(ProtocolError::new("unterminated escape"));
                     };
-                    out.push(match escaped {
-                        b'n' => '\n',
-                        b'r' => '\r',
-                        b't' => '\t',
-                        b'\\' => '\\',
-                        b'"' => '"',
-                        other => other as char,
-                    });
+                    match escaped {
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b't' => out.push(b'\t'),
+                        b'\\' => out.push(b'\\'),
+                        b'"' => out.push(b'"'),
+                        other => out.push(other),
+                    }
                 }
-                other => out.push(other as char),
+                other => out.push(other),
             }
         }
     }

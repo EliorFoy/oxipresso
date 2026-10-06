@@ -673,6 +673,7 @@ impl OxipressoApp {
         let bytes = self
             .root_bytes_from_vfs(path)?
             .ok_or_else(|| format!("changed file {path} is not in the editor set"))?;
+        eprintln!("[hotpass] submit {} bytes={}", path, bytes.len());
         {
             let session = self
                 .resident
