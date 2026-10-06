@@ -679,6 +679,7 @@ impl OxipressoApp {
         let bytes = self
             .root_bytes_from_vfs(path)?
             .ok_or_else(|| format!("changed file {path} is not in the editor set"))?;
+        let hot_t0 = std::time::Instant::now();
         eprintln!("[hotpass] submit {} bytes={}", path, bytes.len());
         {
             let session = self
@@ -693,6 +694,10 @@ impl OxipressoApp {
             // stalls.
             session.replay_again();
             session.wait_parks(parks + 1);
+            eprintln!(
+                "[hotpass] replay+park done in {}ms",
+                (std::time::Instant::now() - hot_t0).as_millis()
+            );
         }
         Ok(match self.wait_resident_snapshot() {
             Ok(snap) => self.messages_from_snapshot(snap)?,
