@@ -103,6 +103,16 @@ struct ClientCore {
 
 impl ClientCore {
     fn send_raw(&self, line: String) {
+        if let Ok(log) = std::env::var("OXI_CLIENT_LOG") {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+            {
+                use std::io::Write as _;
+                let _ = writeln!(f, "SEND {line}");
+            }
+        }
         let mut guard = self.session.lock().unwrap_or_else(|p| p.into_inner());
         if let Err(error) = guard.send_raw(&line) {
             eprintln!("[client] {error}");
@@ -282,6 +292,25 @@ fn main() {
     {
         let core = std::sync::Arc::clone(&window);
         ui.on_editor_edited(move || core.mark_edit_due());
+    }
+    // OXI_CLIENT_AUTOEDIT=<text>: after the initial pass, programmatically
+    // edit the buffer (the same path a real keystroke takes) — the live-edit
+    // regression test without OS input injection.
+    if let Ok(auto_text) = std::env::var("OXI_CLIENT_AUTOEDIT") {
+        let core = std::sync::Arc::clone(&window);
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(2500),
+            move || {
+                let current = core.ui.get_document_text().to_string();
+                let edited = format!("{current}{auto_text}");
+                core.ui.set_document_text(SharedString::from(edited));
+                core.mark_edit_due();
+                core.set_status("auto-edit applied");
+            },
+        );
+        std::mem::forget(timer);
     }
 
     // Render events channel + the render thread with a DEDICATED backend.
