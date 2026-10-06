@@ -16,7 +16,7 @@ required-features = ["gui"]
 [[bin]]
 name = "oxipresso-editor-client"
 path = "src/bin/editor_client.rs"
-required-features = ["slint"]
+required-features = ["slint", "freetype"]
 
 [features]
 default = []
@@ -24,10 +24,11 @@ gui = ["oxipresso-viewer/gui", "dep:eframe"]
 pdfium = ["oxipresso-render/pdfium", "oxipresso-viewer/pdfium"]
 pdfium-bundled = ["pdfium", "oxipresso-render/pdfium-bundled", "oxipresso-viewer/pdfium-bundled"]
 freetype = ["oxipresso-render/freetype"]
-slint = ["dep:slint"]
+slint = ["dep:slint", "dep:rfd"]
 
 [dependencies]
 base64 = "0.22"
+rfd = { version = "0.15", optional = true }
 eframe = { version = "0.34.3", optional = true, default-features = false, features = ["default_fonts", "wgpu"] }
 slint = { version = "1.17", optional = true }
 oxipresso-editor-protocol = { path = "../oxipresso-editor-protocol" }
