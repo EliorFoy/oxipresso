@@ -698,9 +698,15 @@ impl XetexEngine {
         // pass 1's snapshot is never sent — the controller would see a
         // disconnected channel. Flush one final snapshot here when the last
         // boundary park didn't already send this pass's output.
+        eprintln!(
+            "[flush] real={} sender={} parks={} boundary_sent={}",
+            Self::real_mode(),
+            state.resident_snapshots.is_some(),
+            state.resident_park_index,
+            state.resident_boundary_sent
+        );
         if Self::real_mode()
             && let Some(sender) = &state.resident_snapshots
-            && !state.resident_boundary_sent
             && state.resident_park_index >= 1
         {
             let io_events = state.io.drain_events();

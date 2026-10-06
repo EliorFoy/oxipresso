@@ -589,6 +589,12 @@ impl OxipressoApp {
         snap: oxipresso_engine_xetex::ResidentSnapshot,
     ) -> Result<Vec<EditorMessage>, String> {
         let artifact = snap.document_artifact(&self.root.root_name);
+        eprintln!(
+            "[snap] artifact={} size={} out_keys={:?}",
+            artifact.is_some(),
+            artifact.as_ref().map(|a| a.bytes.len()).unwrap_or(0),
+            snap.output_bytes.keys().collect::<Vec<_>>()
+        );
         let synctex = snap.synctex_artifact();
         if let Some(artifact) = &artifact {
             self.persist_bytes_if_requested("OXIPRESSO_ARTIFACT_OUT", &artifact.bytes)?;
