@@ -42,12 +42,13 @@ impl oxipresso_render::FontResolver for CliResolver {
 
 #[test]
 fn render_demo_page_to_png() {
-    let path = "F:/code/oxipresso/demo/demo.xdv";
-    if !std::path::Path::new(path).is_file() {
+    let path = std::env::var("OXI_RENDER_XDV")
+        .unwrap_or_else(|_| "F:/code/oxipresso/demo/demo.xdv".to_string());
+    if !std::path::Path::new(&path).is_file() {
         eprintln!("demo.xdv not found; skipping");
         return;
     }
-    let bytes = std::fs::read(path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     let artifact = DocumentArtifact {
         kind: ArtifactKind::Xdv,
         bytes,

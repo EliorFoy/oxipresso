@@ -1,3 +1,5 @@
+// Needs the freetype glyph backend.
+#![cfg(feature = "freetype")]
 //! Linux headless render check: the real engine's XDV -> PNG + ink bands.
 //! Self-skips unless $HOME/demo-linux.xdv exists (produced by
 //! `oxipresso -test-initialize demo.tex` on a Linux host with the real

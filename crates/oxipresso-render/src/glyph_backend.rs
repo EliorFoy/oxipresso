@@ -365,18 +365,17 @@ impl XdvGlyphRenderBackend {
                     }
                 }
             };
-            // SimSun.ttc carries embedded bitmap strikes at fixed pixel
-            // sizes; at a size without a strike FT_Load_Glyph(FT_LOAD_DEFAULT)
-            // fails for every CJK glyph (the whole body text vanished at
-            // some zoom densities). Retry without bitmap strikes — the
-            // outline renders at any size.
-            let mut status = ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT);
+            // PREFER OUTLINES: scalable faces (SimSun & friends carry both
+            // outlines and 1bpp MONO strikes) render crisper from hinted
+            // outlines at ANY density, and skip the per-glyph MONO
+            // expansion. The DEFAULT retry covers bitmap-only fonts.
+            let mut status = ft::FT_Load_Glyph(
+                face,
+                glyph_index,
+                ft::FT_LOAD_DEFAULT | ft::FT_LOAD_NO_BITMAP,
+            );
             if status != 0 {
-                status = ft::FT_Load_Glyph(
-                    face,
-                    glyph_index,
-                    ft::FT_LOAD_DEFAULT | ft::FT_LOAD_NO_BITMAP,
-                );
+                status = ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT);
             }
             if status != 0 {
                 return None;
