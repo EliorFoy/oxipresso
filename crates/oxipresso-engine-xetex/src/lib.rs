@@ -119,6 +119,16 @@ impl FenceControl {
         unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_arm_fence_replay() };
     }
 
+    /// Tear the resident fence down after the session died: clear the
+    /// global control and reset the shim's resident mode, so a fallback
+    /// full restart runs fence-less instead of parking forever at the
+    /// S0 capture. The dead session's worker thread has already exited.
+    pub fn disarm(&self) {
+        unsafe {
+            oxipresso_engine_xetex_sys::oxipresso_xetex_disable_resident_passes();
+        }
+    }
+
     /// Command the resident pass loop to finish: the engine runs its normal
     /// cleanup (final_cleanup + close_files) and the initialize call returns
     /// with the last completed pass's artifact.
@@ -193,6 +203,15 @@ impl ResidentSession {
         self.control.submit_edit(path, bytes);
     }
 
+    /// Tear the resident fence down after the session died (see
+    /// FenceControl::disarm): the global control is cleared too, so a
+    /// fallback full restart runs fence-less.
+    pub fn disarm(&self) {
+        self.control.disarm();
+        *FENCE_CONTROL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
     /// Completed-pass snapshots, in pass order.
     pub fn snapshots(&self) -> &std::sync::mpsc::Receiver<ResidentSnapshot> {
         &self.snapshot_rx
@@ -414,6 +433,17 @@ impl XetexEngine {
     /// typesetting pass without reloading the format. `finish()` lets the
     /// engine run its normal cleanup and `initialize` return with the last
     /// pass's artifact. Real mode only.
+    /// Static teardown for a dead session's global fence (see
+    /// FenceControl::disarm). Safe to call anytime.
+    pub fn disarm_global_fence() {
+        *FENCE_CONTROL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        unsafe {
+            oxipresso_engine_xetex_sys::oxipresso_xetex_disable_resident_passes();
+        }
+    }
+
     pub fn arm_resident_passes() -> Option<std::sync::Arc<FenceControl>> {
         if !Self::real_mode() {
             return None;

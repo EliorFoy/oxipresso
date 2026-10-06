@@ -1150,6 +1150,14 @@ static int oxi_scalars_restore(void) {
 
 void oxipresso_xetex_enable_resident_passes(void) { g_resident_enabled = 1; }
 
+/* Tear the resident mode down after its session died: no more fences, and
+ * any pending arm is dropped so a fallback full restart runs fence-less. */
+void oxipresso_xetex_disable_resident_passes(void) {
+  g_resident_enabled = 0;
+  g_fence_request = 0;
+  g_fence_park_mode = 0;
+}
+
 uint64_t oxipresso_xetex_fence_park_kind(void) {
   return (uint64_t)g_fence_park_kind;
 }

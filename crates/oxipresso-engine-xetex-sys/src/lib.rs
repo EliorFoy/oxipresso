@@ -96,6 +96,7 @@ unsafe extern "C" {
     /// Enable resident passes: the patched host re-runs start_input +
     /// main_control from an S0 checkpoint while the controller commands it.
     pub fn oxipresso_xetex_enable_resident_passes();
+    pub fn oxipresso_xetex_disable_resident_passes();
     /// 0 = mid-run fence park, 1 = resident pass-boundary park (read inside
     /// the fence callback to pick the right mirror-rollback target).
     pub fn oxipresso_xetex_fence_park_kind() -> u64;

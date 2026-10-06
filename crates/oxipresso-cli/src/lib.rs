@@ -697,6 +697,10 @@ impl OxipressoApp {
                 // updates, just without hot-pass latency.
                 eprintln!("[resident] session ended ({error}); falling back to a full restart");
                 self.resident = None;
+                // The dead session left the process-global fence armed; a
+                // full restart would park at the S0 capture forever and
+                // never produce the artifact. Tear the fence down first.
+                oxipresso_engine_xetex::XetexEngine::disarm_global_fence();
                 self.initialize_engine()?
             }
         })
