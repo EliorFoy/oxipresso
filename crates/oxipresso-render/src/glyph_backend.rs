@@ -260,11 +260,16 @@ impl XdvGlyphRenderBackend {
             if ft::FT_Set_Pixel_Sizes(face, 0, size_px) != 0 {
                 return None;
             }
-            let mut glyph_index = ft::FT_Get_Char_Index(face, code);
-            if glyph_index == 0 {
-                // TeX Type1 fonts are indexed by char code directly.
-                glyph_index = code;
-            }
+            // Native XDV fonts: `code` is a GLYPH ID (harfbuzz shaping output)
+            // and must be loaded by index. Classic TFM/Type1 fonts: `code` is
+            // a CHAR CODE — map it through the font's CMap, falling back to
+            // the raw code for Type1 fonts whose encoding is the identity.
+            let glyph_index = if font.native {
+                code
+            } else {
+                let mapped = ft::FT_Get_Char_Index(face, code);
+                if mapped == 0 { code } else { mapped }
+            };
             if ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT) != 0 {
                 return None;
             }
