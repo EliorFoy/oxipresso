@@ -469,11 +469,8 @@ fn main() {
                     // Insert a VISIBLE marker into the page-1 keywords line
                     // (the auto-edit must produce a visible page-1 change).
                     let edited = current.replace(
-                        "\\end{document}",
-                        &format!(
-                            "\\begin{{center}}\\bfseries {}\\end{{center}}\n\\end{{document}}",
-                            auto_text
-                        ),
+                        "分类旨在从头皮",
+                        &format!("分类旨在（{{\\bfseries {}}}）从头皮", auto_text),
                     );
                     let _ = edit_text_tx.send(edited);
                     ui.set_status(SharedString::from("auto-edit pushed"));
