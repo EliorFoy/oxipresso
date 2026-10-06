@@ -19,7 +19,12 @@ pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
     let mut app = OxipressoApp::new(options, root);
     // Initialize the engine before the window appears so editor-facing
     // messages (lookup/input/stream) reach stdout in order.
+    eprintln!(
+        "[gui] initializing (resident={})",
+        std::env::var("OXIPRESSO_RESIDENT").unwrap_or_default()
+    );
     let pending = app.initialize().map_err(|error| error.to_string())?;
+    eprintln!("[gui] initialize done");
 
     // Editor wire: stdin lines are pumped from a thread into the GUI loop.
     let (editor_tx, editor_rx) = mpsc::channel::<String>();
@@ -37,6 +42,7 @@ pub fn run_live_preview(options: CliOptions) -> Result<(), String> {
         }
     });
 
+    eprintln!("[gui] entering eframe");
     let options = eframe::NativeOptions::default();
     let host = LivePreview {
         app,

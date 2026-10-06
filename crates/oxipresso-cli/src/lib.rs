@@ -467,10 +467,13 @@ impl OxipressoApp {
         if !self.paused {
             self.prime_root_from_disk()?;
             if self.try_start_resident_session()? {
-                // Pass 1 typesets the primed root on the session worker; the
-                // snapshot is this run's outcome (stream messages + artifact).
-                let snap = self.wait_resident_snapshot()?;
-                messages.extend(self.messages_from_snapshot(snap)?);
+                // Release the capture park IMMEDIATELY by submitting the
+                // primed root: pass 1 is the first hot pass. (Without this
+                // the worker idles at the capture park for its full 60s
+                // fence deadline before falling through — the GUI startup
+                // appeared hung for a whole minute.)
+                let root_path = self.root.root_name.clone();
+                messages.extend(self.resident_rebuild(&root_path)?);
             } else {
                 messages.extend(self.initialize_engine()?);
             }
@@ -544,14 +547,17 @@ impl OxipressoApp {
     fn wait_resident_snapshot(
         &mut self,
     ) -> Result<oxipresso_engine_xetex::ResidentSnapshot, String> {
+        eprintln!("[gui-flow] waiting for the pass snapshot...");
         let session = self
             .resident
             .as_ref()
             .expect("wait_resident_snapshot requires a live session");
-        session
+        let snap = session
             .snapshots()
             .recv_timeout(std::time::Duration::from_secs(120))
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        eprintln!("[gui-flow] snapshot received");
+        snap
     }
 
     /// Convert one completed pass's snapshot into editor messages and refresh
