@@ -89,6 +89,10 @@ struct SharedPixelBuffer {
 
 struct ClientCore {
     session: std::sync::Mutex<EditorWireSession>,
+    /// The path form the ENGINE knows: the root file name relative to the
+    /// document directory (register/open/change must use it, not the
+    /// absolute path — the engine reads files by this name through the VFS).
+    wire_name: String,
     doc_path: std::path::PathBuf,
     ui: EditorClientWindow,
     last_sent_len: std::cell::Cell<usize>,
@@ -122,7 +126,7 @@ impl ClientCore {
         self.last_sent_len.set(new_text.len());
         let line = format!(
             "(change {} 0 {old_len} {})",
-            escape_wire_string(&self.doc_path.to_string_lossy()),
+            escape_wire_string(&self.wire_name),
             escape_wire_string(new_text)
         );
         self.send_raw(line);
@@ -246,8 +250,13 @@ fn main() {
     ui.set_document_text(String::from_utf8_lossy(&initial).into_owned().into());
     ui.set_status("starting the engine...".into());
 
+    let wire_name = doc_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| doc_path.to_string_lossy().into_owned());
     let window = std::sync::Arc::new(ClientCore {
         session: std::sync::Mutex::new(session),
+        wire_name: wire_name.clone(),
         doc_path: doc_path.clone(),
         ui: ui.clone_strong(),
         last_sent_len: std::cell::Cell::new(initial.len()),
@@ -261,13 +270,10 @@ fn main() {
         use base64::Engine as _;
         let core = std::sync::Arc::clone(&window);
         let initial_b64 = base64::engine::general_purpose::STANDARD.encode(&initial);
-        core.send_raw(format!(
-            "(register {})",
-            escape_wire_string(&doc_path.to_string_lossy())
-        ));
+        core.send_raw(format!("(register {})", escape_wire_string(&wire_name)));
         core.send_raw(format!(
             "(open-base64 {} \"{initial_b64}\")",
-            escape_wire_string(&doc_path.to_string_lossy())
+            escape_wire_string(&wire_name)
         ));
         core.send_raw("(resume)".to_string());
     }
