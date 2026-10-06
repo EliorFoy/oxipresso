@@ -94,10 +94,14 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut binary: Option<std::path::PathBuf> = None;
     let mut doc: Option<std::path::PathBuf> = None;
+    let mut auto_edit: Option<String> = None;
+    let mut log_path: Option<std::path::PathBuf> = None;
     let mut json = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--binary" => binary = args.next().map(std::path::PathBuf::from),
+            "--auto-edit" => auto_edit = args.next(),
+            "--log" => log_path = args.next().map(std::path::PathBuf::from),
             "--json" => json = true,
             other if doc.is_none() && !other.starts_with('-') => {
                 doc = Some(std::path::PathBuf::from(other))
@@ -184,6 +188,9 @@ fn main() {
     {
         let wire_name = wire_name.clone();
         let initial_len = initial.len();
+        let spawn_binary = binary.clone();
+        let spawn_doc = doc_path.clone();
+        let log_file = log_path.clone();
         let ui_tx = ui_tx.clone();
         std::thread::spawn(move || {
             let mut session = session;
@@ -193,13 +200,19 @@ fn main() {
             // edit replaces exactly those bytes.
             let mut engine_len: usize = initial_len;
             let mut pending_text: Option<String> = None;
+            let mut last_known_text = String::from_utf8_lossy(&initial).into_owned();
             let mut out_buffer = String::new();
+            let mut last_stderr_len = 0usize;
 
-            let send_line = |session: &mut EditorWireSession, line: &str| {
+            let send_line = |session: &mut EditorWireSession, line: &str| -> bool {
                 if let Err(error) = session.send_raw(line) {
                     eprintln!("[client] {error}");
+                    return false;
                 }
-                if let Ok(log_path) = std::env::var("OXI_CLIENT_LOG") {
+                true
+            };
+            let log_send = |line: &str| {
+                if let Some(log_path) = &log_file {
                     if let Ok(mut f) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -239,14 +252,43 @@ fn main() {
                 if let Some(text) = pending_text.take() {
                     let old_len = engine_len;
                     engine_len = text.len();
-                    send_line(
-                        &mut session,
-                        &format!(
-                            "(change {} 0 {old_len} {})",
-                            escape_wire_string(&wire_name),
-                            escape_wire_string(&text)
-                        ),
+                    last_known_text = text.clone();
+                    let line = format!(
+                        "(change {} 0 {old_len} {})",
+                        escape_wire_string(&wire_name),
+                        escape_wire_string(&text)
                     );
+                    log_send(&line);
+                    if !send_line(&mut session, &line) {
+                        // The child died (the hot pass crashed for this
+                        // document): restart it and re-push the current
+                        // buffer as a fresh open — slow but correct.
+                        eprintln!("[client] engine died; respawning");
+                        match EditorWireSession::spawn(&spawn_binary, &spawn_doc, protocol, true) {
+                            Ok(new_session) => {
+                                session = new_session;
+                                use base64::Engine as _;
+                                let b64 = base64::engine::general_purpose::STANDARD
+                                    .encode(last_known_text.as_bytes());
+                                send_line(
+                                    &mut session,
+                                    &format!("(register {})", escape_wire_string(&wire_name)),
+                                );
+                                send_line(
+                                    &mut session,
+                                    &format!(
+                                        "(open-base64 {} \"{b64}\")",
+                                        escape_wire_string(&wire_name)
+                                    ),
+                                );
+                                send_line(&mut session, "(resume)");
+                            }
+                            Err(error) => {
+                                eprintln!("[client] respawn failed: {error}");
+                                return;
+                            }
+                        }
+                    }
                 }
                 // 2. Drain notices into the log tail.
                 loop {
@@ -274,6 +316,13 @@ fn main() {
                         log = log[log.len() - 64 * 1024..].to_string();
                     }
                     log.push_str(&parsed.raw);
+                    log.push('\n');
+                }
+                // The child stderr rides along: an engine abort/panic lands here.
+                let child_err = session.stderr_text();
+                if child_err.len() != last_stderr_len {
+                    last_stderr_len = child_err.len();
+                    log.push_str(&child_err);
                     log.push('\n');
                 }
                 // 3. Forward the log tail at most ~3x/second (the CN first
@@ -400,6 +449,29 @@ fn main() {
                 let _ = edit_text_tx.send(ui.get_document_text().to_string());
             }
         });
+    }
+
+    // OXI_CLIENT_AUTOEDIT=<text>: after the initial pass, programmatically
+    // edit the buffer (the same path a keystroke takes: edited -> wire
+    // worker -> change) — the live-edit regression test without OS input.
+    if let Some(auto_text) = auto_edit {
+        let ui_weak = ui.as_weak();
+        let edit_text_tx = edit_text_tx.clone();
+        let auto_timer = slint::Timer::default();
+        auto_timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(3000),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    let current = ui.get_document_text().to_string();
+                    let edited = format!("{current}{auto_text}");
+                    let _ = edit_text_tx.send(edited.clone());
+                    let _ = edit_text_tx.send(edited);
+                    ui.set_status(SharedString::from("auto-edit pushed"));
+                }
+            },
+        );
+        std::mem::forget(auto_timer);
     }
 
     ui.run().expect("slint event loop");
