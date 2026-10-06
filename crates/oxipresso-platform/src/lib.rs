@@ -215,6 +215,7 @@ mod tests {
     /// Missing. Skipped when the native watch cannot be established (e.g.
     /// filesystems without change notification) so the polling fallback is
     /// exercised instead on those systems.
+    #[cfg(windows)]
     #[test]
     fn native_watcher_reports_changes_of_the_watched_file_only() {
         let dir = unique_temp_dir();

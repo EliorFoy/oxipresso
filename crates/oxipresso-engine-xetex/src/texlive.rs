@@ -212,20 +212,81 @@ impl FileResolver for KpsewhichResolver {
 mod tests {
     use super::*;
 
-    /// Creates a fake `kpsewhich` batch script that answers `--version` and
-    /// echoes a fixed resolved path for lookups.
+    /// Creates a fake `kpsewhich` stub for the host OS that answers
+    /// `--version` and echoes a fixed resolved path for lookups. The tests
+    /// must run on every platform the binary ships for (the Linux release
+    /// build caught the cmd.exe-only original).
     fn fake_kpsewhich(dir: &std::path::Path, target: &std::path::Path) -> PathBuf {
-        let script = dir.join("fake-kpsewhich.cmd");
-        std::fs::write(
-            &script,
+        #[cfg(windows)]
+        let (name, body) = (
+            "fake-kpsewhich.cmd",
             format!(
                 "@if \"%~1\"==\"--version\" (\r\n  @echo fake kpsewhich 1.0\r\n  @exit /b 0\r\n)\r\n@echo {}\r\n",
                 target.display()
             ),
-        )
-        .unwrap();
+        );
+        #[cfg(not(windows))]
+        let (name, body) = (
+            "fake-kpsewhich.sh",
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"fake kpsewhich 1.0\"\n  exit 0\nfi\necho {}\n",
+                target.display()
+            ),
+        );
+        let script = dir.join(name);
+        std::fs::write(&script, body).unwrap();
+        make_executable(&script);
         script
     }
+
+    /// A stub whose `--version` succeeds but every lookup exits 1 —
+    /// kpsewhich's missing-file behavior.
+    fn failing_lookup_stub(dir: &std::path::Path) -> PathBuf {
+        #[cfg(windows)]
+        let (name, body) = (
+            "failing-lookup-kpsewhich.cmd",
+            "@if \"%~1\"==\"--version\" (\r\n  @echo fake kpsewhich 1.0\r\n  @exit /b 0\r\n)\r\n@exit /b 1\r\n"
+                .to_string(),
+        );
+        #[cfg(not(windows))]
+        let (name, body) = (
+            "failing-lookup-kpsewhich.sh",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"fake kpsewhich 1.0\"\n  exit 0\nfi\nexit 1\n"
+                .to_string(),
+        );
+        let script = dir.join(name);
+        std::fs::write(&script, body).unwrap();
+        make_executable(&script);
+        script
+    }
+
+    /// A stub that answers the version for EVERY argument and always exits 0
+    /// (used to prove a miss is served from the persisted cache).
+    fn always_version_stub(dir: &std::path::Path) -> PathBuf {
+        #[cfg(windows)]
+        let (name, body) = (
+            "always-version-kpsewhich.cmd",
+            "@echo fake kpsewhich 1.0\r\n@exit /b 0\r\n".to_string(),
+        );
+        #[cfg(not(windows))]
+        let (name, body) = (
+            "always-version-kpsewhich.sh",
+            "#!/bin/sh\necho \"fake kpsewhich 1.0\"\nexit 0\n".to_string(),
+        );
+        let script = dir.join(name);
+        std::fs::write(&script, body).unwrap();
+        make_executable(&script);
+        script
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
 
     /// A process- and nanosecond-unique temp dir. Windows reuses PIDs and a
     /// previous aborted run can leave a same-named dir behind, so a bare
@@ -260,12 +321,7 @@ mod tests {
         // Instance 2: warm cache. The resolving stub is replaced by a
         // version-only stub that fails every lookup — so a successful
         // resolution proves the hit came from the persisted cache.
-        let version_only = dir.join("version-kpsewhich.cmd");
-        std::fs::write(
-            &version_only,
-            "@if \"%~1\"==\"--version\" (\r\n  @echo fake kpsewhich 1.0\r\n  @exit /b 0\r\n)\r\n@exit /b 1\r\n",
-        )
-        .unwrap();
+        let version_only = failing_lookup_stub(&dir);
         let mut resolver = KpsewhichResolver::from_program(&version_only)
             .unwrap()
             .with_cache_path(&cache);
@@ -344,12 +400,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // A stub that succeeds at --version but fails every lookup —
         // kpsewhich's missing-file behavior.
-        let script = dir.join("fail-kpsewhich.cmd");
-        std::fs::write(
-            &script,
-            "@if \"%~1\"==\"--version\" (\r\n  @echo fake kpsewhich 1.0\r\n  @exit /b 0\r\n)\r\n@exit /b 1\r\n",
-        )
-        .unwrap();
+        let script = failing_lookup_stub(&dir);
         let cache = dir.join("cache.txt");
 
         let mut resolver = KpsewhichResolver::from_program(&script)
@@ -361,8 +412,7 @@ mod tests {
         // Second instance: a fresh version-only stub; the miss must come from
         // the loaded cache (proven by cache_stats, since a real spawn would
         // also fail but not record).
-        let version_only = dir.join("version-kpsewhich.cmd");
-        std::fs::write(&version_only, "@echo fake kpsewhich 1.0\r\n@exit /b 0\r\n").unwrap();
+        let version_only = always_version_stub(&dir);
         let resolver = KpsewhichResolver::from_program(&version_only)
             .unwrap()
             .with_cache_path(&cache);
@@ -382,12 +432,7 @@ mod tests {
         // never panic.
         let dir = unique_dir("oxi-kpse-malformed");
         std::fs::create_dir_all(&dir).unwrap();
-        let version_only = dir.join("version-kpsewhich.cmd");
-        std::fs::write(
-            &version_only,
-            "@if \"%~1\"==\"--version\" (\r\n  @echo fake kpsewhich 1.0\r\n  @exit /b 0\r\n)\r\n@exit /b 1\r\n",
-        )
-        .unwrap();
+        let version_only = failing_lookup_stub(&dir);
         let cache = dir.join("cache.txt");
         std::fs::write(
             &cache,
