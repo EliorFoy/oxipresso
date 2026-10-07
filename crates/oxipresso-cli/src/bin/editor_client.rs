@@ -251,6 +251,9 @@ enum UiEvent {
     Page(SharedPixelBuffer, usize, String),
     Log(String),
     Pages(usize),
+    /// The source line of the change just pushed to the engine (1-based):
+    /// the editor->preview page sync follows it through SyncTeX.
+    EditLocation(usize),
 }
 
 /// Sendable pixel buffer for the preview pane (slint::Image is not Send;
@@ -270,6 +273,19 @@ fn bitmap_hash(pixels: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
     hash
+}
+
+/// Byte offset of the first difference between two document versions (the
+/// length of the common prefix) — the edit position the preview syncs to.
+fn first_diff(previous: &str, current: &str) -> u64 {
+    let previous = previous.as_bytes();
+    let current = current.as_bytes();
+    let common = previous.len().min(current.len());
+    let mut index = 0usize;
+    while index < common && previous[index] == current[index] {
+        index += 1;
+    }
+    index as u64
 }
 
 fn main() {
@@ -331,14 +347,17 @@ fn main() {
     });
 
     // The rendered XDV artifact lands here after every rebuild; the client
-    // watches it and displays page 1.
+    // watches it and displays page 1. The SyncTeX sidecar (rewritten each
+    // pass by the CLI) powers the editor->preview page sync.
     let artifact_path = doc_path.with_extension("xdv");
+    let synctex_path = doc_path.with_extension("synctex");
     // Child environment: the render server needs the format file and writes
     // the artifact for the client's preview pane (the child inherits this
     // process's environment).
     unsafe {
         std::env::set_var("OXIPRESSO_RESIDENT", "1");
         std::env::set_var("OXIPRESSO_ARTIFACT_OUT", &artifact_path);
+        std::env::set_var("OXIPRESSO_SYNCTEX_OUT", &synctex_path);
     }
 
     let protocol = if json {
@@ -448,6 +467,10 @@ fn main() {
                     in_flight = true;
                     last_send = std::time::Instant::now();
                     let old_len = engine_len;
+                    // The edit position: first difference against the last
+                    // pushed content -> the source line the preview syncs to.
+                    let edit_offset = first_diff(&last_known_text, &text) as usize;
+                    let changed = text != last_known_text;
                     engine_len = text.len();
                     last_known_text = text.clone();
                     let line = format!(
@@ -456,6 +479,17 @@ fn main() {
                         escape_wire_string(&text)
                     );
                     log_send(&line);
+                    if changed {
+                        // The byte diff can land inside a multi-byte UTF-8
+                        // char (fullwidth punctuation!); snap back to a
+                        // char boundary before slicing for the line number.
+                        let mut boundary = edit_offset.min(text.len());
+                        while boundary > 0 && !text.is_char_boundary(boundary) {
+                            boundary -= 1;
+                        }
+                        let edit_line = 1 + text[..boundary].matches('\n').count();
+                        let _ = ui_tx.send(UiEvent::EditLocation(edit_line));
+                    }
                     if !send_line(&mut session, &line) {
                         // The child died (the hot pass crashed for this
                         // document): restart it and re-push the current
@@ -551,15 +585,22 @@ fn main() {
     // preview pixel-crisp instead of upscaled-blurry at DPI scaling / zoom.
     let render_density: std::sync::Arc<std::sync::atomic::AtomicU32> =
         std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    // The parsed SyncTeX sidecar, refreshed by the render worker after each
+    // pass; the UI timer consults it for the editor->preview page sync.
+    let synctex_doc: std::sync::Arc<std::sync::Mutex<Option<oxipresso_synctex::SyncTexDocument>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     {
         let artifact_path = artifact_path.clone();
         let ui_tx = ui_tx.clone();
         let render_density = render_density.clone();
+        let synctex_path = synctex_path.clone();
+        let synctex_doc = synctex_doc.clone();
         std::thread::spawn(move || {
             let backend = XdvGlyphRenderBackend::new(Box::new(
                 KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy()),
             ));
             let mut fingerprint: Option<(usize, u64)> = None;
+            let mut synctex_fingerprint: Option<(u64, u64)> = None;
             let mut artifact_bytes: Vec<u8> = Vec::new();
             let mut artifact_version: u64 = 0;
             let mut artifact_version_time = std::time::Instant::now();
@@ -599,17 +640,15 @@ fn main() {
                 }
                 if !artifact_bytes.is_empty() {
                     if pages_of_version.0 != artifact_version {
-                        let count = oxipresso_render::xdv::parse_xdv(
-                            &artifact_bytes,
-                            &mut |_| None,
-                        )
-                        .map(|doc| doc.pages.len())
-                        .unwrap_or(0);
+                        let count =
+                            oxipresso_render::xdv::parse_xdv(&artifact_bytes, &mut |_| None)
+                                .map(|doc| doc.pages.len())
+                                .unwrap_or(0);
                         pages_of_version = (artifact_version, count);
                     }
                     let count = pages_of_version.1;
-                    let settled = artifact_version_time.elapsed()
-                        >= std::time::Duration::from_millis(1500);
+                    let settled =
+                        artifact_version_time.elapsed() >= std::time::Duration::from_millis(1500);
                     let grow_only_ok = count >= last_sent_pages;
                     if count != last_sent_pages
                         && (grow_only_ok || settled)
@@ -619,6 +658,28 @@ fn main() {
                         last_sent_pages = count;
                         if settled {
                             pages_settled_sent = artifact_version;
+                        }
+                    }
+                }
+                // SyncTeX sidecar: rewritten by the CLI after each pass; the
+                // editor->preview page sync looks up against the latest one.
+                if let Ok(meta) = std::fs::metadata(&synctex_path) {
+                    let stamp = (
+                        meta.len(),
+                        meta.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0),
+                    );
+                    if synctex_fingerprint != Some(stamp) {
+                        synctex_fingerprint = Some(stamp);
+                        if let Ok(text) = std::fs::read_to_string(&synctex_path)
+                            && let Ok(doc) = oxipresso_synctex::parse_text(&text)
+                        {
+                            *synctex_doc
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(doc);
                         }
                     }
                 }
@@ -717,6 +778,12 @@ fn main() {
     {
         let ui_handle = ui.clone_strong();
         let render_density = render_density.clone();
+        let synctex_doc = synctex_doc.clone();
+        let wire_name_for_sync = wire_name.clone();
+        let page_req_sync = page_req_tx.clone();
+        // The pending editor->preview sync: the source line of the latest
+        // change, debounced so a typing burst flips the preview once.
+        let mut pending_sync: Option<(usize, std::time::Instant)> = None;
         // Cross-fade state: the last shown page (image + geometry + index)
         // and the running fade. An update of the SAME page cross-fades the
         // new bitmap in over the old one (~120ms, driven frame by frame
@@ -736,6 +803,29 @@ fn main() {
                         UiEvent::Pages(count) => pages = Some(count),
                         UiEvent::Page(buffer, page, status) => {
                             page_event = Some((buffer, page, status))
+                        }
+                        UiEvent::EditLocation(line) => {
+                            pending_sync = Some((line, std::time::Instant::now()));
+                        }
+                    }
+                }
+                // Editor->preview page sync (TeXpresso's forward SyncTeX):
+                // ~350ms after the last change of a burst, map the edited
+                // source line to its page and flip the preview there.
+                if let Some((line, at)) = pending_sync
+                    && at.elapsed() >= std::time::Duration::from_millis(350)
+                {
+                    pending_sync = None;
+                    let hit = synctex_doc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .as_ref()
+                        .and_then(|doc| doc.forward_search_path(&wire_name_for_sync, line));
+                    if let Some(hit) = hit {
+                        let target = hit.page.saturating_sub(1);
+                        if target as i32 != ui_handle.get_page_index() {
+                            ui_handle.set_page_index(target as i32);
+                            let _ = page_req_sync.send(target);
                         }
                     }
                 }
@@ -784,9 +874,7 @@ fn main() {
                             fade = 0.0;
                         }
                         shown = Some((image, buffer.width, buffer.height, page));
-                        ui_handle.set_page_ratio(
-                            buffer.height as f32 / buffer.width as f32,
-                        );
+                        ui_handle.set_page_ratio(buffer.height as f32 / buffer.width as f32);
                     }
                     ui_handle.set_page_index(page as i32);
                     ui_handle.set_status(SharedString::from(status));
@@ -869,7 +957,8 @@ fn main() {
     // worker -> change) — the live-edit regression test without OS input.
     if let Some(auto_text) = auto_edit {
         let ui_weak = ui.as_weak();
-        let edit_text_tx = edit_text_tx.clone();
+        let edit_text_tx_a = edit_text_tx.clone();
+        let auto_text_a = auto_text.clone();
         let auto_timer = slint::Timer::default();
         auto_timer.start(
             slint::TimerMode::SingleShot,
@@ -881,14 +970,49 @@ fn main() {
                     // (the auto-edit must produce a visible page-1 change).
                     let edited = current.replace(
                         "分类旨在从头皮",
-                        &format!("分类旨在（{{\\bfseries {}}}）从头皮", auto_text),
+                        &format!("分类旨在（{{\\bfseries {}}}）从头皮", auto_text_a),
                     );
-                    let _ = edit_text_tx.send(edited);
+                    if edited != current {
+                        // Mirror the programmatic edit into the editor pane,
+                        // exactly like a real keystroke would.
+                        ui.set_document_text(edited.clone().into());
+                        let _ = edit_text_tx_a.send(edited);
+                    }
                     ui.set_status(SharedString::from("auto-edit pushed"));
                 }
             },
         );
         std::mem::forget(auto_timer);
+        // A second edit ~6s later on a LATE page (the discussion section):
+        // the preview must FOLLOW the edit position and flip there — the
+        // editor->preview SyncTeX page sync, end to end.
+        let ui_weak = ui.as_weak();
+        let edit_text_tx_b = edit_text_tx.clone();
+        let auto_text_b = auto_text.clone();
+        let late_timer = slint::Timer::default();
+        late_timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(9000),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    let current = ui.get_document_text().to_string();
+                    let anchor = "综合这些比较可以看出，DTCWT";
+                    let edited = current.replace(
+                        anchor,
+                        &format!(
+                            "综合这些比较可以看出（{{\\bfseries {}}}），DTCWT",
+                            auto_text_b
+                        ),
+                    );
+                    if edited != current {
+                        ui.set_document_text(edited.clone().into());
+                        let _ = edit_text_tx_b.send(edited);
+                        ui.set_status(SharedString::from("late auto-edit pushed (page ~6)"));
+                    }
+                }
+            },
+        );
+        std::mem::forget(late_timer);
     }
 
     ui.run().expect("slint event loop");
