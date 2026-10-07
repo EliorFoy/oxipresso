@@ -1,0 +1,25 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\title{Oxipresso Live Preview}
+\author{checkpoint-incremental rebuild}
+\date{\today}
+\begin{document}
+\maketitle
+\section{Live typesetting}
+This page is typeset by the real XeTeX engine: every editor \texttt{change}
+restores the checkpoint and re-typesets in a single pass --- the 22MB
+format file is never reloaded.
+\section{Mathematics}
+Euler's identity
+\begin{equation}
+  \mathrm{e}^{\mathrm{i}\pi} + 1 = 0
+\end{equation}
+and the Gaussian integral
+\begin{equation}
+  \int_{-\infty}^{\infty} \mathrm{e}^{-x^2}\,\mathrm{d}x = \sqrt{\pi}
+\end{equation}
+\section{Colors}
+{\color{blue} blue text} and {\color{red} red text} are driven by XDV color
+specials; \LaTeX{} fonts, line breaking and hyphenation are all real.
+\end{document}
