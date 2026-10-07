@@ -593,6 +593,7 @@ impl OxipressoApp {
         }
         // OXIPRESSO_PAGES_OUT: render every page to PNG and write the
         // manifest/line-map the editor integrations (VSCode) watch.
+        #[cfg(feature = "freetype")]
         if let Some(dir) = self.pages_out.clone()
             && let Some(artifact) = &artifact
         {
@@ -789,6 +790,7 @@ impl OxipressoApp {
     /// write `manifest.json` + `lines.json` — the editor integrations (the
     /// VSCode extension) watch these to refresh the preview and follow the
     /// edited line.
+    #[cfg(feature = "freetype")]
     #[cfg(feature = "freetype")]
     fn write_pages_out(
         &mut self,

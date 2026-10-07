@@ -311,11 +311,15 @@ fn first_diff(previous: &str, current: &str) -> u64 {
 }
 
 fn escape(text: &str) -> String {
-    text.replace('\\', "\\\\")
+    // Produces a QUOTED s-expression string (the client's escape_wire_string
+    // equivalent): bare symbols are rejected as "expected string".
+    let escaped = text
+        .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-        .replace('\t', "\\t")
+        .replace('\t', "\\t");
+    format!("\"{escaped}\"")
 }
 
 fn read_message(reader: &mut impl BufRead) -> Option<Value> {
