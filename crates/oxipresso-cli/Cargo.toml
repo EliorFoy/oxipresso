@@ -27,6 +27,7 @@ freetype = ["oxipresso-render/freetype"]
 slint = ["dep:slint", "dep:rfd"]
 
 [dependencies]
+serde_json = "1"
 base64 = "0.22"
 png = "0.18.1"
 rfd = { version = "0.15", optional = true }

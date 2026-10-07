@@ -3669,6 +3669,7 @@ dependencies = [
  "oxipresso-viewer",
  "png",
  "rfd",
+ "serde_json",
  "slint",
 ]
 
