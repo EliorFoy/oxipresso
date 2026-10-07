@@ -62,6 +62,8 @@ slint::slint! {
         in property <string> doc-path;
         in-out property <string> document-text <=> doc-edit.text;
         in-out property <image> page-image;
+        in-out property <image> previous-image;
+        in-out property <float> page-fade: 0.0;
         in-out property <string> engine-log <=> log-edit.text;
         in-out property <string> status;
         in property <int> page-index;
@@ -163,7 +165,10 @@ slint::slint! {
                     }
                 }
                 Rectangle { width: 1px; background: #313244; }
-                // 预览：Flickable 支持缩放平移
+                // 预览：Flickable 支持缩放平移。增量更新动画：page-view 承载
+                // 最新页面位图，prev-view 以 page-fade 不透明度叠在其上——
+                // 内容更新时 Rust 先把旧位图放到 previous-image 并将 fade
+                // 置 1，随后逐帧衰减到 0，形成一次细腻的交叉淡化。
                 Rectangle {
                     background: #11111b;
                     horizontal-stretch: 1;
@@ -181,6 +186,13 @@ slint::slint! {
                                     width: parent.width;
                                     height: parent.height;
                                     source: page-image;
+                                }
+                                prev-view := Image {
+                                    x: 0; y: 0;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    source: previous-image;
+                                    opacity: page-fade;
                                 }
                             }
                         }
@@ -247,6 +259,17 @@ struct SharedPixelBuffer {
     rgba: Vec<u8>,
     width: u32,
     height: u32,
+}
+
+/// FNV-1a over a rendered page's pixels: the cheap identity check that keeps
+/// unchanged bitmaps from being re-uploaded to the GPU during a pass.
+fn bitmap_hash(pixels: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in pixels {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
 }
 
 fn main() {
@@ -539,9 +562,14 @@ fn main() {
             let mut fingerprint: Option<(usize, u64)> = None;
             let mut artifact_bytes: Vec<u8> = Vec::new();
             let mut artifact_version: u64 = 0;
+            let mut artifact_version_time = std::time::Instant::now();
             let mut requested_page: usize = 0;
             let mut rendered: Option<(u64, usize)> = None;
             let mut extra_scale: f64 = 1.0;
+            let mut last_bitmap_hash: u64 = 0;
+            let mut last_sent_pages: usize = 0;
+            let mut pages_settled_sent: u64 = 0;
+            let mut pages_of_version: (u64, usize) = (0, 0);
             loop {
                 // Artifact change detection (len + mtime).
                 let meta = std::fs::metadata(&artifact_path).ok();
@@ -557,17 +585,41 @@ fn main() {
                 });
                 if current.is_some() && current != fingerprint {
                     fingerprint = current;
+                    artifact_version_time = std::time::Instant::now();
                     if let Ok(bytes) = std::fs::read(&artifact_path) {
                         artifact_bytes = bytes;
                         artifact_version += 1;
-                        // Page count for the toolbar (parse is cheap: a few
-                        // hundred KB, done once per new artifact).
-                        if let Ok(doc) =
-                            oxipresso_render::xdv::parse_xdv(&artifact_bytes, &mut |_| None)
-                        {
-                            let _ = ui_tx.send(UiEvent::Pages(doc.pages.len()));
-                        }
+                        // Page count for the toolbar. Streaming partials make
+                        // the count grow page by page; republishing it would
+                        // flash "5/3" mid-pass, so grow-only while the
+                        // artifact is fresh, and republish the true count
+                        // once the artifact has settled unchanged.
                         rendered = None; // force a re-render of the page
+                    }
+                }
+                if !artifact_bytes.is_empty() {
+                    if pages_of_version.0 != artifact_version {
+                        let count = oxipresso_render::xdv::parse_xdv(
+                            &artifact_bytes,
+                            &mut |_| None,
+                        )
+                        .map(|doc| doc.pages.len())
+                        .unwrap_or(0);
+                        pages_of_version = (artifact_version, count);
+                    }
+                    let count = pages_of_version.1;
+                    let settled = artifact_version_time.elapsed()
+                        >= std::time::Duration::from_millis(1500);
+                    let grow_only_ok = count >= last_sent_pages;
+                    if count != last_sent_pages
+                        && (grow_only_ok || settled)
+                        && pages_settled_sent != artifact_version
+                    {
+                        let _ = ui_tx.send(UiEvent::Pages(count));
+                        last_sent_pages = count;
+                        if settled {
+                            pages_settled_sent = artifact_version;
+                        }
                     }
                 }
                 // Display-matched density: the UI publishes the on-screen
@@ -615,26 +667,32 @@ fn main() {
                     match backend.render_page_scaled(&artifact, requested_page, extra_scale as f32)
                     {
                         Ok(page) => {
-                            let ratio = if page.width > 0 {
-                                page.height as f32 / page.width as f32
-                            } else {
-                                1.414
-                            };
-                            let buffer = SharedPixelBuffer {
-                                rgba: page.pixels_rgba,
-                                width: page.width,
-                                height: page.height,
-                            };
-                            let size = artifact.bytes.len();
-                            let ms = (std::time::Instant::now() - t_render).as_millis();
-                            let _ = ui_tx.send(UiEvent::Page(
-                                buffer,
-                                requested_page,
-                                format!(
-                                    "第 {} 页 · {size} B XDV · 渲染 {ms}ms",
-                                    requested_page + 1
-                                ),
-                            ));
+                            // Identical-bitmap suppression: during a pass the
+                            // artifact file is rewritten for every partial
+                            // snapshot; re-uploading an unchanged 3-15MB
+                            // texture several times a second reads as a
+                            // hiccup. Only forward actually-new pixels.
+                            let hash = bitmap_hash(&page.pixels_rgba);
+                            let unchanged =
+                                hash == last_bitmap_hash && !page.pixels_rgba.is_empty();
+                            last_bitmap_hash = hash;
+                            if !unchanged {
+                                let buffer = SharedPixelBuffer {
+                                    rgba: page.pixels_rgba,
+                                    width: page.width,
+                                    height: page.height,
+                                };
+                                let size = artifact.bytes.len();
+                                let ms = (std::time::Instant::now() - t_render).as_millis();
+                                let _ = ui_tx.send(UiEvent::Page(
+                                    buffer,
+                                    requested_page,
+                                    format!(
+                                        "第 {} 页 · {size} B XDV · 渲染 {ms}ms",
+                                        requested_page + 1
+                                    ),
+                                ));
+                            }
                         }
                         Err(error) => {
                             // Out-of-range page: the artifact is a mid-pass
@@ -659,6 +717,12 @@ fn main() {
     {
         let ui_handle = ui.clone_strong();
         let render_density = render_density.clone();
+        // Cross-fade state: the last shown page (image + geometry + index)
+        // and the running fade. An update of the SAME page cross-fades the
+        // new bitmap in over the old one (~120ms, driven frame by frame
+        // here); page navigation and size changes cut hard.
+        let mut shown: Option<(slint::Image, u32, u32, usize)> = None;
+        let mut fade: f32 = 0.0;
         timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(30),
@@ -699,15 +763,38 @@ fn main() {
                                 buffer.width,
                                 buffer.height,
                             ));
-                        ui_handle.set_page_image(image);
-                        ui_handle.set_page_ratio(if buffer.width > 0 {
-                            buffer.height as f32 / buffer.width as f32
-                        } else {
-                            1.414
+                        // Incremental-update animation: same page, same
+                        // geometry -> keep the shown bitmap as an overlay
+                        // and fade the new one in beneath it; anything else
+                        // (navigation, resize, first paint) swaps hard.
+                        let incremental = shown.as_ref().is_some_and(|s| {
+                            s.1 == buffer.width && s.2 == buffer.height && s.3 == page
                         });
+                        if incremental {
+                            if let Some((previous, ..)) = shown.as_ref() {
+                                ui_handle.set_previous_image(previous.clone());
+                            }
+                            ui_handle.set_page_image(image.clone());
+                            ui_handle.set_page_fade(1.0);
+                            fade = 1.0;
+                        } else {
+                            ui_handle.set_page_image(image.clone());
+                            ui_handle.set_previous_image(image.clone());
+                            ui_handle.set_page_fade(0.0);
+                            fade = 0.0;
+                        }
+                        shown = Some((image, buffer.width, buffer.height, page));
+                        ui_handle.set_page_ratio(
+                            buffer.height as f32 / buffer.width as f32,
+                        );
                     }
                     ui_handle.set_page_index(page as i32);
                     ui_handle.set_status(SharedString::from(status));
+                }
+                // Frame-by-frame fade decay (~120ms total at 30ms ticks).
+                if fade > 0.0 {
+                    fade = (fade - 0.3).max(0.0);
+                    ui_handle.set_page_fade(fade);
                 }
             },
         );
