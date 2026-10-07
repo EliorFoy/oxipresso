@@ -1,1 +1,14 @@
 /target/
+Cargo.lock
+
+# debugging artifacts / 生成产物与调试中间文件
+/probe/
+/demo/
+/texpresso.fmt
+/*.png
+/*.log
+/*.xdv
+/*.fmt
+/*.synctex
+/*.aux
+/*.tar.gz
