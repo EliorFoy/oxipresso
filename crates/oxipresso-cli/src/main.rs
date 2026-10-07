@@ -47,10 +47,11 @@ fn run_render_page(args: &[String]) -> Result<(), String> {
                     .collect();
             }
             "--page" => {
-                page = it
+                let value = it
                     .next()
                     .and_then(|v| v.parse::<usize>().ok())
                     .ok_or_else(|| "render-page: --page needs a number".to_string())?;
+                page = Some(value);
             }
             other if xdv.is_none() => xdv = Some(other.to_string()),
             other if page.is_none() => {
