@@ -54,7 +54,7 @@ fn run_render_page(args: &[String]) -> Result<(), String> {
             }
             other if xdv.is_none() => xdv = Some(other.to_string()),
             other if page.is_none() => {
-                page = Some(other.parse().map_err(|_| {
+                page = Some(other.parse::<usize>().map_err(|_| {
                     format!("render-page: invalid page number {other}")
                 })?);
             }
