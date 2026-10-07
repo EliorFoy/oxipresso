@@ -24,6 +24,7 @@ slint = ["dep:slint", "dep:rfd"]
 
 [dependencies]
 base64 = "0.22"
+png = "0.18.1"
 rfd = { version = "0.15", optional = true }
 eframe = { version = "0.34.3", optional = true, default-features = false, features = ["default_fonts", "wgpu"] }
 slint = { version = "1.17", optional = true }
