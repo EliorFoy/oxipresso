@@ -73,6 +73,27 @@ pub fn parse_afm_charmetrics(bytes: &[u8]) -> Option<HashMap<u32, String>> {
     (!map.is_empty()).then_some(map)
 }
 
+/// Parses a dvips encoding vector (`/encname [ /Gamma /Delta ... ]`) into a
+/// position-indexed glyph-name table: entry i = the name TeX char code i
+/// maps to. `/name` slots name the glyph; bare numbers (re-encoded-from
+/// slots) and anything else parse as "no name here".
+pub fn parse_enc_vector(bytes: &[u8]) -> Option<Vec<Option<String>>> {
+    let text = String::from_utf8_lossy(bytes);
+    let start = text.find('[')?;
+    let body = &text[start + 1..];
+    let end = body.find(']')?;
+    let mut names: Vec<Option<String>> = Vec::with_capacity(256);
+    for token in body[..end].split_whitespace() {
+        let token = token.trim_end_matches(',');
+        if let Some(name) = token.strip_prefix('/') {
+            names.push(Some(name.to_string()));
+        } else if token.parse::<u32>().is_ok() {
+            names.push(None);
+        }
+    }
+    (!names.is_empty()).then_some(names)
+}
+
 // SAFETY: the backend is deliberately NOT Sync; the GUI's render worker
 // thread owns one instance exclusively (all interior mutability stays on
 // that thread). The raw FreeType handles are created and used on the owner
@@ -94,6 +115,18 @@ pub struct XdvGlyphRenderBackend {
     /// the lookup runs during every parse_xdv of a new artifact version and
     /// each uncached miss spawns the resolver (kpsewhich).
     tfm_files: RefCell<HashMap<String, Option<Rc<Vec<u8>>>>>,
+    /// Map-file entries (tfm name -> (encoding stem, font file stem)), built
+    /// once from the dvips map files. The map is the authority on how a
+    /// classic font is re-encoded to the TeX layout AND which actual font
+    /// file carries the glyphs (replica fonts like `rm-lmr10` have no file
+    /// of their own — the map points at `lmr10.pfb` + `lm-rm.enc`).
+    map_entries: RefCell<Option<Rc<HashMap<String, (Option<String>, Option<String>)>>>>,
+    /// Per-font TeX encoding vectors (code -> glyph name), parsed from the
+    /// map-referenced .enc files. The LM math PFBs carry a MetaType1 layout
+    /// (Greek letters moved to 197+), so the AFM's charcodes do NOT match
+    /// the TeX codes the XDV uses — the map's encoding vector is the only
+    /// authoritative code -> glyph-name bridge.
+    enc_tables: RefCell<HashMap<String, Option<Rc<Vec<Option<String>>>>>>,
     glyph_cache: RefCell<HashMap<(String, u32, u32, u32, u64), Option<Rc<GrayBitmap>>>>,
     /// Decoded images keyed by (path, content hash) so an in-place image edit
     /// (same path, different bytes) re-decodes rather than serving a stale one.
@@ -176,6 +209,8 @@ impl XdvGlyphRenderBackend {
             font_files: RefCell::new(HashMap::new()),
             afm_tables: RefCell::new(HashMap::new()),
             tfm_files: RefCell::new(HashMap::new()),
+            map_entries: RefCell::new(None),
+            enc_tables: RefCell::new(HashMap::new()),
             glyph_cache: RefCell::new(HashMap::new()),
             image_cache: RefCell::new(HashMap::new()),
             parsed: RefCell::new(None),
@@ -237,6 +272,22 @@ impl XdvGlyphRenderBackend {
                     .map(Rc::new);
             }
         }
+        // Replica fonts (rm-lmr10 & friends) have no font file of their own:
+        // the dvips map names the file that carries their glyphs
+        // (`rm-lmr10 ... <lm-rm.enc <lmr10.pfb`).
+        if found.is_none() && !native {
+            let file_stem = self
+                .map_entries()
+                .get(name)
+                .and_then(|entry| entry.1.clone());
+            if let Some(file_stem) = file_stem {
+                found = self
+                    .resolver
+                    .borrow_mut()
+                    .find_font_file(&file_stem, extensions)
+                    .map(Rc::new);
+            }
+        }
         self.font_files
             .borrow_mut()
             .insert(name.to_string(), found.clone());
@@ -274,6 +325,86 @@ impl XdvGlyphRenderBackend {
             .and_then(|bytes| parse_afm_charmetrics(&bytes))
             .map(Rc::new);
         self.afm_tables
+            .borrow_mut()
+            .insert(name.to_string(), table.clone());
+        table
+    }
+
+    /// Map-file entries (tfm name -> (encoding stem, font file stem)), built
+    /// once from the dvips map files. The map is the authority on how a
+    /// classic font is re-encoded to the TeX layout (e.g. `lmmi10 ...
+    /// <lm-mathit.enc`) and which file carries the glyphs.
+    fn map_entries(&self) -> Rc<HashMap<String, (Option<String>, Option<String>)>> {
+        if let Some(cached) = self.map_entries.borrow().as_ref() {
+            return cached.clone();
+        }
+        let mut entries: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        for map_stem in ["lm", "symbols"] {
+            let Some(bytes) = self
+                .resolver
+                .borrow_mut()
+                .find_font_file(map_stem, &["map"])
+            else {
+                continue;
+            };
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('%') {
+                    continue;
+                }
+                let mut tokens = line.split_whitespace();
+                let Some(tfm) = tokens.next() else {
+                    continue;
+                };
+                let mut enc = None;
+                let mut file = None;
+                for token in tokens {
+                    if let Some(stem) = token.strip_prefix('<') {
+                        if let Some(enc_stem) = stem.strip_suffix(".enc") {
+                            enc = Some(enc_stem.to_string());
+                        } else {
+                            // Font files arrive as `lmr10.pfb`; strip the
+                            // extension — the resolver re-appends its own.
+                            let stem = stem.rsplit_once('.').map(|(base, _)| base).unwrap_or(stem);
+                            file = Some(stem.to_string());
+                        }
+                    }
+                }
+                if enc.is_some() || file.is_some() {
+                    let slot = entries.entry(tfm.to_string()).or_insert((None, None));
+                    if slot.0.is_none() {
+                        slot.0 = enc;
+                    }
+                    if slot.1.is_none() {
+                        slot.1 = file;
+                    }
+                }
+            }
+        }
+        let rc = Rc::new(entries);
+        *self.map_entries.borrow_mut() = Some(rc.clone());
+        rc
+    }
+
+    /// The font's TeX encoding vector (code -> glyph name), from the
+    /// map-referenced .enc file. `None` when the font has no map re-encode
+    /// (its built-in layout already matches TeX) or the lookup failed.
+    fn encoding_table(&self, name: &str) -> Option<Rc<Vec<Option<String>>>> {
+        if let Some(cached) = self.enc_tables.borrow().get(name) {
+            return cached.clone();
+        }
+        let table = self
+            .map_entries()
+            .get(name)
+            .and_then(|entry| entry.0.clone())
+            .and_then(|enc_stem| {
+                self.resolver
+                    .borrow_mut()
+                    .find_font_file(&enc_stem, &["enc"])
+            })
+            .and_then(|bytes| parse_enc_vector(&bytes))
+            .map(Rc::new);
+        self.enc_tables
             .borrow_mut()
             .insert(name.to_string(), table.clone());
         table
@@ -376,68 +507,91 @@ impl XdvGlyphRenderBackend {
             // and must be loaded by index. Classic TFM/Type1 fonts: `code` is
             // a CHAR CODE in the font's TeX encoding — the Type1 face only
             // exposes a synthesized UNICODE charmap (math codes have none), so
-            // map charcode -> glyph NAME via the font's AFM, then name -> gid
-            // through FT_Get_Name_Index.
+            // map charcode -> glyph NAME. Priority: the map-file .enc vector
+            // (how dvips re-encodes the font to the TeX layout — the LM math
+            // PFBs carry a MetaType1 layout whose codes differ from TeX's),
+            // then the font's AFM (fonts whose built-in layout already IS the
+            // TeX layout, e.g. msam/msbm), then the legacy charmaps.
             let glyph_index = if font.native {
                 code
             } else {
-                let afm = self.afm_table(&font.name);
-                let via_afm = afm
+                let via_enc = self
+                    .encoding_table(&font.name)
                     .as_ref()
-                    .and_then(|table| table.get(&code))
+                    .and_then(|table| table.get(code as usize).cloned())
+                    .flatten()
                     .and_then(|name| {
                         let cname = std::ffi::CString::new(name.as_str()).ok()?;
                         let gid = ft::FT_Get_Name_Index(face, cname.as_ptr());
                         (gid != 0).then_some(gid)
                     });
-                match via_afm {
-                    Some(gid) => {
-                        if code >= 12 {
-                            eprintln!(
-                                "[oxi-glyph] font={} code={} afm-hit name-gid={}",
-                                font.name, code, gid
-                            );
-                        }
-                        gid
+                if let Some(gid) = via_enc {
+                    if code >= 12 {
+                        eprintln!(
+                            "[oxi-glyph] font={} code={} enc-hit name-gid={}",
+                            font.name, code, gid
+                        );
                     }
-                    None => {
-                        // The face's default charmap is synthesized unicode;
-                        // TeX char codes are font-layout positions. Select the
-                        // legacy encodings in turn (the Type1 /Encoding maps
-                        // codes to glyph names directly) and use the first
-                        // that knows this code.
-                        let mut chosen = 0u32;
-                        for encoding in [
-                            ft::FT_ENCODING_ADOBE_CUSTOM,
-                            ft::FT_ENCODING_ADOBE_STANDARD,
-                            ft::FT_ENCODING_MS_SYMBOL,
-                        ] {
-                            if ft::FT_Select_Charmap(face, encoding) != 0 {
-                                continue;
-                            }
-                            let idx = ft::FT_Get_Char_Index(face, code);
-                            if idx != 0 {
-                                if code >= 12 {
-                                    eprintln!(
-                                        "[oxi-glyph] font={} code={} encoding={:#x} idx={}",
-                                        font.name, code, encoding, idx
-                                    );
-                                }
-                                chosen = idx;
-                                break;
-                            }
-                        }
-                        if chosen != 0 {
-                            chosen
-                        } else {
-                            ft::FT_Select_Charmap(face, ft::FT_ENCODING_ADOBE_CUSTOM);
+                    gid
+                } else {
+                    let afm = self.afm_table(&font.name);
+                    let via_afm =
+                        afm.as_ref()
+                            .and_then(|table| table.get(&code))
+                            .and_then(|name| {
+                                let cname = std::ffi::CString::new(name.as_str()).ok()?;
+                                let gid = ft::FT_Get_Name_Index(face, cname.as_ptr());
+                                (gid != 0).then_some(gid)
+                            });
+                    match via_afm {
+                        Some(gid) => {
                             if code >= 12 {
                                 eprintln!(
-                                    "[oxi-glyph] font={} code={} afm-MISS char-index=0 raw-fallback",
-                                    font.name, code
+                                    "[oxi-glyph] font={} code={} afm-hit name-gid={}",
+                                    font.name, code, gid
                                 );
                             }
-                            code
+                            gid
+                        }
+                        None => {
+                            // The face's default charmap is synthesized unicode;
+                            // TeX char codes are font-layout positions. Select the
+                            // legacy encodings in turn (the Type1 /Encoding maps
+                            // codes to glyph names directly) and use the first
+                            // that knows this code.
+                            let mut chosen = 0u32;
+                            for encoding in [
+                                ft::FT_ENCODING_ADOBE_CUSTOM,
+                                ft::FT_ENCODING_ADOBE_STANDARD,
+                                ft::FT_ENCODING_MS_SYMBOL,
+                            ] {
+                                if ft::FT_Select_Charmap(face, encoding) != 0 {
+                                    continue;
+                                }
+                                let idx = ft::FT_Get_Char_Index(face, code);
+                                if idx != 0 {
+                                    if code >= 12 {
+                                        eprintln!(
+                                            "[oxi-glyph] font={} code={} encoding={:#x} idx={}",
+                                            font.name, code, encoding, idx
+                                        );
+                                    }
+                                    chosen = idx;
+                                    break;
+                                }
+                            }
+                            if chosen != 0 {
+                                chosen
+                            } else {
+                                ft::FT_Select_Charmap(face, ft::FT_ENCODING_ADOBE_CUSTOM);
+                                if code >= 12 {
+                                    eprintln!(
+                                        "[oxi-glyph] font={} code={} afm-MISS char-index=0 raw-fallback",
+                                        font.name, code
+                                    );
+                                }
+                                code
+                            }
                         }
                     }
                 }
@@ -951,6 +1105,20 @@ impl XdvGlyphRenderBackend {
         // DVI origin: one inch from the top-left corner, y increases downward.
         let origin_px = 72.0 * scale;
 
+        if std::env::var_os("OXI_RENDER_TRACE").is_some() {
+            for element in &page_data.elements {
+                if let xdv::XdvElement::Rule {
+                    x_pt,
+                    y_pt,
+                    w_pt,
+                    h_pt,
+                } = element
+                {
+                    println!("[rule] x={x_pt:.1} y={y_pt:.1} w={w_pt:.1} h={h_pt:.1}");
+                }
+            }
+        }
+
         for element in &page_data.elements {
             match element {
                 xdv::XdvElement::Rule {
@@ -993,6 +1161,12 @@ impl XdvGlyphRenderBackend {
                     let rgba = color_rgba.or(font.color_rgba).unwrap_or(foreground_packed) | 0xff;
                     for glyph in glyphs {
                         let Some(bitmap) = self.rasterize(font, glyph.code, size_px) else {
+                            if std::env::var_os("OXI_RENDER_TRACE").is_some() {
+                                println!(
+                                    "[glyph-none] font={} code={} size_px={}",
+                                    font.name, glyph.code, size_px
+                                );
+                            }
                             continue;
                         };
                         let pen_x = (origin_px + glyph.x_pt * scale).floor() as i64;
