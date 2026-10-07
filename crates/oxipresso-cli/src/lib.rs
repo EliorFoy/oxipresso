@@ -789,6 +789,7 @@ impl OxipressoApp {
     /// write `manifest.json` + `lines.json` — the editor integrations (the
     /// VSCode extension) watch these to refresh the preview and follow the
     /// edited line.
+    #[cfg(feature = "freetype)]
     fn write_pages_out(
         &mut self,
         dir: &std::path::Path,

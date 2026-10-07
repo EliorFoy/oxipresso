@@ -647,10 +647,10 @@ impl<'a> SexpParser<'a> {
     }
 }
 
-#[cfg(test)]
 pub mod wire;
 pub use wire::{EditorWireSession, ParsedNotice, WireNotice};
 
+#[cfg(test)]
 mod tests {
     use super::*;
 

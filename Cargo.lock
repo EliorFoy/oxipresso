@@ -3676,6 +3676,7 @@ dependencies = [
 name = "oxipresso-editor-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
 ]

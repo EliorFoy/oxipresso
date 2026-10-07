@@ -9,6 +9,10 @@ name = "oxipresso"
 path = "src/main.rs"
 
 [[bin]]
+name = "oxipresso-lsp"
+path = "src/bin/oxipresso_lsp.rs"
+
+[[bin]]
 name = "oxipresso-viewer"
 path = "src/viewer.rs"
 required-features = ["gui"]
