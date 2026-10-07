@@ -1,5 +1,0 @@
-[gui] initializing (resident=1)
-[gui] initialize done
-[gui] entering eframe
-[refresh] artifact bytes 18
-[refresh] parse Err("DVI set_char before font selection")

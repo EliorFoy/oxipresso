@@ -1,8 +1,0 @@
-[gui] initializing (resident=1)
-[oxi] istack probe: regs=4798 cur@00007FF7B637DBE0 loc=1 limit=1 st=33 in_open@00007FF7B637DBDC val=0 stack@0000008000CE3590 lo=000000800041E9F0 hi=0000008000C2E9F0
-[oxi] S0 capture: regs=4792 bytes=147195995
-[gui-flow] waiting for the pass snapshot...
-[oxi] resident_park entry #1 reads=1685455
-[gui-flow] snapshot received
-[gui] initialize done
-[gui] entering eframe

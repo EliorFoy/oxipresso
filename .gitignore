@@ -12,3 +12,4 @@ Cargo.lock
 /*.synctex
 /*.aux
 /*.tar.gz
+/*.txt

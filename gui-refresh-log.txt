@@ -1,3 +1,0 @@
-[gui] initializing (resident=1)
-[gui] initialize done
-[gui] entering eframe

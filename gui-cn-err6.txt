@@ -1,9 +1,0 @@
-[gui] initializing (resident=1)
-[oxi] istack probe: regs=4797 cur@00007FF6C05EDBE0 loc=1 limit=1 st=33 in_open@00007FF6C05EDBDC val=0 stack@0000008000CF7440 lo=000000800042E3C0 hi=0000008000C3E3C0
-[oxi] S0 capture: regs=4791 bytes=147211749
-[gui-flow] waiting for the pass snapshot...
-Fontconfig error: Cannot load default config file: No such file: (null)
-[oxi] resident_park entry #1 reads=1685455
-[gui-flow] snapshot received
-[gui] initialize done
-[gui] entering eframe
