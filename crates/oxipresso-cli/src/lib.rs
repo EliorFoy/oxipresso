@@ -390,6 +390,12 @@ pub struct OxipressoApp {
     /// Canonical paths the session engine read during its latest pass — the
     /// read_files rebuild-skip set for the resident path.
     resident_read_files: Option<std::collections::HashSet<String>>,
+    /// Bytes of the last content submitted per file: the edit offset for the
+    /// next hot pass is the first difference against these (the strongest
+    /// offset at which a mid-run resume is provably sound).
+    resident_last_bytes: std::collections::HashMap<String, Vec<u8>>,
+    /// Sequence number of the last submitted edit (stale-snapshot filter).
+    resident_last_seq: u64,
     /// The freshest artifact a resident pass produced (postamble-pending
     /// until the session finishes). `current_artifact` serves it while a
     /// session is live.
@@ -466,6 +472,8 @@ impl OxipressoApp {
             resident: None,
             resident_artifact: None,
             resident_read_files: None,
+            resident_last_bytes: std::collections::HashMap::new(),
+            resident_last_seq: 0,
         }
     }
 
@@ -563,8 +571,10 @@ impl OxipressoApp {
             .map(|(_, bytes)| bytes))
     }
 
-    /// Wait for the next completed pass's snapshot (the session parks after
-    /// every pass; a 120s window covers slow first passes).
+    /// Wait for the next completed pass's snapshot whose content includes
+    /// the last submitted edit (seq-filtered: a pass that ran while the edit
+    /// was deferred delivers a stale artifact that must be dropped). The
+    /// 120s window covers slow first passes.
     fn wait_resident_snapshot(
         &mut self,
     ) -> Result<oxipresso_engine_xetex::ResidentSnapshot, String> {
@@ -573,12 +583,34 @@ impl OxipressoApp {
             .resident
             .as_ref()
             .expect("wait_resident_snapshot requires a live session");
-        let snap = session
-            .snapshots()
-            .recv_timeout(std::time::Duration::from_secs(120))
-            .map_err(|e| e.to_string());
-        eprintln!("[gui-flow] snapshot received");
-        snap
+        let last_seq = self.resident_last_seq;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err("timed out waiting for a resident pass snapshot".to_string());
+            }
+            let snap = session
+                .snapshots()
+                .recv_timeout(remaining)
+                .map_err(|e| e.to_string());
+            match snap {
+                Ok(snap) if snap.edit_seq >= last_seq => {
+                    eprintln!(
+                        "[gui-flow] snapshot received seq={} resume_cursor={}",
+                        snap.edit_seq, snap.resume_cursor
+                    );
+                    return Ok(snap);
+                }
+                Ok(snap) => {
+                    eprintln!(
+                        "[gui-flow] stale snapshot dropped seq={} < {last_seq}",
+                        snap.edit_seq
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Convert one completed pass's snapshot into editor messages and refresh
@@ -601,6 +633,19 @@ impl OxipressoApp {
         }
         if let Some(synctex) = &synctex {
             self.persist_bytes_if_requested("OXIPRESSO_SYNCTEX_OUT", &synctex.bytes)?;
+        }
+        // Debugging hook: persist EVERY output file of the pass (aux/log/
+        // out/xdv...) so an oracle run can be seeded with the exact aux the
+        // resident chain converged on (OXIPRESSO_OUTPUT_DIR=<dir>).
+        if let Ok(dir) = std::env::var("OXIPRESSO_OUTPUT_DIR")
+            && !dir.is_empty()
+        {
+            let _ = std::fs::create_dir_all(&dir);
+            for (path, bytes) in &snap.output_bytes {
+                let name = path.replace('\\', "/");
+                let name = name.rsplit('/').next().unwrap_or(&name).to_string();
+                let _ = std::fs::write(std::path::Path::new(&dir).join(name), bytes);
+            }
         }
         // Serve the freshest pass output to consumers (the GUI pulls it
         // through `current_artifact` after each handled wire line).
@@ -672,32 +717,36 @@ impl OxipressoApp {
     }
 
     /// Hot rebuild: submit the changed file's current bytes to the resident
-    /// session and wait for the pass. The fence injects the bytes into the
-    /// worker VFS, restores the S0 checkpoint, and re-typesets — no format
-    /// reload.
+    /// session with the first-difference offset against the previously
+    /// submitted content. The session absorbs the edit mid-pass when the
+    /// engine has not yet read past that offset, or fast-resumes from its
+    /// idle checkpoint fence parked at/just before it (P0) — re-typesetting
+    /// only the tail — and falls back to the S0 full replay otherwise. No
+    /// format reload either way.
     fn resident_rebuild(&mut self, path: &str) -> Result<Vec<EditorMessage>, String> {
         let bytes = self
             .root_bytes_from_vfs(path)?
             .ok_or_else(|| format!("changed file {path} is not in the editor set"))?;
         let hot_t0 = std::time::Instant::now();
-        eprintln!("[hotpass] submit {} bytes={}", path, bytes.len());
+        let offset = match self.resident_last_bytes.get(path) {
+            Some(previous) => Self::first_diff(previous, &bytes),
+            None => 0,
+        };
+        self.resident_last_bytes
+            .insert(path.to_string(), bytes.clone());
+        eprintln!(
+            "[hotpass] submit {} bytes={} offset={} at {}ms",
+            path,
+            bytes.len(),
+            offset,
+            hot_t0.elapsed().as_millis()
+        );
         {
             let session = self
                 .resident
                 .as_ref()
                 .expect("resident_rebuild needs a live session");
-            let parks = session.parks();
-            session.submit(path, bytes);
-            // Re-arm the fence so the (re)played run parks at its next
-            // non-format read — without this the pass-boundary park never
-            // fires, the pass snapshot is never sent, and every later edit
-            // stalls.
-            session.replay_again();
-            session.wait_parks(parks + 1);
-            eprintln!(
-                "[hotpass] replay+park done in {}ms",
-                (std::time::Instant::now() - hot_t0).as_millis()
-            );
+            self.resident_last_seq = session.submit(path, bytes, offset);
         }
         Ok(match self.wait_resident_snapshot() {
             Ok(snap) => self.messages_from_snapshot(snap)?,
@@ -715,6 +764,18 @@ impl OxipressoApp {
                 self.initialize_engine()?
             }
         })
+    }
+
+    /// Byte offset of the first difference between two document versions
+    /// (the length of the common prefix) — the edit offset the resident
+    /// session needs for its sound mid-run resume decision.
+    fn first_diff(previous: &[u8], current: &[u8]) -> u64 {
+        let common = previous.len().min(current.len());
+        let mut index = 0usize;
+        while index < common && previous[index] == current[index] {
+            index += 1;
+        }
+        index as u64
     }
 
     pub fn handle_editor_line(&mut self, line: &str) -> Result<Vec<EditorMessage>, String> {

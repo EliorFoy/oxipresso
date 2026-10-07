@@ -35,6 +35,11 @@ typedef struct {
   int (*close)(void *userdata, uint32_t handle);
   void (*diagnostic)(void *userdata, int severity, const uint8_t *bytes, size_t len);
   int (*fence)(void *userdata);
+  /* Fast-resume policy probe (P0): called at a firing fence BEFORE any
+   * capture. Returns 1 = capture + park here (the plain `fence` callback is
+   * then invoked for the park phase), 0 = continue (an absorbable edit was
+   * already injected by the callback, or the fence is below target). */
+  int (*fence_ex)(void *userdata, const char *path, uint64_t cursor);
 } oxi_xetex_callbacks;
 
 typedef struct {
@@ -121,6 +126,29 @@ static oxi_session *active_session = NULL;
 static int g_fence_request = 0;
 static int g_fence_park_mode = 0; /* sticky: park at every armed fence */
 static int g_fence_park_kind = 0; /* 0=mid-run fence, 1=resident pass boundary */
+
+/* ---- P0 fast-resume state ------------------------------------------------
+ * Two checkpoint buffers coexist:
+ *   g_fence_buf_s0 - the pre-start_input S0 capture, made ONCE by
+ *     oxipresso_resident_capture(); every pass-boundary replay restores it
+ *     (the proven full-replay path).
+ *   g_fence_buf    - the MID-RUN capture taken when the fence parks at the
+ *     target cursor (background replay idle state). The fast path restores
+ *     it at the SAME live fence frame (identity) and longjmps back into the
+ *     read, so only [target, EOF] is re-typeset - the in-process equivalent
+ *     of TeXpresso resuming the forked child nearest the edit.
+ * g_fence_tp_active arms the target park for ONE park; g_fence_edit_pending
+ * makes every non-format read fire the fence so an edit arriving MID-PASS is
+ * absorbed at the first read of its own file whose cursor is at/below the
+ * edit offset (consumed prefix identical => output prefix identical). */
+static uint8_t *g_fence_buf_s0 = NULL;
+static uint64_t g_fence_len_s0 = 0;
+static int32_t g_sa_root_saved_s0[8];
+static int32_t g_cur_mark_saved_s0[5];
+static volatile int g_fence_tp_active = 0;
+static char *g_fence_target_path = NULL;
+static uint64_t g_fence_target_cursor = 0;
+static volatile int g_fence_edit_pending = 0;
 static int g_resident_enabled = 0;
 /* Observability for the pass loop (hang triage): parks completed and
  * non-format reads performed, cumulative while resident mode is on. */
@@ -195,6 +223,31 @@ void oxipresso_xetex_request_fence_park(void) {
  * checkpoints+replays again at its next non-format read. One arm = one
  * park; call again to chain further edits into the same run. */
 void oxipresso_xetex_arm_fence_replay(void) { g_fence_request = 1; }
+
+/* P0 fast-resume controls. The target names the file whose reads may park
+ * (the edited file) and the cursor the edit is expected at or after; the
+ * controller sets both before commanding a background replay. */
+static char *oxi_dup_cstr(const char *s) {
+  if (s == NULL) {
+    return NULL;
+  }
+  size_t n = strlen(s) + 1;
+  char *copy = (char *)malloc(n);
+  if (copy != NULL) {
+    memcpy(copy, s, n);
+  }
+  return copy;
+}
+
+void oxipresso_xetex_set_fence_target(const char *path, uint64_t cursor) {
+  free(g_fence_target_path);
+  g_fence_target_path = oxi_dup_cstr(path);
+  g_fence_target_cursor = cursor;
+}
+
+void oxipresso_xetex_set_edit_pending(int pending) {
+  g_fence_edit_pending = pending;
+}
 
 void oxipresso_xetex_request_fence_snapshot(void) {
   g_fence_request = 1;
@@ -663,6 +716,64 @@ ssize_t ttstub_input_read(rust_input_handle_t handle, char *data, size_t len) {
    * round-trip armed (b1): setjmp, capture, longjmp back into this same live
    * frame, fall through to the read. The cursor has not advanced when
    * longjmp fires, so no bytes are skipped or doubled. */
+  /* P0 fast-resume fence: fires when a target park is armed (the idle-state
+   * checkpoint at the expected edit position) or when an edit is pending
+   * mid-pass (absorption). The Rust policy callback decides: absorb an
+   * editable read (inject + continue, NO capture), skip (the pending edit
+   * belongs to another file), or park (capture + block at this exact read;
+   * the edit then fast-resumes via restore+longjmp or defers to the next
+   * pass boundary). */
+  if (g_resident_enabled && handle->path &&
+      !(active_session->format_path &&
+        strcmp(handle->path, active_session->format_path) == 0) &&
+      (g_fence_tp_active || g_fence_edit_pending)) {
+    const int is_target =
+        g_fence_target_path != NULL &&
+        strcmp(handle->path, g_fence_target_path) == 0;
+    int fire = g_fence_edit_pending ||
+               (g_fence_tp_active && is_target &&
+                handle->cursor >= g_fence_target_cursor);
+    if (fire) {
+      int was_pending = g_fence_edit_pending;
+      int policy = 1;
+      if (active_session->callbacks->fence_ex) {
+        policy = active_session->callbacks->fence_ex(
+            active_session->callbacks->userdata, handle->path,
+            (uint64_t)handle->cursor);
+      }
+      if (policy == 0 && was_pending && !g_fence_edit_pending) {
+        /* The edit was ABSORBED into this live pass (the callback injected
+         * the new buffer and cleared the pending flag). The pass is no
+         * longer a speculative background replay: it carries the edit and
+         * must run to completion to deliver its artifact — leaving the
+         * target arm active would park it at the target cursor and
+         * deadlock the waiting controller. */
+        g_fence_tp_active = 0;
+      }
+      if (policy == 1) {
+        g_fence_tp_active = 0; /* one park per arm */
+        int jr = setjmp(g_fence_jmp);
+        if (jr == 0) {
+          oxi_fence_capture();
+          g_fence_park_kind = 0;
+          int cmd = 0;
+          if (active_session->callbacks->fence) {
+            cmd = active_session->callbacks->fence(
+                active_session->callbacks->userdata);
+          }
+          if (cmd == 2) {
+            if (oxi_fence_restore(0) == 0) {
+              longjmp(g_fence_jmp, 2); /* fast resume at this very fence */
+            }
+          }
+          /* cmd 3 (continue old content / finish) or a refused restore:
+           * fall through and keep reading the current buffer. */
+        } else {
+          g_fence_restore_fired++;
+        }
+      }
+    }
+  }
   if (g_fence_request && handle->path &&
       !(active_session->format_path &&
         strcmp(handle->path, active_session->format_path) == 0)) {
@@ -967,6 +1078,28 @@ static void oxi_fence_capture(void) {
   g_fence_len = need;
 }
 
+/* S0 variant: captures into the dedicated pre-document buffer so a later
+ * mid-run capture cannot supersede the pass-boundary replay checkpoint.
+ * The mark state is kept per-buffer (a mid-run capture must not overwrite
+ * the S0 marks the boundary restore needs). */
+static void oxi_fence_capture_s0(void) {
+  free(g_fence_buf_s0);
+  g_fence_buf_s0 = NULL;
+  g_fence_len_s0 = 0;
+  memcpy(g_sa_root_saved_s0, sa_root, sizeof(g_sa_root_saved_s0));
+  memcpy(g_cur_mark_saved_s0, cur_mark, sizeof(g_cur_mark_saved_s0));
+  uint64_t sizes[5];
+  const void *bases[5];
+  uint64_t need = oxi_snap_sizes(sizes, bases);
+  uint8_t *buf = (uint8_t *)malloc((size_t)need);
+  if (buf == NULL) {
+    return;
+  }
+  oxi_fill_snapshot(buf, sizes, bases);
+  g_fence_buf_s0 = buf;
+  g_fence_len_s0 = need;
+}
+
 /* Copy the captured bytes back over the pools they were captured from.
  * The engine is frozen inside the fence callback, so the live pool bases
  * must be non-NULL and no pool may have SHRUNK below its captured size;
@@ -977,15 +1110,15 @@ static void oxi_fence_capture(void) {
  * captured prefix plus the header cursors reproduces the exact captured
  * state - unreachable later bytes simply stay dead. */
 static int oxi_fence_restore(int allow_grow) {
-  memcpy(sa_root, g_sa_root_saved, sizeof(g_sa_root_saved));
-  memcpy(cur_mark, g_cur_mark_saved, sizeof(g_cur_mark_saved));
-  uint64_t sizes[5];
-  const void *bases[5];
-  uint64_t need = oxi_snap_sizes(sizes, bases);
   if (!g_fence_buf) {
     return -1;
   }
-  const uint64_t *hdr = (const uint64_t *)g_fence_buf;
+  const uint8_t *buf = g_fence_buf;
+  const uint64_t len = g_fence_len;
+  uint64_t sizes[5];
+  const void *bases[5];
+  uint64_t need = oxi_snap_sizes(sizes, bases);
+  const uint64_t *hdr = (const uint64_t *)buf;
   uint64_t total = 12 * (uint64_t)sizeof(uint64_t);
   for (int i = 0; i < 5; i++) {
     if (allow_grow) {
@@ -997,9 +1130,11 @@ static int oxi_fence_restore(int allow_grow) {
     }
     total += hdr[i];
   }
-  if (g_fence_len != total) {
+  if (len != total) {
     return -1; /* buffer must be exactly header + captured blocks */
   }
+  memcpy(sa_root, g_sa_root_saved, sizeof(g_sa_root_saved));
+  memcpy(cur_mark, g_cur_mark_saved, sizeof(g_cur_mark_saved));
   /* Restore the bump cursors (hdr slots 6 and 8..11; slots 5/7 are the
    * retired eqtb pair). Inside a frozen mid-run window these are already
    * the captured values; across a completed pass they are far ahead and
@@ -1009,7 +1144,51 @@ static int oxi_fence_restore(int allow_grow) {
   pool_ptr = (pool_pointer)hdr[9];
   save_ptr = (int32_t)hdr[10];
   fmem_ptr = (font_index)hdr[11];
-  const uint8_t *p = g_fence_buf + 12 * (uint64_t)sizeof(uint64_t);
+  const uint8_t *p = buf + 12 * (uint64_t)sizeof(uint64_t);
+  for (int i = 0; i < 5; i++) {
+    if (hdr[i] != 0) {
+      memcpy((void *)bases[i], p, hdr[i]);
+      p += hdr[i];
+    }
+  }
+  return 0;
+}
+
+/* Pass-boundary variant: restores the S0 capture (pre-start_input state)
+ * plus ITS OWN mark snapshot, so a later mid-run capture can never poison
+ * the boundary replay. */
+static int oxi_fence_restore_s0(int allow_grow) {
+  if (!g_fence_buf_s0) {
+    return -1;
+  }
+  const uint8_t *buf = g_fence_buf_s0;
+  const uint64_t len = g_fence_len_s0;
+  uint64_t sizes[5];
+  const void *bases[5];
+  uint64_t need = oxi_snap_sizes(sizes, bases);
+  const uint64_t *hdr = (const uint64_t *)buf;
+  uint64_t total = 12 * (uint64_t)sizeof(uint64_t);
+  for (int i = 0; i < 5; i++) {
+    if (allow_grow) {
+      if (hdr[i] > sizes[i]) {
+        return -1;
+      }
+    } else if (hdr[i] != sizes[i]) {
+      return -1;
+    }
+    total += hdr[i];
+  }
+  if (len != total) {
+    return -1;
+  }
+  memcpy(sa_root, g_sa_root_saved_s0, sizeof(g_sa_root_saved_s0));
+  memcpy(cur_mark, g_cur_mark_saved_s0, sizeof(g_cur_mark_saved_s0));
+  mem_end = (int32_t)hdr[6];
+  str_ptr = (str_number)hdr[8];
+  pool_ptr = (pool_pointer)hdr[9];
+  save_ptr = (int32_t)hdr[10];
+  fmem_ptr = (font_index)hdr[11];
+  const uint8_t *p = buf + 12 * (uint64_t)sizeof(uint64_t);
   for (int i = 0; i < 5; i++) {
     if (hdr[i] != 0) {
       memcpy((void *)bases[i], p, hdr[i]);
@@ -1169,6 +1348,8 @@ void oxipresso_xetex_disable_resident_passes(void) {
   g_resident_enabled = 0;
   g_fence_request = 0;
   g_fence_park_mode = 0;
+  g_fence_tp_active = 0;
+  g_fence_edit_pending = 0;
 }
 
 uint64_t oxipresso_xetex_fence_park_kind(void) {
@@ -1563,7 +1744,7 @@ void oxipresso_resident_capture(void) {
           (void *)g_stack_hi);
   fflush(stderr);
   oxi_scalars_capture();
-  oxi_fence_capture();
+  oxi_fence_capture_s0();
   g_fence_park_kind = 1;
   if (active_session->callbacks->fence) {
     int cmd = active_session->callbacks->fence(
@@ -1573,7 +1754,7 @@ void oxipresso_resident_capture(void) {
      * same way pass-2 does, the restore itself is unfaithful - localizing
      * the bug to restore fidelity instead of pass-1 mutations. */
     if (cmd == 2) {
-      if (oxi_fence_restore(1) != 0 || oxi_scalars_restore() != 0) {
+      if (oxi_fence_restore_s0(1) != 0 || oxi_scalars_restore() != 0) {
         fprintf(stderr, "[oxi] park-1 restore FAILED\n");
         fflush(stderr);
       }
@@ -1595,7 +1776,16 @@ int oxipresso_resident_park(void) {
   int cmd = active_session->callbacks->fence(
       active_session->callbacks->userdata);
   g_fence_park_kind = 0;
-  if (cmd == 2 && oxi_fence_restore(1) == 0 && oxi_scalars_restore() == 0) {
+  if ((cmd == 2 || cmd == 5) && oxi_fence_restore_s0(1) == 0 &&
+      oxi_scalars_restore() == 0) {
+    if (cmd == 5) {
+      /* Background replay: re-run the pass purely to reach the target
+       * fence and park there as the idle checkpoint. The mid-run fence
+       * parks at the first target-file read at/beyond the target cursor;
+       * the pass is speculative (same content as the artifact already
+       * shipped) and never reaches its own boundary while parked. */
+      g_fence_tp_active = 1;
+    }
     return 1;
   }
   g_resident_enabled = 0; /* finish/timeout/mismatch: normal single-run mode */

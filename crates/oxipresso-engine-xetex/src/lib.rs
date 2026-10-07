@@ -37,8 +37,19 @@ static ENGINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub struct FenceControl {
     parked: std::sync::atomic::AtomicBool,
     parks: std::sync::atomic::AtomicUsize,
-    msg: std::sync::Mutex<Option<FenceMsg>>,
+    /// Queued controller commands. A VecDeque (not a single slot) because
+    /// every edit must be consumed IN ORDER — each edit's byte offset is
+    /// computed against the previous edit's content, so superseding an
+    /// unconsumed edit would corrupt the offset chain.
+    msg: std::sync::Mutex<std::collections::VecDeque<FenceMsg>>,
     condvar: std::sync::Condvar,
+    /// Sequence number stamped onto each submitted edit; snapshots carry the
+    /// seq of the last edit they consumed so stale passes can be dropped.
+    seq: std::sync::atomic::AtomicU64,
+    /// Sticky finish: a Finish consumed at a MID-RUN park lets the pass
+    /// complete, and the next pass-boundary park must then exit the pass
+    /// loop instead of waiting for a command that will never come.
+    finish_requested: std::sync::atomic::AtomicBool,
     /// Mirror lengths at the FIRST park of a resident session (pre-pass-1):
     /// pass-boundary replays restore pools to S0, so output streams must
     /// roll back to the same moment, not to the per-park capture.
@@ -47,7 +58,15 @@ pub struct FenceControl {
 
 #[derive(Debug)]
 enum FenceMsg {
-    Edit(String, Vec<u8>),
+    Edit {
+        path: String,
+        bytes: Vec<u8>,
+        /// Byte offset of the first difference against the content the
+        /// engine last adopted; reads at/before it are provably identical,
+        /// so a mid-run resume from a fence at/before this offset is sound.
+        offset: u64,
+        seq: u64,
+    },
     Finish,
 }
 
@@ -71,6 +90,14 @@ pub struct ResidentSnapshot {
     /// file outside this set cannot affect the output, so the hot pass can
     /// be skipped entirely.
     pub read_files: Vec<String>,
+    /// Sequence number of the last edit this pass consumed. A snapshot with
+    /// `edit_seq < last_submit_seq` is a stale pass (the edit was deferred;
+    /// its content is not in this artifact) and must be dropped by consumers.
+    pub edit_seq: u64,
+    /// When > 0: this pass resumed from a mid-run checkpoint fence at this
+    /// byte offset of the edited file (the fast path) instead of replaying
+    /// from S0. Observability for latency triage.
+    pub resume_cursor: u64,
 }
 
 impl ResidentSnapshot {
@@ -133,12 +160,20 @@ impl FenceControl {
     /// cleanup (final_cleanup + close_files) and the initialize call returns
     /// with the last completed pass's artifact.
     pub fn finish(&self) {
+        self.finish_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut msg = self
             .msg
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *msg = Some(FenceMsg::Finish);
+        msg.push_back(FenceMsg::Finish);
         self.condvar.notify_all();
+    }
+
+    /// Whether [`finish`](Self::finish) was requested (sticky).
+    fn is_finish_requested(&self) -> bool {
+        self.finish_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Spin until the engine parks (or ~30s elapse); returns the parked state.
@@ -152,15 +187,80 @@ impl FenceControl {
         self.is_parked()
     }
 
-    /// Hand edited bytes to the parked engine (it applies them and asks the
-    /// shim to restore the checkpoint and replay the run).
-    pub fn submit_edit(&self, path: &str, bytes: Vec<u8>) {
+    /// Hand edited bytes to the engine (it applies them at the next fence
+    /// or park and resumes from the nearest legal checkpoint). Returns the
+    /// edit's sequence number for stale-snapshot filtering.
+    pub fn submit_edit(&self, path: &str, bytes: Vec<u8>, offset: u64) -> u64 {
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if XetexEngine::real_mode() {
+            // Mid-pass absorption: while this flag is set, non-format reads
+            // fire the fence so the edit can be injected at a read whose
+            // cursor is at/below the edit offset.
+            unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_set_edit_pending(1) };
+        }
         let mut msg = self
             .msg
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *msg = Some(FenceMsg::Edit(path.to_string(), bytes));
+        msg.push_back(FenceMsg::Edit {
+            path: path.to_string(),
+            bytes,
+            offset,
+            seq,
+        });
         self.condvar.notify_all();
+        seq
+    }
+
+    /// Pop the next queued command without blocking, if any.
+    fn try_pop(&self) -> Option<FenceMsg> {
+        self.msg
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+    }
+
+    /// Pop the next queued command (blocks until one arrives).
+    fn wait_msg(&self) -> FenceMsg {
+        let mut msg = self
+            .msg
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(next) = msg.pop_front() {
+                return next;
+            }
+            let (guard, _) = self
+                .condvar
+                .wait_timeout(msg, std::time::Duration::from_millis(200))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            msg = guard;
+        }
+    }
+
+    /// Peek without consuming: Some when an Edit is queued.
+    fn peek_edit(&self) -> bool {
+        self.msg
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|m| matches!(m, FenceMsg::Edit { .. }))
+    }
+
+    /// Re-queue a command at the front (a mid-run park that deferred the
+    /// edit to the next pass boundary).
+    fn push_front_msg(&self, message: FenceMsg) {
+        self.msg
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_front(message);
+    }
+
+    /// Clear the C-side pending flag once the queued edit is consumed.
+    fn clear_pending(&self) {
+        if XetexEngine::real_mode() {
+            unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_set_edit_pending(0) };
+        }
     }
 }
 
@@ -197,10 +297,19 @@ pub struct ResidentSession {
 }
 
 impl ResidentSession {
-    /// Submit edited bytes for `path`: the parked engine injects them into
-    /// its I/O, restores the checkpoint, and re-typesets (one hot pass).
-    pub fn submit(&self, path: &str, bytes: Vec<u8>) {
-        self.control.submit_edit(path, bytes);
+    /// Submit edited bytes for `path` together with the byte offset of the
+    /// first difference against the content the engine last adopted. The
+    /// engine absorbs the edit mid-pass when a read of that file is still at
+    /// or before the offset (only identical bytes were consumed), or resumes
+    /// from the idle checkpoint fence parked at/just before it — re-typesetting
+    /// only the tail. Returns the edit's sequence number.
+    pub fn submit(&self, path: &str, bytes: Vec<u8>, offset: u64) -> u64 {
+        self.control.submit_edit(path, bytes, offset)
+    }
+
+    /// Sequence number of the most recently submitted edit.
+    pub fn last_submit_seq(&self) -> u64 {
+        self.control.seq.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Tear the resident fence down after the session died (see
@@ -658,6 +767,14 @@ impl XetexEngine {
             resident_snapshots: self.resident_snapshots.clone(),
             resident_park_index: 0,
             resident_boundary_sent: false,
+            last_edit_path: String::new(),
+            last_edit_offset: 0,
+            pass_was_edit: false,
+            edit_seq: 0,
+            deferred: None,
+            fence_cursor: std::cell::Cell::new(0),
+            fence_path: std::cell::RefCell::new(String::new()),
+            resume_cursor: std::cell::Cell::new(0),
         };
         let callbacks = OxiXetexCallbacks {
             userdata: (&mut callback_state as *mut CallbackState<'_>).cast::<c_void>(),
@@ -671,6 +788,7 @@ impl XetexEngine {
             close: Some(callback_close),
             diagnostic: Some(callback_diagnostic),
             fence: Some(callback_fence),
+            fence_ex: Some(callback_fence_ex),
         };
         let mut result = OxiXetexResult::default();
         let status = unsafe { oxipresso_xetex_run(&config, &callbacks, &mut result) };
@@ -721,6 +839,8 @@ impl XetexEngine {
                     diagnostics: self.diagnostics.clone(),
                     io_events,
                     read_files: self.read_files.iter().cloned().collect(),
+                    edit_seq: state.edit_seq,
+                    resume_cursor: state.resume_cursor.get(),
                 });
                 state.resident_boundary_sent = true;
             }
@@ -821,6 +941,29 @@ struct CallbackState<'a> {
     /// identical to the non-resident flow's init drain).
     resident_park_index: usize,
     resident_boundary_sent: bool,
+    // ---- P0 fast-resume state ------------------------------------------------
+    /// Path + first-diff offset of the last consumed edit; becomes the fence
+    /// target for the next background replay (the idle checkpoint position).
+    last_edit_path: String,
+    last_edit_offset: u64,
+    /// True when the just-completed pass was woken by an edit (a background
+    /// replay must follow to re-establish the idle checkpoint; a completed
+    /// background replay must not chain another one).
+    pass_was_edit: bool,
+    /// Seq of the last consumed edit, stamped onto snapshots for stale-drop.
+    edit_seq: u64,
+    /// An edit that could not be applied mid-run (the engine had already
+    /// read past its offset) — delivered at the next pass boundary instead.
+    deferred: Option<FenceMsg>,
+    /// Cursor of the fence currently being parked at (recorded by the
+    /// policy probe, consumed by the park callback's fast/slow decision).
+    fence_cursor: std::cell::Cell<u64>,
+    /// Path of the file whose read is parked at the fence — the fast path
+    /// is only sound for an edit to THIS file (a cross-file edit needs the
+    /// conservative full replay: its own consumed prefix is unknown here).
+    fence_path: std::cell::RefCell<String>,
+    /// Cursor of the last FAST resume, surfaced on the next snapshot.
+    resume_cursor: std::cell::Cell<u64>,
 }
 
 /// Mirror state captured at a checkpoint fence so a replay can roll the
@@ -1080,12 +1223,113 @@ unsafe extern "C" fn callback_diagnostic(
     });
 }
 
+/// P0 fast-resume policy probe, called by the shim at every firing fence
+/// BEFORE any capture. Runs ON the engine thread inside the (about to be
+/// parked) read. Decides:
+///   * absorb — an edit queued for THIS file whose offset is at/after the
+///     read cursor: the consumed prefix is byte-identical, so the new buffer
+///     is injected mid-run and the pass just continues (no capture, no
+///     rewind, no re-typeset of anything) — return 0;
+///   * skip — an edit queued for ANOTHER file (its own reads will fire the
+///     fence later) — return 0;
+///   * park — no absorbable edit: capture + block here as the idle
+///     checkpoint (return 1; the shim then calls [`callback_fence`]).
+unsafe extern "C" fn callback_fence_ex(
+    userdata: *mut c_void,
+    path: *const c_char,
+    cursor: u64,
+) -> c_int {
+    let control = FENCE_CONTROL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let Some(control) = control else {
+        return 1;
+    };
+    let Some(state) = callback_state(userdata) else {
+        return 1;
+    };
+    state.fence_cursor.set(cursor);
+    let read_path = if path.is_null() {
+        String::new()
+    } else {
+        unsafe {
+            std::ffi::CStr::from_ptr(path)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    state.fence_path.borrow_mut().clone_from(&read_path);
+    if !control.peek_edit() {
+        // No edit queued: the shim fired the target gate — park here.
+        return 1;
+    }
+    let Some(message) = control.try_pop() else {
+        return 1;
+    };
+    let FenceMsg::Edit {
+        path: edit_path,
+        bytes,
+        offset,
+        seq,
+    } = message
+    else {
+        // A Finish raced in; re-queue and let the park phase handle it.
+        control.push_front_msg(message);
+        return 1;
+    };
+    let same_file = path_key(&edit_path) == path_key(&read_path);
+    if same_file && cursor <= offset {
+        control.clear_pending();
+        if state.io.inject_editor(&edit_path, bytes.clone()) {
+            state.edit_seq = seq;
+            state.last_edit_path = edit_path;
+            state.last_edit_offset = offset;
+            state.pass_was_edit = true;
+            eprintln!("[fence] absorbed edit seq={seq} at cursor={cursor} offset={offset}");
+            return 0;
+        }
+        // Inject failed: park and let the boundary path surface the error.
+        state.deferred = Some(FenceMsg::Edit {
+            path: edit_path,
+            bytes,
+            offset,
+            seq,
+        });
+        return 1;
+    }
+    if same_file {
+        // This file's changed bytes were already consumed mid-run: no sound
+        // resume at this fence. Park, then continue the pass unmodified and
+        // defer the edit to the next pass boundary (its artifact is stale
+        // and gets dropped by seq).
+        control.push_front_msg(FenceMsg::Edit {
+            path: edit_path,
+            bytes,
+            offset,
+            seq,
+        });
+        return 1;
+    }
+    // A different file's edit: maybe absorbable at one of its own reads.
+    control.push_front_msg(FenceMsg::Edit {
+        path: edit_path,
+        bytes,
+        offset,
+        seq,
+    });
+    0
+}
+
 /// Checkpoint fence controller callback (increment b2-loop). Runs ON the
 /// engine thread while its read is parked: signals `parked`, blocks until the
 /// controller submits an edited buffer (bounded 60s so a wedged controller
 /// can never hang CI — timeout continues unmodified), applies the edit through
 /// its own `&mut EngineIo` borrow (the same legal path every other callback
-/// uses), then asks the shim to restore+replay (2) or continue (3).
+/// uses), then asks the shim to restore+replay (2) or continue (3). At a
+/// pass-boundary park it additionally sends the completed pass's snapshot
+/// and self-issues the background replay that re-establishes the idle
+/// checkpoint at the last edit position (P0 fast-resume).
 unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     let control = FENCE_CONTROL
         .lock()
@@ -1101,6 +1345,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     // replay re-appends exactly these streams after the rollback below.
     let lens = state.capture_fence_lens();
     let kind = unsafe { oxipresso_engine_xetex_sys::oxipresso_xetex_fence_park_kind() };
+    let fence_cursor = state.fence_cursor.get();
 
     // Per-pass outcome snapshot (P0.3): at a resident pass-boundary park the
     // mirrors hold exactly the completed pass's output (every earlier pass
@@ -1124,12 +1369,16 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
                 || !io_events.is_empty()
                 || state.output_bytes.values().any(|bytes| !bytes.is_empty());
             if has_output {
+                let resume_cursor = state.resume_cursor.get();
+                state.resume_cursor.set(0);
                 let _ = sender.send(ResidentSnapshot {
                     output_events: state.output_events.clone(),
                     output_bytes: state.output_bytes.clone(),
                     diagnostics: state.diagnostics.clone(),
                     io_events,
                     read_files,
+                    edit_seq: state.edit_seq,
+                    resume_cursor,
                 });
             }
         }
@@ -1137,52 +1386,103 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
     control
         .parks
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    if kind == 1 {
+        // Sticky finish — but only once every queued edit has been served:
+        // a finish() racing ahead of the engine must still let the queued
+        // edits run (drain-then-finish), or their passes would be skipped
+        // and the session would end on a stale artifact.
+        if control.is_finish_requested() && !control.peek_edit() && state.deferred.is_none() {
+            return 3;
+        }
+        // An edit parked mid-run ahead of the engine's read position is
+        // deliverable here: the boundary restores S0 and replays fully.
+        if let Some(edit) = state.deferred.take() {
+            control.push_front_msg(edit);
+        }
+        // After an EDIT pass, re-establish the idle checkpoint: command the
+        // host to restore S0 and re-run the pass as a BACKGROUND replay that
+        // parks at the fence at/before the last edit position. The next edit
+        // then fast-resumes from there instead of replaying the whole
+        // document. A completed background pass (target never reached) does
+        // NOT chain another one.
+        if state.pass_was_edit && !control.peek_edit() && !state.last_edit_path.is_empty() {
+            state.pass_was_edit = false;
+            let target = CString::new(state.last_edit_path.clone()).unwrap_or_default();
+            unsafe {
+                oxipresso_engine_xetex_sys::oxipresso_xetex_set_fence_target(
+                    target.as_ptr(),
+                    state.last_edit_offset,
+                );
+            }
+            eprintln!(
+                "[fence] background replay armed: target={} offset={}",
+                state.last_edit_path, state.last_edit_offset
+            );
+            return 5;
+        }
+    }
+
     control
         .parked
         .store(true, std::sync::atomic::Ordering::SeqCst);
-
     // Park INDEFINITELY for the controller's message — TeXpresso's fence
     // semantics: the editor drives the parked engine, and a parked engine
     // with no pending edit is the normal idle state between passes. (A
     // deadline here consumed the fence mid-typing and left the run without
     // a boundary park, so the pass snapshot was never sent.)
-    let mut pending = control
-        .msg
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    while pending.is_none() {
-        let (guard, _) = control
-            .condvar
-            .wait_timeout(pending, std::time::Duration::from_millis(200))
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        pending = guard;
-    }
+    let message = control.wait_msg();
     control
         .parked
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    match pending.take() {
-        Some(FenceMsg::Edit(path, bytes)) => {
-            if state.io.inject_editor(&path, bytes) {
-                // Resident pass-boundary parks restore S0 (pre-pass-1), so
-                // the mirrors must roll back to that same moment; mid-run
-                // fence parks restore their own capture point.
-                let target = if kind == 1 {
-                    let mut base = control
-                        .base_lens
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    base.get_or_insert_with(|| lens.clone()).clone()
-                } else {
-                    lens
-                };
-                state.rollback_to_fence(&target);
-                2
-            } else {
-                3
+    match message {
+        FenceMsg::Edit {
+            path,
+            bytes,
+            offset,
+            seq,
+        } => {
+            control.clear_pending();
+            state.edit_seq = seq;
+            state.last_edit_path = path.clone();
+            state.last_edit_offset = offset;
+            state.pass_was_edit = true;
+            if !state.io.inject_editor(&path, bytes) {
+                eprintln!("[fence] edit inject failed for {path}");
+                return 3;
             }
+            if kind == 0
+                && path_key(&path) == state.fence_path.borrow().as_str()
+                && offset >= fence_cursor
+            {
+                // FAST PATH: the consumed prefix is byte-identical, so
+                // restore this fence's own capture and longjmp back into
+                // the read — only [cursor, EOF] is re-typeset. Mirrors roll
+                // back to the fence: everything before it is the identical
+                // prefix, everything after is re-appended by the replay.
+                state.resume_cursor.set(fence_cursor);
+                eprintln!("[fence] fast resume seq={seq} cursor={fence_cursor} offset={offset}");
+                state.rollback_to_fence(&lens);
+                return 2;
+            }
+            // Pass boundary (kind 1), a cross-file edit at a mid-run park,
+            // or an edit already read past at this fence: the restore is
+            // the S0 checkpoint and the host re-runs start_input +
+            // main_control — the full-replay path. Mirrors roll back to
+            // the S0 lens.
+            let base = control
+                .base_lens
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_or_insert_with(|| lens.clone())
+                .clone();
+            state.rollback_to_fence(&base);
+            2
         }
-        Some(FenceMsg::Finish) => 3,
-        None => 3,
+        FenceMsg::Finish => {
+            control.clear_pending();
+            3
+        }
     }
 }
 
@@ -1209,6 +1509,20 @@ fn path_key(path: &str) -> String {
         Some(rest) => rest.to_string(),
         None => normalized,
     }
+}
+
+/// Byte offset of the first difference between two document versions (the
+/// length of the common prefix). This is the strongest offset at which a
+/// mid-run resume is provably sound: every byte before it is identical in
+/// both versions, so reads at/before it are unaffected by the edit.
+#[cfg(test)]
+fn first_diff(previous: &[u8], current: &[u8]) -> u64 {
+    let common = previous.len().min(current.len());
+    let mut index = 0usize;
+    while index < common && previous[index] == current[index] {
+        index += 1;
+    }
+    index as u64
 }
 
 fn callback_file_kind(kind: c_int) -> FileKind {
@@ -2034,7 +2348,7 @@ mod tests {
                 (bytes, merge_events(&mut engine))
             });
             assert!(control.wait_parked(), "engine must park at the fence");
-            control.submit_edit("simple.tex", edited.clone());
+            control.submit_edit("simple.tex", edited.clone(), 0);
             worker.join().expect("engine worker must not panic")
         });
         let (resumed, resumed_mirrors) = resumed;
@@ -2131,11 +2445,11 @@ mod tests {
             });
             // Cycle 1: park at the first non-format read; submit; replay.
             assert!(control.wait_parks(1), "engine must park at fence #1");
-            control.submit_edit("simple.tex", final_doc.clone());
+            control.submit_edit("simple.tex", final_doc.clone(), 0);
             control.replay_again();
             // Cycle 2: the replaying run parks at its next read.
             assert!(control.wait_parks(2), "engine must park at fence #2");
-            control.submit_edit("simple.tex", final_doc.clone());
+            control.submit_edit("simple.tex", final_doc.clone(), 0);
             // No re-arm: the run completes from checkpoint #2.
             worker.join().expect("engine worker must not panic")
         });
@@ -2256,13 +2570,13 @@ mod tests {
                 }
             });
             // Park 1: before pass 1 (S0). Inject edit1 - pass 1 typesets it.
-            assert!(control.wait_parks(1), "must park before pass 1");
-            control.submit_edit("simple.tex", edit1.clone());
-            // Park 2: pass 1 done. Submit edit2 - S0 restore + fresh pass 2.
-            assert!(control.wait_parks(2), "must park after pass 1");
-            control.submit_edit("simple.tex", edit2.clone());
-            // Park 3: pass 2 done. Finish: normal cleanup, initialize returns.
-            assert!(control.wait_parks(3), "must park after pass 2");
+            // Snapshot 1 arrives when pass 1 completes. Edit2 is queued right
+            // away: the boundary park delivers it (full S0 replay) or, if the
+            // self-issued background replay parked at edit1's offset first,
+            // the mid-run fence fast-resumes. Both are oracle-checked below.
+            control.submit_edit("simple.tex", edit1.clone(), first_diff(&original, &edit1));
+            control.submit_edit("simple.tex", edit2.clone(), first_diff(&edit1, &edit2));
+            // Finish: normal cleanup, initialize returns.
             control.finish();
             worker.join().expect("resident worker must not panic")
         });
@@ -2391,26 +2705,39 @@ mod tests {
         };
         // Park 1: the S0 capture. Pass 1 typesets the first edited document
         // (the inject happens at the capture park). Then each further edit
-        // is one hot pass; the delta is the per-pass cost.
-        assert!(session.wait_parks(1), "park before pass 1");
+        // is one hot pass; the delta is the per-pass cost. Edits after the
+        // first fast-resume from the idle checkpoint parked at the previous
+        // edit's offset (P0) — the resume_cursor on the snapshot records it.
+        let mut previous = original.clone();
         for (k, edit) in edits.iter().enumerate() {
-            session.submit("simple.tex", edit.clone());
-            assert!(session.wait_parks(k + 2), "park after hot pass {k}");
-            let snap = session
+            let offset = first_diff(&previous, edit);
+            previous = edit.clone();
+            let seq = session.submit("simple.tex", edit.clone(), offset);
+            let mut snap = session
                 .snapshots()
                 .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("snapshot per hot pass");
+            // A deferred/background pass can deliver a stale artifact before
+            // the edit's own pass; keep waiting until this edit is consumed.
+            while snap.edit_seq < seq {
+                snap = session
+                    .snapshots()
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("snapshot per hot pass");
+            }
             let xdv = snap
                 .output_bytes
                 .get("simple.xdv")
                 .expect("hot pass snapshot carries the XDV");
             let now = std::time::Instant::now();
             eprintln!(
-                "[hot-reload] pass {}: {:?} (delta {:?}), {} XDV bytes",
+                "[hot-reload] pass {}: {:?} (delta {:?}), {} XDV bytes, resume_cursor={} seq={}",
                 k + 1,
                 now.duration_since(session_started),
                 now.duration_since(last_mark),
-                xdv.len()
+                xdv.len(),
+                snap.resume_cursor,
+                snap.edit_seq
             );
             last_mark = now;
         }
@@ -2450,6 +2777,14 @@ mod tests {
             resident_snapshots: None,
             resident_park_index: 0,
             resident_boundary_sent: false,
+            last_edit_path: String::new(),
+            last_edit_offset: 0,
+            pass_was_edit: false,
+            edit_seq: 0,
+            deferred: None,
+            fence_cursor: std::cell::Cell::new(0),
+            fence_path: std::cell::RefCell::new(String::new()),
+            resume_cursor: std::cell::Cell::new(0),
         };
         state
             .output_bytes

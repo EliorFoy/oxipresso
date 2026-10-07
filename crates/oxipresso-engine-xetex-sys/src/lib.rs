@@ -71,6 +71,11 @@ pub struct OxiXetexCallbacks {
     pub close: CloseCallback,
     pub diagnostic: DiagnosticCallback,
     pub fence: Option<unsafe extern "C" fn(userdata: *mut c_void) -> c_int>,
+    /// P0 fast-resume policy probe: called at a firing fence before any
+    /// capture. 1 = capture + park here, 0 = continue (absorbed or skip).
+    pub fence_ex: Option<
+        unsafe extern "C" fn(userdata: *mut c_void, path: *const c_char, cursor: u64) -> c_int,
+    >,
 }
 
 unsafe extern "C" {
@@ -100,6 +105,12 @@ unsafe extern "C" {
     /// 0 = mid-run fence park, 1 = resident pass-boundary park (read inside
     /// the fence callback to pick the right mirror-rollback target).
     pub fn oxipresso_xetex_fence_park_kind() -> u64;
+    /// P0 fast-resume: name the file whose reads may park as the idle
+    /// checkpoint, and the cursor the next edit is expected at/after.
+    pub fn oxipresso_xetex_set_fence_target(path: *const c_char, cursor: u64);
+    /// Flag that an edit is queued but not yet consumed: mid-pass reads of
+    /// the edited file then fire the fence so the edit can be absorbed.
+    pub fn oxipresso_xetex_set_edit_pending(pending: c_int);
     /// Hang-triage counters: resident pass-boundary parks and non-format
     /// reads, cumulative while resident mode is enabled.
     pub fn oxipresso_xetex_resident_debug_counts(parks: *mut u64, reads: *mut u64);
