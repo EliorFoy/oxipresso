@@ -19,6 +19,9 @@ pub type FT_GlyphSlot = *mut c_void;
 pub const FT_LOAD_DEFAULT: c_int = 0;
 pub const FT_LOAD_NO_BITMAP: c_int = 0x8;
 pub const FT_LOAD_NO_HINTING: c_int = 0x2;
+/// FT_LOAD_TARGET_(FT_RENDER_MODE_LIGHT): vertical-only hinting — sharp
+/// stems at text sizes without the full autohinter's cost or distortion.
+pub const FT_LOAD_TARGET_LIGHT: c_int = 0x1_0000;
 pub const FT_RENDER_MODE_NORMAL: c_uint = 0;
 pub const FT_PIXEL_MODE_MONO: u8 = 1;
 pub const FT_PIXEL_MODE_GRAY: u8 = 2;

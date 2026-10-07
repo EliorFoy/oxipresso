@@ -114,7 +114,11 @@ pub struct XdvGlyphRenderBackend {
     render_misses: std::cell::Cell<usize>,
 }
 
-const PAGE_CACHE_CAPACITY: usize = 64;
+/// Rendered-page cache entries. Each entry is a full RGBA canvas — at
+/// display-matched densities (2x DPI scaling, zoom) a page can reach
+/// ~15MB, so the cap stays small; 8 covers a typical document per zoom
+/// level and bounds worst-case memory around ~120MB.
+const PAGE_CACHE_CAPACITY: usize = 8;
 
 struct GrayBitmap {
     left: i64,
@@ -442,15 +446,16 @@ impl XdvGlyphRenderBackend {
             // outlines and 1bpp MONO strikes) render crisper from hinted
             // outlines at ANY density, and skip the per-glyph MONO
             // expansion. The DEFAULT retry covers bitmap-only fonts.
-            // NO_HINTING: the full autohinter costs 5-10ms on a complex CJK
-            // glyph (a 2500-glyph page = seconds per re-render); unhinted
-            // grayscale AA at these densities is what mainstream viewers
-            // show for CJK anyway. The bitmap-only retry keeps coverage.
-            let mut status = ft::FT_Load_Glyph(
-                face,
-                glyph_index,
-                ft::FT_LOAD_NO_HINTING | ft::FT_LOAD_NO_BITMAP,
-            );
+            // Hinting is size-selective: small text (≤22 px) gets LIGHT
+            // vertical hinting (sharp stems, ~1ms/glyph), display-size
+            // glyphs skip hinting entirely — the full autohinter costs
+            // 5-10ms on a complex CJK glyph and adds nothing at that size.
+            let load_flags = if size_px <= 22 {
+                ft::FT_LOAD_TARGET_LIGHT | ft::FT_LOAD_NO_BITMAP
+            } else {
+                ft::FT_LOAD_NO_HINTING | ft::FT_LOAD_NO_BITMAP
+            };
+            let mut status = ft::FT_Load_Glyph(face, glyph_index, load_flags);
             let t_load = t0.elapsed();
             if status != 0 {
                 status = ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT);
@@ -552,6 +557,14 @@ impl XdvGlyphRenderBackend {
         })?);
         *self.parsed.borrow_mut() = Some((hash, document.clone()));
         Ok(document)
+    }
+
+    /// The page's dimensions in points (from the parsed XDV), for callers
+    /// that need to match the render density to the display.
+    pub fn page_size_pt(&self, artifact: &DocumentArtifact, page: usize) -> Option<(f64, f64)> {
+        let document = self.parse_document(artifact).ok()?;
+        let page_data = document.pages.get(page)?;
+        Some((page_data.width_pt, page_data.height_pt))
     }
 }
 

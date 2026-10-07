@@ -68,6 +68,7 @@ slint::slint! {
         in property <int> page-count;
         in-out property <float> zoom: 1.0;
         in property <bool> editor-open: true;
+        in-out property <length> preview-width <=> flick.width;
         in property <bool> log-open: false;
         in property <float> page-ratio: 1.414;
         callback editor-edited();
@@ -196,6 +197,9 @@ slint::slint! {
                     }
                 }
             }
+            // The preview pane's width (logical px): the render worker
+            // matches the page bitmap to the on-screen physical pixels so
+            // the preview is crisp instead of upscaled-blurry.
             // ── 日志面板（折叠） ──────────────────────────────────
             Rectangle {
                 height: log-open ? 150px : 0px;
@@ -519,9 +523,15 @@ fn main() {
     // (len, mtime) — an equal-length rebuild still updates — page-request
     // handling for the toolbar navigation, and pixel buffers to the UI.
     let (page_req_tx, page_req_rx) = std::sync::mpsc::channel::<usize>();
+    // Target bitmap width in physical pixels (f32 bits): pane width × zoom ×
+    // the window's scale factor. Matching the bitmap to the display makes the
+    // preview pixel-crisp instead of upscaled-blurry at DPI scaling / zoom.
+    let render_density: std::sync::Arc<std::sync::atomic::AtomicU32> =
+        std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     {
         let artifact_path = artifact_path.clone();
         let ui_tx = ui_tx.clone();
+        let render_density = render_density.clone();
         std::thread::spawn(move || {
             let backend = XdvGlyphRenderBackend::new(Box::new(
                 KpseFontResolver::detect().unwrap_or_else(|| KpseFontResolver::dummy()),
@@ -531,6 +541,7 @@ fn main() {
             let mut artifact_version: u64 = 0;
             let mut requested_page: usize = 0;
             let mut rendered: Option<(u64, usize)> = None;
+            let mut extra_scale: f64 = 1.0;
             loop {
                 // Artifact change detection (len + mtime).
                 let meta = std::fs::metadata(&artifact_path).ok();
@@ -559,6 +570,27 @@ fn main() {
                         rendered = None; // force a re-render of the page
                     }
                 }
+                // Display-matched density: the UI publishes the on-screen
+                // target width; re-render when it moves by more than 2%.
+                let target_w =
+                    f32::from_bits(render_density.load(std::sync::atomic::Ordering::Relaxed));
+                if target_w > 0.0
+                    && let Some((w_pt, _)) = backend.page_size_pt(
+                        &DocumentArtifact {
+                            kind: ArtifactKind::Xdv,
+                            bytes: artifact_bytes.clone(),
+                            source_name: None,
+                        },
+                        requested_page,
+                    )
+                {
+                    let ideal: f64 = (target_w as f64) / (w_pt * backend.px_per_pt);
+                    let ideal = ideal.clamp(0.5, 4.0);
+                    if (ideal - extra_scale).abs() / extra_scale.max(0.001) > 0.02 {
+                        extra_scale = ideal;
+                        rendered = None;
+                    }
+                }
                 // Page requests from the toolbar: keep the latest.
                 let mut req = None;
                 while let Ok(p) = page_req_rx.try_recv() {
@@ -580,7 +612,8 @@ fn main() {
                         bytes: artifact_bytes.clone(),
                         source_name: Some(artifact_path.to_string_lossy().into_owned()),
                     };
-                    match backend.render_page(&artifact, requested_page) {
+                    match backend.render_page_scaled(&artifact, requested_page, extra_scale as f32)
+                    {
                         Ok(page) => {
                             let ratio = if page.width > 0 {
                                 page.height as f32 / page.width as f32
@@ -616,7 +649,7 @@ fn main() {
                     }
                     rendered = Some((artifact_version, requested_page));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(80));
+                std::thread::sleep(std::time::Duration::from_millis(15));
             }
         });
     }
@@ -625,9 +658,10 @@ fn main() {
     let timer = slint::Timer::default();
     {
         let ui_handle = ui.clone_strong();
+        let render_density = render_density.clone();
         timer.start(
             slint::TimerMode::Repeated,
-            std::time::Duration::from_millis(120),
+            std::time::Duration::from_millis(30),
             move || {
                 let mut log_tail: Option<String> = None;
                 let mut page_event: Option<(SharedPixelBuffer, usize, String)> = None;
@@ -641,6 +675,16 @@ fn main() {
                         }
                     }
                 }
+                // Publish the on-screen target width (logical pane × zoom ×
+                // DPI scale) so the render worker draws at physical-pixel
+                // density instead of upscaling a 96-dpi bitmap.
+                let target = ui_handle.get_preview_width()
+                    * ui_handle.get_zoom()
+                    * ui_handle.window().scale_factor();
+                render_density.store(
+                    (target.max(0.0) as f32).to_bits(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 if let Some(tail) = log_tail {
                     ui_handle.set_engine_log(SharedString::from(tail.as_str()));
                 }
