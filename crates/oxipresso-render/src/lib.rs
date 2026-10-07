@@ -38,6 +38,26 @@ pub struct RenderedPage {
     pub pixels_rgba: Vec<u8>,
 }
 
+/// Encode a rendered page as RGBA PNG bytes (for file-based preview
+/// consumers: the editor client and the VSCode extension watch a pages
+/// directory instead of linking this crate).
+#[cfg(feature = "freetype")]
+pub fn encode_page_png(page: &RenderedPage) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, page.width, page.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| EngineError::new(format!("png header failed: {e}")))?;
+        writer
+            .write_image_data(&page.pixels_rgba)
+            .map_err(|e| EngineError::new(format!("png data failed: {e}")))?;
+    }
+    Ok(out)
+}
+
 pub trait RenderBackend {
     fn page_count(&self, artifact: &DocumentArtifact) -> Result<usize>;
     fn render_page(&self, artifact: &DocumentArtifact, page: usize) -> Result<RenderedPage>;

@@ -23,7 +23,7 @@ fn pause_if_interactive() {
 #[cfg(feature = "freetype")]
 fn run_render_page(args: &[String]) -> Result<(), String> {
     let mut xdv: Option<String> = None;
-    let mut page: usize = 1;
+    let mut page: Option<usize> = None;
     let mut out: Option<String> = None;
     let mut scale: f32 = 1.5;
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
@@ -53,11 +53,17 @@ fn run_render_page(args: &[String]) -> Result<(), String> {
                     .ok_or_else(|| "render-page: --page needs a number".to_string())?;
             }
             other if xdv.is_none() => xdv = Some(other.to_string()),
+            other if page.is_none() => {
+                page = Some(other.parse().map_err(|_| {
+                    format!("render-page: invalid page number {other}")
+                })?);
+            }
             other if out.is_none() => out = Some(other.to_string()),
             other => return Err(format!("render-page: unexpected argument {other}")),
         }
     }
     let xdv = xdv.ok_or_else(|| "render-page: missing the XDV path".to_string())?;
+    let page = page.ok_or_else(|| "render-page: missing the page number".to_string())?;
     let out = out.ok_or_else(|| "render-page: missing the PNG output path".to_string())?;
 
     use oxipresso_engine_api::{ArtifactKind, DocumentArtifact};

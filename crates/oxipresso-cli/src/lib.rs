@@ -10,6 +10,7 @@ use oxipresso_engine_api::{EngineIo, OutputEvent, RestartPolicy, RootDocument, T
 use oxipresso_engine_external::ExternalEngine;
 use oxipresso_engine_xetex::XetexEngine;
 use oxipresso_render::AutoRenderBackend;
+use oxipresso_render::RenderBackend as RenderBackendTrait;
 #[cfg(feature = "freetype")]
 use oxipresso_render::{
     FontResolver as GlyphFontResolver, ImageLoader as GlyphImageLoader, XdvGlyphRenderBackend,
@@ -322,6 +323,15 @@ pub struct OxipressoApp {
     resident_last_bytes: std::collections::HashMap<String, Vec<u8>>,
     /// Sequence number of the last submitted edit (stale-snapshot filter).
     resident_last_seq: u64,
+    /// When `OXIPRESSO_PAGES_OUT=<dir>` is set: after every pass, render all
+    /// pages to `<dir>/page-<n>.png` (skipping unchanged ones) and write a
+    /// manifest the editor integrations (VSCode) watch. `None` disables it.
+    pages_out: Option<std::path::PathBuf>,
+    pages_generation: u64,
+    pages_last_hashes: std::collections::HashMap<usize, u64>,
+    /// Source line of the last submitted edit (1-based), for the pages
+    /// manifest's editor->preview sync hint.
+    resident_last_edit: Option<(String, usize)>,
     /// The freshest artifact a resident pass produced (postamble-pending
     /// until the session finishes). `current_artifact` serves it while a
     /// session is live.
@@ -400,6 +410,11 @@ impl OxipressoApp {
             resident_read_files: None,
             resident_last_bytes: std::collections::HashMap::new(),
             resident_last_seq: 0,
+            pages_out: std::env::var_os("OXIPRESSO_PAGES_OUT")
+                .map(std::path::PathBuf::from),
+            pages_generation: 0,
+            pages_last_hashes: std::collections::HashMap::new(),
+            resident_last_edit: None,
         }
     }
 
@@ -572,8 +587,16 @@ impl OxipressoApp {
         if let Some(artifact) = &artifact {
             self.persist_bytes_if_requested("OXIPRESSO_ARTIFACT_OUT", &artifact.bytes)?;
         }
+        let synctex = snap.synctex_artifact();
         if let Some(synctex) = &synctex {
             self.persist_bytes_if_requested("OXIPRESSO_SYNCTEX_OUT", &synctex.bytes)?;
+        }
+        // OXIPRESSO_PAGES_OUT: render every page to PNG and write the
+        // manifest/line-map the editor integrations (VSCode) watch.
+        if let Some(dir) = self.pages_out.clone()
+            && let Some(artifact) = &artifact
+        {
+            self.write_pages_out(&dir, artifact);
         }
         // Debugging hook: persist EVERY output file of the pass (aux/log/
         // out/xdv...) so an oracle run can be seeded with the exact aux the
@@ -673,6 +696,17 @@ impl OxipressoApp {
             Some(previous) => Self::first_diff(previous, &bytes),
             None => 0,
         };
+        // The edited source line (1-based) for the pages manifest's
+        // editor->preview hint. The byte diff can land inside a multi-byte
+        // UTF-8 char — the lossy prefix's newline count is still exact.
+        if self.resident_last_bytes.contains_key(path) {
+            let boundary = offset.min(bytes.len() as u64) as usize;
+            let prefix = String::from_utf8_lossy(&bytes[..boundary]);
+            self.resident_last_edit = Some((
+                path.to_string(),
+                1 + prefix.matches('\n').count(),
+            ));
+        }
         self.resident_last_bytes
             .insert(path.to_string(), bytes.clone());
         eprintln!(
@@ -717,6 +751,143 @@ impl OxipressoApp {
             index += 1;
         }
         index as u64
+    }
+
+    /// FNV-1a over the rendered pixels: the identity check that skips
+    /// re-encoding unchanged pages.
+    fn fnv64(data: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in data {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+        hash
+    }
+
+    /// Minimal JSON string escaping (the manifests only carry generated
+    /// file names and the document path).
+    fn json_escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len() + 8);
+        for ch in text.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// `OXIPRESSO_PAGES_OUT`: render every page of `artifact` into `dir` as
+    /// `page-<n>.png` (unchanged pages are not re-encoded) and atomically
+    /// write `manifest.json` + `lines.json` — the editor integrations (the
+    /// VSCode extension) watch these to refresh the preview and follow the
+    /// edited line.
+    fn write_pages_out(
+        &mut self,
+        dir: &std::path::Path,
+        artifact: &oxipresso_engine_api::DocumentArtifact,
+    ) {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+        self.pages_generation += 1;
+        let count = self.renderer.page_count(artifact).unwrap_or(0);        let mut files = Vec::new();
+        let mut page_dims: Option<(u32, u32)> = None;
+        for index in 0..count {
+            let rendered = match self
+                .renderer
+                .render_page_scaled(artifact, index, 2.0)
+            {
+                Ok(rendered) => rendered,
+                Err(_) => continue,
+            };
+            if page_dims.is_none() {
+                page_dims = Some((rendered.width, rendered.height));
+            }
+            let hash = Self::fnv64(&rendered.pixels_rgba);
+            let file = format!("page-{}.png", index + 1);
+            if self.pages_last_hashes.get(&index) != Some(&hash) {
+                match oxipresso_render::encode_page_png(&rendered) {
+                    Ok(bytes) => {
+                        let tmp = dir.join(format!(".page-{}.tmp", index + 1));
+                        if std::fs::write(&tmp, &bytes).is_ok() {
+                            let _ = std::fs::rename(&tmp, dir.join(&file));
+                            self.pages_last_hashes.insert(index, hash);
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            files.push(file);
+        }
+        // The manifest: what the integration needs to redraw + follow.
+        let (edit_line, edit_page) = self
+            .resident_last_edit
+            .as_ref()
+            .and_then(|(path, line)| {
+                self.synctex
+                    .as_ref()
+                    .and_then(|doc| doc.forward_search_path(path, *line))
+                    .map(|hit| (*line, hit.page))
+            })
+            .unwrap_or((0, 0));
+        let files_json = files
+            .iter()
+            .map(|f| format!("\"{}\"", f))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (page_w, page_h) = page_dims.unwrap_or((0, 0));
+        let manifest = format!(
+            "{{\"generation\":{},\"pages\":{},\"pageWidth\":{},\"pageHeight\":{},\"editLine\":{},\"editPage\":{},\"files\":[{}]}}",
+            self.pages_generation, files.len(), page_w, page_h, edit_line, edit_page, files_json
+        );
+        let manifest_tmp = dir.join(".manifest.tmp");
+        if std::fs::write(&manifest_tmp, manifest).is_ok() {
+            let _ = std::fs::rename(&manifest_tmp, dir.join("manifest.json"));
+        }
+        // The line -> page breakpoints for the root input (monotonic): the
+        // editor maps its cursor line through this without linking the
+        // synctex parser.
+        let root_name = self.root.root_name.clone();
+        let total_lines = self
+            .resident_last_bytes
+            .get(&root_name)
+            .map(|bytes| 1 + bytes.iter().filter(|&&b| b == b'\n').count())
+            .unwrap_or(0);
+        let mut breakpoints = Vec::new();
+        if let Some(doc) = self.synctex.as_ref() {
+            let mut last_page = 1usize;
+            breakpoints.push((1, last_page));
+            for line in 1..=total_lines.min(5000) {
+                if let Some(hit) = doc.forward_search_path(&root_name, line) {
+                    if hit.page > last_page {
+                        last_page = hit.page;
+                        breakpoints.push((line, last_page));
+                    }
+                }
+            }
+        }
+        let pairs = breakpoints
+            .iter()
+            .map(|(line, page)| format!("[{line},{page}]"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let lines_json = format!(
+            "{{\"input\":\"{}\",\"breakpoints\":[{}]}}",
+            Self::json_escape(&root_name),
+            pairs
+        );
+        let lines_tmp = dir.join(".lines.tmp");
+        if std::fs::write(&lines_tmp, lines_json).is_ok() {
+            let _ = std::fs::rename(&lines_tmp, dir.join("lines.json"));
+        }
     }
 
     pub fn handle_editor_line(&mut self, line: &str) -> Result<Vec<EditorMessage>, String> {
