@@ -7,12 +7,16 @@ use std::{cell::RefCell, fmt};
 pub mod ft;
 #[cfg(feature = "freetype")]
 pub mod glyph_backend;
+#[cfg(feature = "freetype")]
+pub mod kpse_font;
 pub mod xdv;
 
 #[cfg(feature = "freetype")]
 pub use glyph_backend::{
     DecodedImage, FontResolver, ImageLoader, XdvGlyphRenderBackend, parse_afm_charmetrics,
 };
+#[cfg(feature = "freetype")]
+pub use kpse_font::KpseFontResolver;
 
 #[cfg(feature = "pdfium")]
 use pdfium_render::prelude::*;

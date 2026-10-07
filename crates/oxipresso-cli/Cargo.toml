@@ -13,10 +13,6 @@ name = "oxipresso-viewer"
 path = "src/viewer.rs"
 required-features = ["gui"]
 
-[[bin]]
-name = "oxipresso-editor-client"
-path = "src/bin/editor_client.rs"
-required-features = ["slint", "freetype"]
 
 [features]
 default = []

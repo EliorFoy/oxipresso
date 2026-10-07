@@ -1,178 +1,181 @@
 # Oxipresso
 
-Oxipresso is a Rust-first reimplementation of
-[TeXpresso](https://github.com/let-def/texpresso) — a live TeX previewer that
-typesets your document on every keystroke and displays the rendered pages in
-real time.
+**中文** · [English](#english)
+
+一个用 Rust 重实现的 **TeXpresso 式增量 TeX 预览服务器**：XeTeX 引擎常驻内存，通过检查点围栏实现毫秒级增量重排，配合流式页面推送，让 LaTeX 文档在编辑时近乎实时地刷新预览。
+
+> 本项目是 [TeXpresso](https://github.com/let-def/texpresso)（Frédéric Bour，MIT 协议）的 Rust 重实现。架构设计、编辑器协议与增量模型均以原项目为参考；引擎部分在构建时直接编译原项目的 XeTeX 引擎源码。
+
+## 特性
+
+- **常驻会话增量重排**：引擎在检查点围栏驻留，编辑到来时从最近的合法检查点续排。S0（格式加载后）+ 自适应编辑点中段围栏两级检查点；文档尾部编辑实测 **52–80ms**，排版进行中的新编辑会被直接吸收进当前趟（一次击键爆发只花一趟排版）。
+- **流式页面推送**：排版进行中每 250ms 推送已排好的页面，预览端即时上屏，不必等整篇排完。
+- **XDV 增量渲染**：完整 XDV/DVI 解析器；经典 Type1 字体经 dvips map → .enc 编码向量正确解析（LM 数学字体、rm-* 复刻字体），原生 CJK 字体走字形索引；页面 digest 缓存让未变页面零成本复用；渲染密度自动匹配显示 DPI。
+- **SyncTeX 双向同步**：正向（源码行 → 页面）与逆向（点击 → 源码位置）；支持 TeXpresso 的 `/<tag>` 扩展记录。
+- **TeXpresso 兼容编辑器协议**：S-expression 与 JSON 双格式，全部动词。
+- **TeX 发行版解析**：kpsewhich（TeX Live / TinyTeX）+ 持久化解析缓存；Tectonic 本地 bundle；原生文件监听。
+
+## 实测性能
+
+在 23KB 中文论文（ctex + 12 宏包，7 页）上：
+
+| 操作 | 耗时 |
+| --- | --- |
+| 冷启动（格式加载 + 全文排版） | ≈ 2.5s |
+| 文档尾部热编辑（快速续排） | **52–80ms** |
+| 排版中的编辑吸收 | 0（并入当前趟） |
+| 页面重渲染（缓存命中 / 内容变化） | 4ms / ~90ms |
+| 首页上屏（编辑文档开头，流式） | ~0.5s |
+
+## 架构
+
+| crate | 职责 |
+| --- | --- |
+| `oxipresso-engine-xetex-sys` | XeTeX FFI shim：检查点围栏、池快照、驻留 pass 循环 |
+| `oxipresso-engine-xetex` | 安全封装：驻留会话、编辑注入、快速续排、流式快照 |
+| `oxipresso-render` | XDV 解析 + FreeType 字形渲染（map/.enc 字体映射、密度匹配、页面缓存） |
+| `oxipresso-synctex` | SyncTeX 解析与正/反向查询 |
+| `oxipresso-editor-protocol` | 编辑器 wire 协议（sexp/JSON） |
+| `oxipresso-vfs` | 编辑器缓冲虚拟文件系统 |
+| `oxipresso-cli` | wire 服务器（stdio）、驻留管线、`-gui` 宿主 |
+
+GUI 客户端在独立仓库：[oxipresso-editor-client](https://github.com/EliorFoy/oxipresso-editor-client)。
+
+## 构建
+
+**纯 Rust stub 模式（零外部依赖）**：
+
+```bash
+cargo build --release -p oxipresso-cli
+```
+
+**真实引擎模式（增量预览需要）**：
+
+前置条件：vcpkg（freetype/harfbuzz/icu 等，Windows 用 x64-windows-static-md）、TeX Live / TinyTeX（kpsewhich 在 PATH）、[TeXpresso](https://github.com/let-def/texpresso) 源码检出（提供 XeTeX 引擎）。
+
+```powershell
+$env:VCPKG_ROOT = "F:\code\vcpkg"
+$env:OXIPRESSO_USE_REAL_XETEX = "1"
+$env:TEXPRESSO_SRC = "F:\code\texpresso-src"
+cargo build --release -p oxipresso-cli --features freetype
+```
+
+首次运行在 `OXIPRESSO_XETEX_FORMAT`（默认 `texpresso.fmt`）生成格式文件。
+
+## 使用
+
+```bash
+oxipresso.exe -stream paper.tex
+```
+
+推荐配合 GUI 客户端：把 `oxipresso.exe` 与 `oxipresso-editor-client.exe` 放同一目录，运行客户端即可。
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `OXIPRESSO_RESIDENT=1` | 启用常驻会话（增量热编辑） |
+| `OXIPRESSO_ARTIFACT_OUT=<file>` | 每趟 pass 后写出的 XDV 产物 |
+| `OXIPRESSO_SYNCTEX_OUT=<file>` | 每趟 pass 后写出的 SyncTeX sidecar |
+| `OXIPRESSO_XETEX_FORMAT=<file>` | 引擎格式文件 |
+
+## 与原项目的关系
+
+[TeXpresso](https://github.com/let-def/texpresso) 证明了"编辑即所见"的 LaTeX 预览是可能的：引擎进程在每个输入读取围栏上 fork，写时复制快照让重放几乎零成本。本项目用 Rust 重实现该架构：协议、VFS、渲染、平台层全部为 Rust 原生实现，引擎通过 FFI 复用原项目的 XeTeX 源码，并把 fork/COW 模型改写为跨平台的检查点围栏 + 流式推送。设计文档见 `docs-latency-design.md`。
+
+衷心感谢 Frédéric Bour 与 TeXpresso 的贡献者们。
+
+## 许可证
+
+本仓库的 Rust 代码以 [MIT](LICENSE) 协议发布。注意：以 `OXIPRESSO_USE_REAL_XETEX=1` 构建的二进制静态包含了 TeXpresso/XeTeX 引擎源码（GPL-2.0-or-later 及 XeTeX 例外条款），此类二进制的分发需遵循相应 GPL 条款；纯 stub 构建不包含任何引擎代码。
+
+---
+
+<a id="english"></a>
+
+# Oxipresso (English)
+
+A **TeXpresso-style incremental TeX preview server**, reimplemented in Rust: the XeTeX engine stays resident in memory, checkpoint fences make re-typesetting after an edit a millisecond-scale operation, and pages stream to the preview as they are shipped — LaTeX editing feels live.
+
+> This project is a Rust reimplementation of [TeXpresso](https://github.com/let-def/texpresso) (Frédéric Bour, MIT). The architecture, editor protocol, and incremental model follow the original; the engine is built from TeXpresso's XeTeX sources at compile time.
 
 ## Features
 
-- **Real XeTeX engine**: embeds the actual TeXpresso/XeTeX C engine via FFI,
-- **Checkpoint hot rebuilds (resident passes)**: with `OXIPRESSO_RESIDENT=1` and a prebuilt format, editor changes restore the engine's S0 checkpoint and re-typeset in one pass without reloading the 22 MB format — measured ~2.7x faster than a full rebuild (~170-190ms vs ~496ms); the read set of each pass skips rebuilds for edits the engine never saw.
-- **Package providers**: TeX Live via `kpsewhich` (default, with a persistent resolution cache) or `-tectonic` over a local Tectonic-style bundle directory (`OXIPRESSO_TECTONIC_BUNDLE`; network bundles are not supported).
-  with automatic format bootstrap from `xelatex.ini` and TeX Live package
-  resolution through `kpsewhich`.
-- **Real glyph rendering**: XDV pages are rendered with FreeType-rasterized
-  glyphs, including color specials (`rgb`/`gray`/`cmyk`/`hsb`), the slant/extend/
-  embolden transform trio, and native OTF/Type1 font lookup from the TeX
-  distribution.
-- **Images**: `pdf:image` specials from `\includegraphics` and `\XeTeXpicfile`
-  are parsed, PNGs decoded, and composited onto pages (alpha blending); editing
-  an image in place correctly invalidates the cached render.
-- **Live preview GUI**: `-gui` runs the engine, an egui window, and the editor
-  wire (stdin/stdout) in one process — the same architecture as the original.
-- **Editor theme**: a `(theme bg fg)` command sets the preview page background and
-  default ink color (converted like the original), repainting cached pages.
-- **Bidirectional SyncTeX**: forward search (source → PDF page) and reverse
-  search (PDF click → source line) with sidecar capture and parsing.
-- **Editor protocol**: TeXpresso-compatible S-expression and JSON wire protocol
-  with `open`/`change`/`lookup-file`/`input-file`/`truncate`/`append`/`flush`
-  and streamed `out`/`log` info buffers (plus `pause`/`resume`/`rescan`).
-- **Interactive incremental rebuilds**: a format cache, a persistent `kpsewhich`
-  resolution cache (≈25× faster warm rebuilds: 15.5s → ~600ms), `read_files`-based
-  rebuild skipping (edits to files the engine never read cost nothing), and a
-  content-hash page cache so unchanged XDV pages are reused — the preview stays
-  responsive across edits.
-- **Cross-platform architecture**: Rust owns the protocol, VFS, engine
-  abstraction, platform layer, and rendering; the C engine is isolated behind
-  a stable FFI shim. Windows is the primary tested target; Linux and macOS
-  seams are preserved, and the pure-Rust core crates fully build (codegen to
-  rlibs, not just type-check) for both `x86_64-unknown-linux-musl` and
-  `x86_64-unknown-linux-gnu`.
+- **Resident incremental re-typesetting**: the engine parks at checkpoint fences; edits resume from the nearest legal checkpoint. Tail edits measure **52–80ms**, and edits arriving mid-pass are absorbed into the running pass (a typing burst costs one pass).
+- **Streaming partial snapshots**: pages are pushed every 250ms while the pass runs, so the preview updates progressively.
+- **Incremental XDV rendering**: a full XDV/DVI parser; classic Type1 fonts resolve through dvips map → `.enc` encoding vectors (LM math fonts, `rm-*` replicas), native CJK fonts by glyph index; unchanged pages are reused by content digest; render density matches the display DPI.
+- **Bidirectional SyncTeX**: forward (source line → page) and reverse (click → source position), including TeXpresso's `/<tag>` extension records.
+- **TeXpresso-compatible editor protocol**: S-expression and JSON, all verbs.
+- **TeX distribution support**: kpsewhich with a persistent resolution cache, local Tectonic bundles, a native file watcher.
 
-## Quick start
+## Measured performance
 
-### Live preview (real engine)
+On a 23KB Chinese paper (ctex + 12 packages, 7 pages):
 
-```powershell
-# One-time: build the real engine (requires vcpkg + texpresso-src)
-$env:OXIPRESSO_USE_REAL_XETEX = "1"
-$env:TEXPRESSO_SRC = "F:\code\texpresso-src"
-$env:VCPKG_ROOT = "F:\code\vcpkg"
-
-# Live preview window
-cargo run -p oxipresso-cli --features gui,freetype --bin oxipresso -- -gui doc.tex
-```
-
-The window shows the typeset pages. Your editor sends protocol commands over
-stdin; every `change` triggers a rebuild and the window refreshes automatically.
-Reverse SyncTeX clicks emit source locations over stdout.
-
-### Headless (editor wire only)
-
-```powershell
-cargo run -p oxipresso-cli --bin oxipresso -- -stream -test-initialize doc.tex
-```
-
-### Reference editor client (Slint)
-
-`oxipresso-editor-client` is a reference implementation of the editor side of
-the wire — the integration contract an emacs/vscode plugin implements — as a
-small Slint GUI. The engine runs as a child process; the client speaks the
-protocol over stdin/stdout exactly like TeXpresso's plugins: the left pane
-edits the document ("Send change" issues the whole-buffer `change` an editor
-save produces), the right pane shows the engine's notices (truncate/append/
-flush, input-file/lookup-file) and the mirrored `out` info buffer.
-
-```powershell
-cargo build -p oxipresso-cli --features slint
-cargo run -p oxipresso-cli --features slint --bin oxipresso-editor-client doc.tex
-# JSON wire form: add --json
-```
-
-The same contract is pinned headlessly by the cargo test
-`editor_wire_selftest_against_shipped_binary` (part of `cargo test
---workspace`): it spawns the shipped `oxipresso` binary from outside the Rust
-process and drives initialize → change-rebuild → pause/resume, asserting the
-message shapes.
-
-### Resident hot rebuilds (checkpoint-incremental)
-
-With `OXIPRESSO_RESIDENT=1` (real engine + a prebuilt format file), editor
-changes restore the engine's S0 checkpoint and re-typeset in a single pass
-without reloading the 22 MB format — measured ~2.7x faster than a full
-rebuild (`~170-190ms` vs `~496ms` on the simple fixture). Enable it on the
-wire exactly like above; the binary handles the rest.
-
-### PDF rendering (PDFium)
-
-```powershell
-cargo run -p oxipresso-cli --features gui,pdfium --bin oxipresso -- -gui doc.tex
-```
+| Operation | Latency |
+| --- | --- |
+| Cold start (format load + full typeset) | ≈ 2.5s |
+| Hot edit near the document tail (fast resume) | **52–80ms** |
+| Edits absorbed mid-pass | 0 (joined the running pass) |
+| Page re-render (cache hit / changed content) | 4ms / ~90ms |
+| First page on screen (edit near the top, streaming) | ~0.5s |
 
 ## Architecture
 
-```
-Editor (Emacs/Vim/...)
-  ↕ stdin/stdout (S-expression or JSON)
-┌───────────────────────────────────┐
-│ oxipresso-cli                     │
-│  ├─ editor protocol parser        │
-│  ├─ VFS (editor buffers + disk)   │
-│  ├─ engine (XeTeX via FFI)        │
-│  ├─ SyncTeX parser                │
-│  └─ render backend                │
-│    ├─ XDV glyph (FreeType)        │
-│    ├─ PDF (PDFium)                │
-│    └─ placeholder                 │
-│  └─ egui live preview window      │
-└───────────────────────────────────┘
-```
+| crate | role |
+| --- | --- |
+| `oxipresso-engine-xetex-sys` | XeTeX FFI shim: checkpoint fences, pool snapshots, the resident pass loop |
+| `oxipresso-engine-xetex` | Safe wrappers: resident sessions, edit injection, fast resume, streaming snapshots |
+| `oxipresso-render` | XDV parsing + FreeType glyph rendering (map/.enc mapping, density matching, page caching) |
+| `oxipresso-synctex` | SyncTeX parsing and forward/reverse lookup |
+| `oxipresso-editor-protocol` | The editor wire protocol (sexp/JSON) |
+| `oxipresso-vfs` | Editor-backed virtual file system |
+| `oxipresso-cli` | The wire server (stdio), the resident pipeline, the `-gui` host |
 
-The real XeTeX engine is compiled from a local `texpresso-src` checkout and
-linked statically into the Rust binary via vcpkg dependencies (freetype,
-harfbuzz, graphite2, fontconfig, icu, libpng, zlib).
-
-## Workspace
-
-| Crate | Purpose |
-|-------|---------|
-| `oxipresso-cli` | CLI entry point + live preview GUI |
-| `oxipresso-editor-protocol` | Editor wire protocol (sexp + JSON) |
-| `oxipresso-vfs` | Virtual file system (editor buffers + disk + resolver) |
-| `oxipresso-engine-api` | Engine/VFS traits, `FileResolver`, shared types |
-| `oxipresso-engine-xetex-sys` | C FFI shim (portable stub + real XeTeX engine) |
-| `oxipresso-engine-xetex` | Safe Rust wrapper (bootstrap, SyncTeX, output events, TeX Live resolver) |
-| `oxipresso-engine-external` | External `xelatex` process backend |
-| `oxipresso-platform` | Platform isolation + file watcher |
-| `oxipresso-render` | XDV/DVI parser + FreeType glyph + PNG image renderer + PDF (PDFium) |
-| `oxipresso-synctex` | SyncTeX decoder + forward/reverse lookup |
-| `oxipresso-viewer` | Viewer state model + standalone egui viewer |
-| `oxipresso-testkit` | Shared fixtures and test helpers |
+The GUI client lives in its own repository: [oxipresso-editor-client](https://github.com/EliorFoy/oxipresso-editor-client).
 
 ## Build
 
-```powershell
-# Default (stub engine, no native deps)
-cargo test --workspace
+**Pure-Rust stub mode (no external dependencies)**:
 
-# With real glyph rendering
-cargo test -p oxipresso-render --features freetype
-
-# With GUI
-cargo check -p oxipresso-cli --features gui
-
-# With everything
-cargo check -p oxipresso-cli --features "gui,freetype,pdfium"
-
-# Quality bar (both are expected clean)
-cargo fmt --all --check
-cargo clippy --workspace --all-targets
+```bash
+cargo build --release -p oxipresso-cli
 ```
 
-## Real engine setup
+**Real-engine mode (required for live preview)**:
 
-1. Clone [texpresso](https://github.com/let-def/texpresso) to `F:\code\texpresso-src`.
-2. Install [vcpkg](https://vcpkg.io) and set `VCPKG_ROOT`.
-3. Install the required packages:
-   ```
-   vcpkg install freetype harfbuzz[graphite2,icu] graphite2 fontconfig icu --triplet x64-windows-static-md
-   ```
-4. Build with `OXIPRESSO_USE_REAL_XETEX=1`.
+Prerequisites: vcpkg (freetype/harfbuzz/icu; `x64-windows-static-md` on Windows), TeX Live / TinyTeX on PATH, and a checkout of [TeXpresso](https://github.com/let-def/texpresso) providing the XeTeX engine sources.
 
-The first run bootstraps the TeX format file (`texpresso.fmt`) from
-`xelatex.ini`; subsequent runs load the cached format directly.
+```powershell
+$env:VCPKG_ROOT = "F:\code\vcpkg"
+$env:OXIPRESSO_USE_REAL_XETEX = "1"
+$env:TEXPRESSO_SRC = "F:\code\texpresso-src"
+cargo build --release -p oxipresso-cli --features freetype
+```
+
+The first run generates the engine format at `OXIPRESSO_XETEX_FORMAT` (default `texpresso.fmt`).
+
+## Usage
+
+```bash
+oxipresso.exe -stream paper.tex
+```
+
+Pair it with the GUI client: place `oxipresso.exe` and `oxipresso-editor-client.exe` in the same directory and start the client.
+
+| variable | purpose |
+| --- | --- |
+| `OXIPRESSO_RESIDENT=1` | enable the resident session (incremental hot edits) |
+| `OXIPRESSO_ARTIFACT_OUT=<file>` | the XDV artifact written after every pass |
+| `OXIPRESSO_SYNCTEX_OUT=<file>` | the SyncTeX sidecar written after every pass |
+| `OXIPRESSO_XETEX_FORMAT=<file>` | engine format file |
+
+## Relation to TeXpresso
+
+[TeXpresso](https://github.com/let-def/texpresso) proved that "edit = see" LaTeX previewing is possible: the engine process forks at every input read fence, and copy-on-write snapshots make replay nearly free. This project reimplements that architecture in Rust — protocol, VFS, rendering, and the platform layer are native Rust; the engine is reused through FFI from TeXpresso's XeTeX sources; and the fork/COW model is recast as cross-platform checkpoint fences + streaming pushes. See `docs-latency-design.md` for the design notes.
+
+Heartfelt thanks to Frédéric Bour and the TeXpresso contributors.
 
 ## License
 
-MIT
+The Rust code in this repository is released under the [MIT](LICENSE) license.
+
+Note: binaries built with `OXIPRESSO_USE_REAL_XETEX=1` statically include the TeXpresso/XeTeX engine sources (GPL-2.0-or-later with the XeTeX additional exceptions); distributing such binaries is subject to those GPL terms. Stub-mode builds contain no engine code.
