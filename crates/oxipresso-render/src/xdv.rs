@@ -173,6 +173,10 @@ pub struct XdvFont {
     pub embolden: f64,
     /// Classic fonts only: TFM widths (fix_word) per char code slot.
     pub tfm_widths: Option<Vec<i64>>,
+    /// Classic fonts only: the TFM lookup already ran for this font (the
+    /// widths may legitimately be None when the TFM is unavailable — the
+    /// flag keeps a failed lookup from re-running per glyph).
+    pub tfm_tried: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +347,28 @@ pub fn parse_xdv(bytes: &[u8], tfm_lookup: &mut TfmLookup<'_>) -> Result<XdvDocu
             EOP => {
                 flush_glyphs!();
                 if let Some(finished) = page.take() {
+                    if std::env::var_os("OXI_RENDER_TRACE").is_some() {
+                        static START: std::sync::OnceLock<std::time::Instant> =
+                            std::sync::OnceLock::new();
+                        let start = START.get_or_init(std::time::Instant::now);
+                        let elements: usize = finished.elements.len();
+                        let glyphs: usize = finished
+                            .elements
+                            .iter()
+                            .map(|e| match e {
+                                XdvElement::Glyphs { glyphs, .. } => glyphs.len(),
+                                _ => 0,
+                            })
+                            .sum();
+                        println!(
+                            "[parse-page] page={} elements={} glyphs={} elapsed={:?} pos={}",
+                            finished.page_number,
+                            elements,
+                            glyphs,
+                            start.elapsed(),
+                            reader.pos
+                        );
+                    }
                     pages.push(finished);
                 }
             }
@@ -742,6 +768,7 @@ fn parse_classic_font_def(reader: &mut Reader<'_>, id_size: u8) -> Result<XdvFon
         slant: 0.0,
         embolden: 0.0,
         tfm_widths: None,
+        tfm_tried: false,
     })
 }
 
@@ -785,6 +812,7 @@ fn parse_native_font_def(reader: &mut Reader<'_>) -> Result<XdvFont> {
         slant,
         embolden,
         tfm_widths: None,
+        tfm_tried: false,
     })
 }
 
@@ -910,7 +938,7 @@ fn char_width_dvi(
 ) -> i64 {
     let needs_tfm = fonts
         .get(&font_id)
-        .is_some_and(|font| !font.native && font.tfm_widths.is_none());
+        .is_some_and(|font| !font.native && font.tfm_widths.is_none() && !font.tfm_tried);
     if needs_tfm {
         let name = fonts.get(&font_id).map(|font| font.name.clone());
         let widths = name
@@ -919,6 +947,10 @@ fn char_width_dvi(
             .and_then(|bytes| parse_tfm_widths(&bytes));
         if let Some(existing) = fonts.get_mut(&font_id) {
             existing.tfm_widths = widths;
+            // Mark the lookup DONE even when it failed: a missing TFM must
+            // not re-spawn the resolver (kpsewhich!) for every set_char of
+            // the run — a math page paid ~2ms per glyph, seconds per page.
+            existing.tfm_tried = true;
         }
     }
     let Some(font) = fonts.get(&font_id) else {
@@ -1212,6 +1244,7 @@ mod tests {
                 slant: 0.0,
                 embolden: 0.0,
                 tfm_widths: Some(vec![1_000_000i64; 400]),
+                tfm_tried: false,
             },
         );
         let mut tfm = |_name: &str| -> Option<Vec<u8>> { None };

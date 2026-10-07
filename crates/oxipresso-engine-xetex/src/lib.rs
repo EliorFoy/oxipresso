@@ -98,6 +98,10 @@ pub struct ResidentSnapshot {
     /// byte offset of the edited file (the fast path) instead of replaying
     /// from S0. Observability for latency triage.
     pub resume_cursor: u64,
+    /// True for a mid-pass streaming snapshot (the artifact is a byte
+    /// prefix through the last shipped page). Consumers persist/refresh the
+    /// preview from it but must not treat it as the pass's final output.
+    pub partial: bool,
 }
 
 impl ResidentSnapshot {
@@ -775,6 +779,7 @@ impl XetexEngine {
             fence_cursor: std::cell::Cell::new(0),
             fence_path: std::cell::RefCell::new(String::new()),
             resume_cursor: std::cell::Cell::new(0),
+            last_partial: std::cell::Cell::new(None),
         };
         let callbacks = OxiXetexCallbacks {
             userdata: (&mut callback_state as *mut CallbackState<'_>).cast::<c_void>(),
@@ -841,6 +846,7 @@ impl XetexEngine {
                     read_files: self.read_files.iter().cloned().collect(),
                     edit_seq: state.edit_seq,
                     resume_cursor: state.resume_cursor.get(),
+                    partial: false,
                 });
                 state.resident_boundary_sent = true;
             }
@@ -964,6 +970,8 @@ struct CallbackState<'a> {
     fence_path: std::cell::RefCell<String>,
     /// Cursor of the last FAST resume, surfaced on the next snapshot.
     resume_cursor: std::cell::Cell<u64>,
+    /// Last mid-pass streaming snapshot time (250ms rate limit).
+    last_partial: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 /// Mirror state captured at a checkpoint fence so a replay can roll the
@@ -1153,6 +1161,35 @@ unsafe extern "C" fn callback_append(
             data: data.to_vec(),
         });
         output.extend_from_slice(data);
+        // Streaming preview (P3-lite): the document artifact grows one page
+        // per shipout append — share a PARTIAL snapshot at most every 250ms
+        // so the client's file watcher re-renders the freshly shipped page
+        // while the pass continues. Partials clone (never drain) the
+        // mirrors; the pass-boundary snapshot stays the authoritative one.
+        if path.ends_with(".xdv")
+            && let Some(sender) = &state.resident_snapshots
+            && !data.is_empty()
+        {
+            let now = std::time::Instant::now();
+            let due = state
+                .last_partial
+                .get()
+                .map(|t| now.duration_since(t) >= std::time::Duration::from_millis(250))
+                .unwrap_or(true);
+            if due {
+                state.last_partial.set(Some(now));
+                let _ = sender.send(ResidentSnapshot {
+                    output_events: state.output_events.clone(),
+                    output_bytes: state.output_bytes.clone(),
+                    diagnostics: state.diagnostics.clone(),
+                    io_events: Vec::new(),
+                    read_files: state.read_files.iter().cloned().collect(),
+                    edit_seq: state.edit_seq,
+                    resume_cursor: state.resume_cursor.get(),
+                    partial: true,
+                });
+            }
+        }
     } else {
         eprintln!(
             "[oxi-io] append MIRROR MISS handle={handle} len={len} paths_known={}",
@@ -1379,6 +1416,7 @@ unsafe extern "C" fn callback_fence(userdata: *mut c_void) -> c_int {
                     read_files,
                     edit_seq: state.edit_seq,
                     resume_cursor,
+                    partial: false,
                 });
             }
         }
@@ -2582,10 +2620,17 @@ mod tests {
         });
         // P0.3: each completed pass delivered a snapshot through the channel.
         // Snapshot 1 = pass on edit1 (different document => different XDV);
-        // snapshot 2 = pass on edit2 (== the fresh-run oracle).
-        let snap1 = snap_rx
+        // snapshot 2 = pass on edit2 (== the fresh-run oracle). Streaming
+        // partials (P3-lite) ride the same channel — skip them: the oracle
+        // assertions are about the FINAL per-pass artifacts only.
+        let mut snap1 = snap_rx
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("snapshot for the pass on edit1");
+        while snap1.partial {
+            snap1 = snap_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("snapshot for the pass on edit1");
+        }
         let xdv1 = snap1
             .output_bytes
             .get("simple.xdv")
@@ -2595,9 +2640,14 @@ mod tests {
             xdv1, &oracle,
             "pass on edit1 must differ from the edit2 oracle"
         );
-        let snap2 = snap_rx
+        let mut snap2 = snap_rx
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("snapshot for the pass on edit2");
+        while snap2.partial {
+            snap2 = snap_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("snapshot for the pass on edit2");
+        }
         // The pass snapshot is the DVI stream through the last eop: every
         // shipped page is fully written (dvi_flush runs at eop), but the
         // postamble is only emitted by finalize_dvi_file at session end.
@@ -2718,8 +2768,9 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("snapshot per hot pass");
             // A deferred/background pass can deliver a stale artifact before
-            // the edit's own pass; keep waiting until this edit is consumed.
-            while snap.edit_seq < seq {
+            // the edit's own pass, and streaming partials (P3-lite) ride the
+            // same channel; keep waiting for the edit's own final snapshot.
+            while snap.partial || snap.edit_seq < seq {
                 snap = session
                     .snapshots()
                     .recv_timeout(std::time::Duration::from_secs(60))
@@ -2785,6 +2836,7 @@ mod tests {
             fence_cursor: std::cell::Cell::new(0),
             fence_path: std::cell::RefCell::new(String::new()),
             resume_cursor: std::cell::Cell::new(0),
+            last_partial: std::cell::Cell::new(None),
         };
         state
             .output_bytes

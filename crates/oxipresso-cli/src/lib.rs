@@ -595,6 +595,21 @@ impl OxipressoApp {
                 .recv_timeout(remaining)
                 .map_err(|e| e.to_string());
             match snap {
+                Ok(snap) if snap.partial => {
+                    // Streaming preview (P3-lite): persist the page-prefix
+                    // artifact so the watching client re-renders the freshly
+                    // shipped page while the pass continues; the final
+                    // snapshot still carries the wire stream messages.
+                    if let Some(artifact) = snap.document_artifact(&self.root.root_name) {
+                        let _ = self
+                            .persist_bytes_if_requested("OXIPRESSO_ARTIFACT_OUT", &artifact.bytes);
+                        self.resident_artifact = Some(artifact);
+                    }
+                    eprintln!(
+                        "[gui-flow] partial snapshot persisted seq={} cursor={}",
+                        snap.edit_seq, snap.resume_cursor
+                    );
+                }
                 Ok(snap) if snap.edit_seq >= last_seq => {
                     eprintln!(
                         "[gui-flow] snapshot received seq={} resume_cursor={}",

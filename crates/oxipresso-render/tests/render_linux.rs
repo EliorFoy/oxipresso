@@ -42,7 +42,11 @@ impl oxipresso_render::FontResolver for LinuxResolver {
 
 #[test]
 fn render_linux_page() {
-    let path = std::env::var("HOME").unwrap() + "/demo-linux.xdv";
+    let Some(home) = std::env::var_os("HOME") else {
+        eprintln!("HOME unset (not a Linux host); skipping");
+        return;
+    };
+    let path = home.to_string_lossy().into_owned() + "/demo-linux.xdv";
     if !std::path::Path::new(&path).is_file() {
         eprintln!("demo-linux.xdv not found; skipping");
         return;

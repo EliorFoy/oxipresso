@@ -360,6 +360,15 @@ fn main() {
             let mut last_known_text = String::from_utf8_lossy(&initial).into_owned();
             let mut out_buffer = String::new();
             let mut last_stderr_len = 0usize;
+            // In-flight throttle: the CLI runs ONE hot pass per change and
+            // processes queued changes serially, so a typing burst would cost
+            // one full pass per keystroke. Hold the latest text while a pass
+            // is running (the engine absorbs it into the next one) and send
+            // only after the pass's `(flush)` notice — a burst costs a single
+            // pass. The timeout covers changes that trigger no pass at all
+            // (the read_files rebuild-skip emits no flush).
+            let mut in_flight = false;
+            let mut last_send = std::time::Instant::now();
 
             let send_line = |session: &mut EditorWireSession, line: &str| -> bool {
                 if let Err(error) = session.send_raw(line) {
@@ -406,7 +415,11 @@ fn main() {
                 while let Ok(text) = edit_text_rx.try_recv() {
                     pending_text = Some(text);
                 }
-                if let Some(text) = pending_text.take() {
+                let may_send =
+                    !in_flight || last_send.elapsed() >= std::time::Duration::from_millis(1200);
+                if may_send && let Some(text) = pending_text.take() {
+                    in_flight = true;
+                    last_send = std::time::Instant::now();
                     let old_len = engine_len;
                     engine_len = text.len();
                     last_known_text = text.clone();
@@ -468,6 +481,10 @@ fn main() {
                         }
                         WireNotice::Append { .. } => {}
                         _ => {}
+                    }
+                    // The pass-end marker releases the in-flight throttle.
+                    if matches!(parsed.notice, WireNotice::Flush) {
+                        in_flight = false;
                     }
                     if log.len() > 96 * 1024 {
                         log = log[log.len() - 64 * 1024..].to_string();
@@ -587,21 +604,14 @@ fn main() {
                             ));
                         }
                         Err(error) => {
-                            // Out-of-range page = the artifact shrank; clamp.
-                            if requested_page > 0 {
-                                requested_page = 0;
-                                rendered = None;
-                            } else {
-                                let _ = ui_tx.send(UiEvent::Page(
-                                    SharedPixelBuffer {
-                                        rgba: Vec::new(),
-                                        width: 0,
-                                        height: 0,
-                                    },
-                                    requested_page,
-                                    format!("渲染错误: {error}"),
-                                ));
-                            }
+                            // Out-of-range page: the artifact is a mid-pass
+                            // prefix (streaming preview) or genuinely
+                            // shrank. Keep the current texture and the
+                            // requested page — yanking to page 0 would
+                            // throw the reader out of their position every
+                            // pass. The next artifact version retries.
+                            let _ = error;
+                            rendered = Some((artifact_version, requested_page));
                         }
                     }
                     rendered = Some((artifact_version, requested_page));

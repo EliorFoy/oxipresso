@@ -90,6 +90,10 @@ pub struct XdvGlyphRenderBackend {
     /// Classic Type1 fonts: charcode -> glyph-name table parsed from the
     /// font's AFM (the encoding vector), keyed by font name.
     afm_tables: RefCell<HashMap<String, Option<Rc<HashMap<u32, String>>>>>,
+    /// Classic fonts' TFM bytes, cached per name (positive AND negative):
+    /// the lookup runs during every parse_xdv of a new artifact version and
+    /// each uncached miss spawns the resolver (kpsewhich).
+    tfm_files: RefCell<HashMap<String, Option<Rc<Vec<u8>>>>>,
     glyph_cache: RefCell<HashMap<(String, u32, u32, u32, u64), Option<Rc<GrayBitmap>>>>,
     /// Decoded images keyed by (path, content hash) so an in-place image edit
     /// (same path, different bytes) re-decodes rather than serving a stale one.
@@ -167,6 +171,7 @@ impl XdvGlyphRenderBackend {
             faces: RefCell::new(HashMap::new()),
             font_files: RefCell::new(HashMap::new()),
             afm_tables: RefCell::new(HashMap::new()),
+            tfm_files: RefCell::new(HashMap::new()),
             glyph_cache: RefCell::new(HashMap::new()),
             image_cache: RefCell::new(HashMap::new()),
             parsed: RefCell::new(None),
@@ -235,7 +240,21 @@ impl XdvGlyphRenderBackend {
     }
 
     fn tfm_bytes(&self, name: &str) -> Option<Vec<u8>> {
-        self.resolver.borrow_mut().find_font_file(name, &["tfm"])
+        // Cached per name (positive AND negative): the TFM lookup runs during
+        // parse_xdv for every classic font of every NEW artifact version —
+        // each uncached lookup spawns kpsewhich (~50-100ms on Windows), which
+        // made every hot edit pay ~1.5s of process spawns before rendering.
+        if let Some(cached) = self.tfm_files.borrow().get(name) {
+            return match cached {
+                Some(bytes) => Some(bytes.as_ref().clone()),
+                None => None,
+            };
+        }
+        let found = self.resolver.borrow_mut().find_font_file(name, &["tfm"]);
+        self.tfm_files
+            .borrow_mut()
+            .insert(name.to_string(), found.clone().map(Rc::new));
+        found
     }
 
     /// The classic font's charcode -> glyph-name table from its AFM file
@@ -301,6 +320,12 @@ impl XdvGlyphRenderBackend {
         if let Some(cached) = self.glyph_cache.borrow().get(&cache_key) {
             return cached.clone();
         }
+        if std::env::var_os("OXI_RENDER_TRACE").is_some() {
+            println!(
+                "[glyph-miss] font={} face={} code={} size_px={} transform={transform_key:#x}",
+                font.name, font.face_index, code, size_px
+            );
+        }
         let rendered = self.rasterize_uncached(font, code, size_px).map(Rc::new);
         if std::env::var_os("OXI_DEBUG_CJK").is_some() && rendered.is_none() {
             eprintln!(
@@ -327,9 +352,13 @@ impl XdvGlyphRenderBackend {
         if size_px == 0 {
             return None;
         }
+        let trace = std::env::var_os("OXI_RENDER_TRACE").is_some();
+        let t0 = std::time::Instant::now();
         let face = self.face_for(font).ok()??;
+        let t_face = t0.elapsed();
         unsafe {
             let set_size = ft::FT_Set_Pixel_Sizes(face, 0, size_px);
+            let t_set = t0.elapsed();
             if set_size != 0 && std::env::var_os("OXI_DEBUG_CJK").is_some() {
                 eprintln!(
                     "[cjk-debug] FT_Set_Pixel_Sizes {} {} failed status {set_size}",
@@ -413,11 +442,16 @@ impl XdvGlyphRenderBackend {
             // outlines and 1bpp MONO strikes) render crisper from hinted
             // outlines at ANY density, and skip the per-glyph MONO
             // expansion. The DEFAULT retry covers bitmap-only fonts.
+            // NO_HINTING: the full autohinter costs 5-10ms on a complex CJK
+            // glyph (a 2500-glyph page = seconds per re-render); unhinted
+            // grayscale AA at these densities is what mainstream viewers
+            // show for CJK anyway. The bitmap-only retry keeps coverage.
             let mut status = ft::FT_Load_Glyph(
                 face,
                 glyph_index,
-                ft::FT_LOAD_DEFAULT | ft::FT_LOAD_NO_BITMAP,
+                ft::FT_LOAD_NO_HINTING | ft::FT_LOAD_NO_BITMAP,
             );
+            let t_load = t0.elapsed();
             if status != 0 {
                 status = ft::FT_Load_Glyph(face, glyph_index, ft::FT_LOAD_DEFAULT);
             }
@@ -430,7 +464,9 @@ impl XdvGlyphRenderBackend {
             if ft::FT_Render_Glyph(slot, ft::FT_RENDER_MODE_NORMAL) != 0 {
                 return None;
             }
+            let t_render = t0.elapsed();
             let rendered = ft::read_rendered_bitmap(slot)?;
+            let t_read = t0.elapsed();
             let bitmap = GrayBitmap {
                 left: rendered.left,
                 top: rendered.top,
@@ -444,6 +480,15 @@ impl XdvGlyphRenderBackend {
             let bitmap = apply_extend(bitmap, font.extend);
             let bitmap = apply_slant(bitmap, font.slant);
             let bitmap = apply_embolden(bitmap, font.embolden);
+            if trace && t0.elapsed().as_micros() > 800 {
+                println!(
+                    "[glyph-slow] {} code={} size={} total={:?} face={t_face:?} set={t_set:?} load={t_load:?} render={t_render:?} read={t_read:?}",
+                    font.name,
+                    code,
+                    size_px,
+                    t0.elapsed()
+                );
+            }
             Some(bitmap)
         }
     }
@@ -816,10 +861,13 @@ impl XdvGlyphRenderBackend {
                 "XdvGlyphRenderBackend only accepts XDV/DVI artifacts",
             ));
         }
+        let t_parse = std::time::Instant::now();
         let document = self.parse_document(artifact)?;
+        let t_parse_done = t_parse.elapsed();
         let Some(page_digest) = document.page_digest(page) else {
             return Err(EngineError::new("page index out of range"));
         };
+        let t_digest = t_parse.elapsed();
         let page_data = document
             .pages
             .get(page)
@@ -829,6 +877,7 @@ impl XdvGlyphRenderBackend {
         // file invalidates the cached rendered page even though the XDV bytes
         // (which only reference path + geometry) are unchanged.
         let images = self.load_page_images(page_data);
+        let t_images = t_parse.elapsed();
         let image_salt = images
             .values()
             .fold(0u64, |acc, (hash, _)| acc ^ hash.rotate_left(17));
@@ -871,12 +920,20 @@ impl XdvGlyphRenderBackend {
         let [fg_r, fg_g, fg_b] = self.foreground.get();
         let foreground_packed = ((fg_r as u32) << 16) | ((fg_g as u32) << 8) | (fg_b as u32);
         let mut canvas = vec![0u8; pixel_count];
-        for pixel in canvas.chunks_exact_mut(4) {
-            pixel[0] = bg_r;
-            pixel[1] = bg_g;
-            pixel[2] = bg_b;
-            pixel[3] = 255;
+        // Uniform fill via doubling memcpys: a per-pixel loop over a 6MB
+        // canvas measured ~80ms (the second-largest re-render cost), the
+        // geometric fill is ~1ms.
+        {
+            let pattern = [bg_r, bg_g, bg_b, 255u8];
+            let mut filled = 4;
+            canvas[..4].copy_from_slice(&pattern);
+            while filled < pixel_count {
+                let take = filled.min(pixel_count - filled);
+                canvas.copy_within(..take, filled);
+                filled += take;
+            }
         }
+        let t_canvas = t_parse.elapsed();
 
         // DVI origin: one inch from the top-left corner, y increases downward.
         let origin_px = 72.0 * scale;
@@ -985,6 +1042,17 @@ impl XdvGlyphRenderBackend {
             height,
             pixels_rgba: canvas,
         };
+        if std::env::var_os("OXI_RENDER_TRACE").is_some() {
+            println!(
+                "[page-phases] parse={:?} digest={:?} images={:?} canvas={:?} elements={:?} total={:?}",
+                t_parse_done,
+                t_digest,
+                t_images,
+                t_canvas,
+                t_parse.elapsed(),
+                t_parse.elapsed()
+            );
+        }
         {
             let mut cache = self.page_cache.borrow_mut();
             if cache.len() >= PAGE_CACHE_CAPACITY {
